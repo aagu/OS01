@@ -285,13 +285,13 @@ def _git_revision() -> Tuple[str, bool]:
     try:
         r = subprocess.run(
             ["git", "rev-parse", "HEAD"], cwd=_ROOT,
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, errors="replace", timeout=5,
         )
         if r.returncode == 0 and r.stdout.strip():
             rev = r.stdout.strip()
         d = subprocess.run(
             ["git", "status", "--porcelain"], cwd=_ROOT,
-            capture_output=True, text=True, timeout=5,
+            capture_output=True, text=True, errors="replace", timeout=5,
         )
         if d.returncode == 0:
             dirty = bool(d.stdout.strip())
@@ -303,6 +303,7 @@ def _git_revision() -> Tuple[str, bool]:
 def _write_report(
     archive,
     *,
+    git_snapshot: Tuple[str, bool],
     binary: str,
     profile: str,
     mode: str,
@@ -322,7 +323,7 @@ def _write_report(
     if archive is None or RunReport is None:
         return
     try:
-        rev, dirty = _git_revision()
+        rev, dirty = git_snapshot
         duration_s = max(0.0, time.monotonic() - started_monotonic)
         report = RunReport(
             schema_version=1,
@@ -396,6 +397,7 @@ def run_one(
     timeout_s: float,
     session_factory: Optional[Callable] = None,
     allow_empty: bool = False,
+    git_snapshot: Optional[Tuple[str, bool]] = None,
 ) -> int:
     """Run one binary, archive its report, return its exit contribution.
 
@@ -407,6 +409,8 @@ def run_one(
     """
     if session_factory is None:
         session_factory = ProcessSession
+    if git_snapshot is None:
+        git_snapshot = _git_revision()
 
     bid = binary_id(path)
     argv = [str(path)]
@@ -443,7 +447,7 @@ def run_one(
             except Exception:
                 pass
         _write_report(
-            archive, binary=bid, profile=profile, mode="unknown", argv=argv,
+            archive, git_snapshot=git_snapshot, binary=bid, profile=profile, mode="unknown", argv=argv,
             started_monotonic=started_monotonic, status="ERROR",
             runner_exit_code=130, child_exit_code=None,
             stopped_by_runner=False, errors=["interrupted (Ctrl-C)"],
@@ -458,7 +462,7 @@ def run_one(
                 pass
         print(f"ERROR: {bid}: could not launch {path}: {exc}", file=sys.stderr)
         _write_report(
-            archive, binary=bid, profile=profile, mode="unknown", argv=argv,
+            archive, git_snapshot=git_snapshot, binary=bid, profile=profile, mode="unknown", argv=argv,
             started_monotonic=started_monotonic, status="ERROR",
             runner_exit_code=2, child_exit_code=None, stopped_by_runner=False,
             errors=[f"launch error: {exc}"], exit_status_only=allow_empty,
@@ -508,7 +512,7 @@ def run_one(
         print(f"ERROR: {bid}: {err}", file=sys.stderr)
 
     _write_report(
-        archive, binary=bid, profile=profile, mode=mode, argv=argv,
+        archive, git_snapshot=git_snapshot, binary=bid, profile=profile, mode=mode, argv=argv,
         started_monotonic=started_monotonic, status=status,
         runner_exit_code=code, child_exit_code=rc,
         stopped_by_runner=timed_out, errors=errors,
@@ -525,9 +529,9 @@ def run_one(
 
 
 def _worker_execute(
-    item: Tuple[str, str, str, float, bool],
+    item: Tuple[str, str, str, float, bool, Tuple[str, bool]],
 ) -> Tuple[str, int, str, str]:
-    path, build_dir, profile, timeout_s, allow_empty = item
+    path, build_dir, profile, timeout_s, allow_empty, git_snapshot = item
     import io
     import contextlib
     buf_out = io.StringIO()
@@ -539,6 +543,7 @@ def _worker_execute(
             profile=profile,
             timeout_s=timeout_s,
             allow_empty=allow_empty,
+            git_snapshot=git_snapshot,
         )
     return path, rc, buf_out.getvalue(), buf_err.getvalue()
 
@@ -560,8 +565,9 @@ def run_hosttests(
     (empty stdout is allowed for them — and only them).
 
     Returns the worst exit contribution: 2 (environment) beats 1 (failure)
-    beats 0 (pass).
+    beats 0 (pass). All reports use the Git snapshot taken at batch start.
     """
+    git_snapshot = _git_revision()
     allow = set(exit_status_ids or ())
     worst = 0
 
@@ -574,13 +580,14 @@ def run_hosttests(
                 timeout_s=timeout_s,
                 session_factory=session_factory,
                 allow_empty=binary_id(path) in allow,
+                git_snapshot=git_snapshot,
             )
             worst = max(worst, contrib)
     else:
         import concurrent.futures
 
         items = [
-            (path, build_dir, profile, timeout_s, binary_id(path) in allow)
+            (path, build_dir, profile, timeout_s, binary_id(path) in allow, git_snapshot)
             for path in binaries
         ]
         with concurrent.futures.ProcessPoolExecutor(max_workers=jobs) as executor:

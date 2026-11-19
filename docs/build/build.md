@@ -356,14 +356,17 @@ make PROFILE=aarch64-clang run-aarch64-uefi
 
 ### 5. 测试
 
-#### 宿主测试
+#### 日常检查与宿主测试
 
 ```bash
-make test-host
-# `make test` 是 `make test-host` 的别名
+make test                            # 本地快速检查（默认 x86_64 profile）
+make test-host                       # 仅宿主回归
+make test-monitor-host CASE=file      # 只跑指定子系统的用例
 ```
 
-运行 `hosttests/` 下的宿主测试套件（`Suites: 16 | Failed: 0`）+ PMM boot reservation。
+`make test` 运行目录漂移检查、完整宿主回归、测试框架退出码契约和断言规范审计。首次运行会为 Doom 宿主用例准备 sysroot，但不构建客体镜像、不启动 QEMU，也不运行完整框架回归或静态审计。显式指定不具备 `rootfs` 能力的 profile 会失败，不会静默跳过宿主回归。
+
+涉及 syscall、内核内部机制或架构启动的改动，仍需分别运行 `make OS01_SYSTEST=1 test-syscall`、`make KERNEL_SELFTEST=1 test-kernel-selftest` 或相应的 `test-aarch64` 用例；不要把 syscall 和内核自测的构建开关合用。
 
 #### QEMU E2E 测试（variant-isolated images）
 

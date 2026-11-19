@@ -947,14 +947,4 @@ $(TEST_BLD)/test_gui_input_lvgl.elf: \
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(GUI_INPUT_LVGL_WRAPS) -o $@ $^ -lpthread -lm
 
--include $(patsubst %.o,%.d,$(GUI_LVGL_OBJS))
--include $(GUI_DETERMINISTIC_DIR)/*.d
--include $(GUI_INTEGRATION_DIR)/*.d
--include $(GUI_INPUT_DIR)/*.d
--include $(GUI_INPUT_LVGL_DIR)/*.d
--include $(GUI_INPUT_UNIT_DIR)/*.d
-# The widget unit's objects carry the private bridge headers (the slot
-# layout lives there): without this the header changes would NOT trigger a
-# rebuild and the fixture would disagree with the library about the slot
-# size.
--include $(GUI_WIDGET_DIR)/*.d
+HOST_EXTRA_DEPFILES += $(GUI_LVGL_OBJS:.o=.d)

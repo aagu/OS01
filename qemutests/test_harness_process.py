@@ -25,6 +25,7 @@ import time
 import unittest
 from pathlib import Path
 from typing import List
+from unittest import mock
 
 TEST_MANIFEST = {
     "id": "test_harness_process",
@@ -263,6 +264,28 @@ class ProcessSessionHeavyOutputTests(unittest.TestCase):
 
 class ProcessSessionEofDrainTests(unittest.TestCase):
     """After child exits, observe() must collect every byte it wrote."""
+
+    def test_stop_does_not_select_after_both_pipes_reach_eof(self) -> None:
+        from qemutests.harness import process as proc_mod
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            session = proc_mod.ProcessSession(
+                argv=[sys.executable, "-c", "print('finished')"],
+                run_dir=Path(tmpdir),
+                timeout_s=10.0,
+            )
+            session.start()
+            try:
+                self.assertEqual(session.observe(2.0), "finished\n")
+                self.assertEqual(session.returncode, 0)
+                self.assertFalse(session._selector.get_map())
+                with mock.patch.object(
+                    session._selector, "select", wraps=session._selector.select,
+                ) as select:
+                    self.assertEqual(session.stop(), 0)
+                select.assert_not_called()
+            finally:
+                session.close()
 
     def test_eof_drain_captures_complete_output(self) -> None:
         from qemutests.harness import process as proc_mod

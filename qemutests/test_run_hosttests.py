@@ -659,6 +659,20 @@ class ParallelHostTests(unittest.TestCase):
         target.chmod(target.stat().st_mode | stat.S_IXUSR)
         return target
 
+    def test_git_snapshot_is_once_per_batch_in_serial_and_parallel(self) -> None:
+        binaries = [str(self._stage_script(f"git_{index}.elf", SCRIPT_LEGACY_PASS)) for index in range(2)]
+        for jobs, revision, dirty in ((1, "a" * 40, True), (2, "b" * 40, False)):
+            with self.subTest(jobs=jobs):
+                build_dir = self.dir / f"build-{jobs}"
+                with mock.patch.object(rh, "_git_revision", return_value=(revision, dirty)) as snapshot:
+                    result = rh.run_hosttests(binaries, build_dir=str(build_dir), jobs=jobs)
+                self.assertEqual(result, 0)
+                snapshot.assert_called_once_with()
+                reports = list(_archives(build_dir).values())
+                self.assertEqual(len(reports), len(binaries))
+                self.assertEqual({(report["git_revision"], report["git_dirty"]) for report in reports},
+                                 {(revision, dirty)})
+
     def test_parallel_jobs_bound(self) -> None:
         """Concurrency with jobs=2 must never exceed 2 concurrent workers."""
         lock_dir = self.dir / "concurrency_locks"

@@ -1071,9 +1071,10 @@ def _logical_statements(text: str) -> list[tuple[str, int]]:
                     frames.pop()
             # Preprocessor directives are not declarations.  A directive
             # may continue on the next line with a trailing backslash.
-            if not line.endswith("\\"):
+            if depth == 0 and not line.endswith("\\"):
                 buf = ""
-                depth = 0
+            continue
+        if not buf and re.fullmatch(r'extern\s+"C"\s*{', line):
             continue
         buf += " " + line
         depth += line.count("{") - line.count("}")
@@ -1329,20 +1330,13 @@ def check_manifest_against_headers(include_dir: str, groups: list[str]) -> list[
             # guard's #endif, which left the tail outside the guard).  The
             # "not in" comparisons above cannot see it: a duplicate is still
             # "in" the manifest, so it never shows up as unlisted.
-            hard, benign = duplicate_declarations(
+            hard, _ = duplicate_declarations(
                 read_header(include_dir, header))
             hard = [s for s in hard if s not in EXCLUDED_SYMBOLS]
-            benign = [s for s in benign if s not in EXCLUDED_SYMBOLS]
             if hard:
                 errors.append(
                     f"{group}/{header}: header declares the same function more "
                     f"than once: {', '.join(hard)}"
-                )
-            if benign:
-                notes.append(
-                    f"{group}/{header}: the same name is declared again with a "
-                    f"different signature or inside a conditional branch "
-                    f"(legal C): {', '.join(benign)}"
                 )
     return errors
 

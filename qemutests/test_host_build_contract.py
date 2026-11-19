@@ -67,6 +67,121 @@ class HostBuildContractTests(unittest.TestCase):
             if self.calls.exists() else []
         return result, calls
 
+    def test_host_depfile_recovers_from_moved_primary_source(self):
+        self._assert_host_depfile_recovery(self.root / "build")
+
+    def test_host_depfile_recovers_from_moved_source_in_extra_depfile(self):
+        self._assert_host_depfile_recovery(self.root / "build/gui/lvgl/obj", extra_depfile=True)
+
+    def _assert_host_depfile_recovery(self, object_dir, extra_depfile=False):
+        build_dir = self.root / "build"
+        object_dir.mkdir(parents=True)
+        old_source = self.root / "old-source.c"
+        new_source = self.root / "new-source.c"
+        header = self.root / "value.h"
+        unrelated = self.root / "unrelated.c"
+        sample = object_dir / "sample.o"
+        other = object_dir / "unrelated.o"
+        depfile = sample.with_suffix(".d")
+        host_depfile_rules = ROOT / "hosttests/mk/depfiles.mk"
+        makefile = self.root / "Makefile"
+
+        def configure(source):
+            makefile.write_text(
+                f"TEST_BLD := {build_dir}\n"
+                f"HOST_EXTRA_DEPFILES := {depfile if extra_depfile else ''}\n"
+                f"all: {sample} {other}\n"
+                f"{sample}: {source}\n"
+                "\tclang -MMD -MP -c $< -o $@\n"
+                f"{other}: {unrelated}\n"
+                "\tclang -MMD -MP -c $< -o $@\n"
+                f"include {host_depfile_rules}\n"
+            )
+
+        def build():
+            return subprocess.run(
+                ["make", "--no-print-directory"], cwd=self.root, text=True,
+                stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15,
+            )
+
+        old_source.write_text("int old_symbol;\n")
+        new_source.write_text('#include "value.h"\nint new_symbol = VALUE;\n')
+        header.write_text("#define VALUE 7\n")
+        unrelated.write_text("int unrelated_symbol;\n")
+        configure(old_source)
+        result = build()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        old_sample = sample.read_bytes()
+        other_mtime = other.stat().st_mtime_ns
+        self.assertLessEqual(new_source.stat().st_mtime_ns, sample.stat().st_mtime_ns)
+
+        configure(new_source)
+        old_source.unlink()
+        result = build()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertTrue(sample.read_bytes() != old_sample, "moved source did not rebuild the object")
+        self.assertIn(str(new_source), depfile.read_text())
+        self.assertNotIn(str(old_source), depfile.read_text())
+        self.assertEqual(other.stat().st_mtime_ns, other_mtime)
+
+        sample_mtime = sample.stat().st_mtime_ns
+        result = build()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertEqual(sample.stat().st_mtime_ns, sample_mtime)
+
+        before_header_change = sample.read_bytes()
+        header.write_text("#define VALUE 11\n")
+        result = build()
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertTrue(sample.read_bytes() != before_header_change, "header change did not rebuild the object")
+
+        new_source.unlink()
+        result = build()
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn(str(new_source), result.stdout)
+
+    def test_host_libc_manifest_can_be_generated_from_checkout(self):
+        generated = self.root / "libc_api_manifest.h"
+        result = subprocess.run(
+            ["python3", str(ROOT / "scripts/audit_libc_api.py"), "--emit-c-header", str(generated)],
+            cwd=ROOT, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=15,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout)
+        self.assertGreater(generated.stat().st_size, 0)
+
+    def test_local_test_dispatches_only_fast_checks(self):
+        result, calls = self._make("test", flags=("-n", f"MAKE={self.probe}"))
+        self.assertEqual(result.returncode, 0, result.stdout)
+        host_calls = [args for args in calls if "-C" in args and args[args.index("-C") + 1] == "hosttests"]
+        self.assertEqual(len(host_calls), 2, calls)
+        self.assertCountEqual(
+            [target for args in host_calls for target in ("run", "test-framework-contract") if target in args],
+            ["run", "test-framework-contract"],
+        )
+        self.assertIn("/stamps/sysroot.stamp", result.stdout)
+        self.assertIn("tools/tests/scan_tests.py", result.stdout)
+        self.assertIn("--check-drift", result.stdout)
+        self.assertIn("qemutests/assertion_policy_audit.py", result.stdout)
+        for forbidden in ("mkfs.", "run_framework_tests.py", "qemutests/run_test.py", "test-static-prereqs"):
+            self.assertNotIn(forbidden, result.stdout)
+
+    def test_local_test_propagates_host_failure(self):
+        self.probe.write_text(self.probe.read_text() + 'if "run" in sys.argv:\n    sys.exit(7)\n')
+        ready_sysroot = self.root / "sysroot.stamp"
+        ready_sysroot.touch()
+        result, calls = self._make(
+            "test", flags=(f"MAKE={self.probe}", f"SYSROOT_STAMP={ready_sysroot}", "SYSROOT_STAGES="),
+        )
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertTrue(any("run" in args for args in calls), result.stdout)
+        self.assertIn("Error 7", result.stdout)
+
+    def test_local_test_rejects_unsupported_profile(self):
+        result, calls = self._make("test", flags=("-n", f"MAKE={self.probe}"), profile="aarch64-clang")
+        self.assertNotEqual(result.returncode, 0, result.stdout)
+        self.assertIn("rootfs", result.stdout)
+        self.assertFalse(calls)
+
     def test_inventory_unique(self):
         """Root `make print-host-test-inventory` must output valid, unique TSV lines."""
         result, _ = self._make("print-host-test-inventory")

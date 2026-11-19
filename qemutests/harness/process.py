@@ -483,8 +483,10 @@ class ProcessSession:
         # ran).  Two iterations: the first drains the already-buffered
         # bytes, the second closes out the EOF on each pipe.
         try:
-            self._drain(timeout=0.5)
-            self._drain(timeout=0.1)
+            for timeout in (0.5, 0.1):
+                if not self._has_data_pending():
+                    break
+                self._drain(timeout)
         except Exception:
             pass
         self._cleaned_up = True

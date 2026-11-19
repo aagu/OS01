@@ -191,7 +191,7 @@ DOOM_INPUT_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST \
     -D'errno=(*__errno_location())' \
     -include $(TEST_INC)/gfx_client_errno.h
 
-$(DOOM_HOST_DIR)/doom_input.o: $(TESTS_DIR)/user/doom/doom_input.c
+$(DOOM_HOST_DIR)/doom_input.o: $(TESTS_DIR)/user/doom/doom_input.c | $(DOOM_HOST_DIR)/.private.stamp
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(DOOM_INPUT_HOST_CFLAGS) -MMD -MP -c $< -o $@
 
@@ -254,7 +254,7 @@ DOOM_RUNTIME_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST \
     -D'errno=(*__errno_location())' \
     -include $(TEST_INC)/gfx_client_errno.h
 
-$(DOOM_HOST_DIR)/doom_os01.o: $(TESTS_DIR)/user/doom/doom_os01.c
+$(DOOM_HOST_DIR)/doom_os01.o: $(TESTS_DIR)/user/doom/doom_os01.c | $(DOOM_HOST_DIR)/.private.stamp
 	@mkdir -p $(dir $@)
 	$(HOST_CC) $(DOOM_RUNTIME_HOST_CFLAGS) -MMD -MP -c $< -o $@
 
@@ -304,5 +304,3 @@ test-doom-diag: $(TEST_BLD)/test_doom_diag.elf
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) \
 	    $<
-
--include $(DOOM_HOST_DIR)/*.d

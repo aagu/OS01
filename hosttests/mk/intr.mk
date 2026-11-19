@@ -466,9 +466,6 @@ test-intr-irq-x86: $(TEST_BLD)/test_intr_irq_x86.elf
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) $<
 
--include $(IRQ_CHAIN_OBJS:.o=.d)
--include $(TEST_BLD)/test_intr_irq_x86.d
-
 # x86 intr probe
 $(TEST_BLD)/test_x86_intr_probe.o: $(TEST_CASES)/test_x86_intr_probe.c $(TESTS_DIR)/kernel/include/selftest/x86_intr.h
 	@mkdir -p $(TEST_BLD)
@@ -582,10 +579,3 @@ test-irq-capacity: $(TEST_BLD)/test_irq_capacity.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) $<
-
--include $(TEST_BLD)/test_irq_capacity.d
--include $(TEST_BLD)/intr_irq_production.d
--include $(TEST_BLD)/arch_irq_hooks.d
--include $(TEST_BLD)/irq_route_production.d
--include $(TEST_BLD)/subsys_production.d
--include $(TEST_BLD)/lapic_production.d

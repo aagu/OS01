@@ -705,8 +705,11 @@ TEST_ARCH6_FSSTRESS_IMAGE := $(BUILD_DIR)/image/arch6-fsstress/disk.img
 KERNEL_SELFTEST_SMP ?= 4
 HOST_TEST_JOBS ?= 1
 
+.PHONY: test
+test: check-test-catalog test-host test-framework-contract test-assertion-policy
+
 .PHONY: test-host test-pmm-boot-reservation test-gfx-file-lifecycle test-gfx-fault-bridge test-gfx-device test-gfx-client test-gfx-primitives test-m1-host test-arch9-host test-resolution-host test-gui-host
-test-host:
+test-host: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(SYSROOT_STAMP))
 	$(call require_capability,rootfs)
 	@$(call os01_submake,hosttests,run HOST_TEST_JOBS=$(HOST_TEST_JOBS) $(OS01_SUBMAKE_ARGS))
 	python3 qemutests/pmm_boot_reservation_test.py
@@ -1828,6 +1831,7 @@ HELP_SEC_VALIDATE := \
 	'validate-profile' '(always)' 'Print profile / triple / sysroot / capabilities' \
 	'print-run-paths' '(rootfs)' 'Print absolute firmware + active image path'
 HELP_SEC_TEST := \
+	'test' '(rootfs)' 'Quick local checks: host tests, catalog drift, framework contract, and assertion policy (no QEMU or guest image)' \
 	'test-qemu' '(rootfs)' 'QEMU E2E suite (SUITE=<phase-0|systest|inittab-phase|network|gfx|resolution|driver-model|monitor|terminal-present|gui|gui-desktop|intr-x86|arch10-capacity|arch6-fsstress>, CASE=<id> selects one systest case)' \
 	'test-qemu-usb-boot' '(rootfs)' 'M0 USB-only firmware gate (USB_BOOT_CASE=firmware; expects fs/root rc=-19)' \
 	'test-host' '(rootfs)' 'os01_submake hosttests + pmm_boot_reservation_test.py' \
