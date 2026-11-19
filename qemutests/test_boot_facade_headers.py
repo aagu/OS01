@@ -166,6 +166,34 @@ class BootFacadeHeadersTests(unittest.TestCase):
         self.assertNotEqual(res3.returncode, 0, "Expected failure for OS01_HAS_USERSPACE=2")
         self.assertIn("OS01_HAS_USERSPACE must be explicitly defined as 0 or 1", res3.stderr)
 
+    def test_arch_smp_header_x86_64(self) -> None:
+        src = """
+        #include <arch/smp.h>
+
+        static arch_smp_ap_entry_t smp_test_entry = smp_ap_common_entry;
+
+        _Static_assert(SMP_STAGE_INVARIANT == 0, "SMP_STAGE_INVARIANT must be 0");
+        _Static_assert(SMP_STAGE_SCHEDULER == 4, "SMP_STAGE_SCHEDULER must be 4");
+
+        int smp_header_probe(void) { return smp_test_entry != 0; }
+        """
+        res = self._run_clang("x86_64-none-elf", src, ["-fsyntax-only", "-Werror"])
+        self.assertEqual(res.returncode, 0, f"x86_64 arch/smp.h syntax test failed:\nstdout: {res.stdout}\nstderr: {res.stderr}")
+
+    def test_arch_smp_header_aarch64(self) -> None:
+        src = """
+        #include <arch/smp.h>
+
+        static arch_smp_ap_entry_t smp_test_entry = smp_ap_common_entry;
+
+        _Static_assert(SMP_STAGE_INVARIANT == 0, "SMP_STAGE_INVARIANT must be 0");
+        _Static_assert(SMP_STAGE_SCHEDULER == 4, "SMP_STAGE_SCHEDULER must be 4");
+
+        int smp_header_probe(void) { return smp_test_entry != 0; }
+        """
+        res = self._run_clang("aarch64-none-elf", src, ["-fsyntax-only", "-Werror"])
+        self.assertEqual(res.returncode, 0, f"aarch64 arch/smp.h syntax test failed:\nstdout: {res.stdout}\nstderr: {res.stderr}")
+
 
 if __name__ == "__main__":
     unittest.main()
