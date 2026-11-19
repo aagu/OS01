@@ -252,6 +252,57 @@ int gfx_present_rect(gfx_handle_t *h,
     return ioctl(h->fd, GFX_PRESENT_RECT, &req);
 }
 
+/* ── gfx_present_rects ─────────────────────────────────────────── */
+/* Damage-region batch present (spec 2026-11-19 §4).  One ioctl
+ * carries the whole rect list; the kernel validates every rect
+ * before any framebuffer write.  Request is re-formed on every call;
+ * completed_out folds a lost kernel write-back to 0 (k unknown). */
+int gfx_present_rects(gfx_handle_t *h,
+                      const gfx_rect_t *rects, uint32_t count,
+                      uint32_t *completed_out)
+{
+    if (completed_out) *completed_out = 0;
+    if (!h || (!rects && count > 0u) ||
+        count == 0u || count > GFX_PRESENT_RECTS_MAX) {
+        errno = EINVAL;
+        return -1;
+    }
+    /* Per-rect subtraction-form geometry, same predicate as
+     * gfx_present_rect.  The kernel re-validates; this keeps the
+     * "no ioctl on caller-side invalid geometry" library contract. */
+    uint32_t view_w = h->info.width;
+    uint32_t view_h = h->info.height;
+    for (uint32_t i = 0; i < count; i++) {
+        uint32_t x = rects[i].x, y = rects[i].y;
+        uint32_t w = rects[i].w, h_ = rects[i].h;
+        if (w == 0u || h_ == 0u ||
+            x > view_w || w > view_w - x ||
+            y > view_h || h_ > view_h - y) {
+            errno = EINVAL;
+            return -1;
+        }
+    }
+    /* Full-view rects stay in the batch — no routing to gfx_present
+     * (contract difference vs gfx_present_rect, see gfx.h). */
+    gfx_present_rects_req_t req;
+    req.pixels          = (uint64_t)(uintptr_t)h->pixels;
+    req.stride          = h->info.stride;
+    req.reserved        = 0;
+    req.rects           = (uint64_t)(uintptr_t)rects;
+    req.count           = count;
+    req.completed_rects = 0;
+    int rc = ioctl(h->fd, GFX_PRESENT_RECTS, &req);
+    if (rc != 0) {
+        /* ioctl returned -1 with errno set; k (if the kernel wrote it
+         * back) is in req.completed_rects — a lost write-back leaves
+         * the transmitted 0, which is the "unknown" fold. */
+        if (completed_out) *completed_out = req.completed_rects;
+        return rc;
+    }
+    if (completed_out) *completed_out = count;
+    return 0;
+}
+
 /* ── Ownership & Fallback (Display Ownership Plan) ───────────── */
 
 /* Issue GFX_ACQUIRE ioctl with explicit third argument (uint64_t)0.

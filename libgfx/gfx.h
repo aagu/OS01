@@ -119,6 +119,38 @@ int gfx_present_rect(gfx_handle_t *h,
                      uint32_t x, uint32_t y,
                      uint32_t w, uint32_t h_);
 
+/* Submit a damage-region BATCH present (GFX_PRESENT_RECTS, spec
+ * docs/superpowers/specs/2026-11-19-gfx-damage-batch-present-design.md
+ * §4): exactly one ioctl carries up to GFX_PRESENT_RECTS_MAX
+ * view-local rectangles from the handle's FULL pixels buffer.
+ * Per-rect semantics are those of gfx_present_rect; the whole batch
+ * is rejected by the kernel with zero framebuffer writes if ANY rect
+ * is invalid.  Rects run in array order and may overlap.
+ *
+ * completed_out (may be NULL): on success receives count; on failure
+ * receives the kernel-reported number of rects fully written before
+ * the failure point, or 0 when the write-back did not land (k
+ * unknown).  Short-circuit failures write 0.
+ *
+ * Behaviour contract:
+ *   - h == NULL || rects == NULL (count > 0) → -1, errno=EINVAL, no ioctl.
+ *   - count == 0 || count > GFX_PRESENT_RECTS_MAX → -1, errno=EINVAL,
+ *     no ioctl (an empty batch is a caller bug at the library level).
+ *   - ANY rect with w == 0 || h_ == 0 or subtraction-form overflow →
+ *     -1, errno=EINVAL, no ioctl.
+ *   - A rect covering the whole view is NOT routed to gfx_present —
+ *     the batch ioctl carries it (this differs from gfx_present_rect's
+ *     full-view dispatch, which is test-pinned for the single-rect
+ *     path).
+ *   - A valid list → exactly one GFX_PRESENT_RECTS ioctl, re-formed
+ *     on every call; no user pointer is cached.
+ *   - gfx_set_clip has no effect on the request.
+ *   - Success does NOT modify errno; failure propagates the ioctl
+ *     errno verbatim.  No ENOTTY fallback. */
+int gfx_present_rects(gfx_handle_t *h,
+                      const gfx_rect_t *rects, uint32_t count,
+                      uint32_t *completed_out);
+
 /* ── Ownership & Fallback (Display Ownership Plan) ─────────────
  * Exclusive display ownership, fallback role registration, and
  * display state query wrappers for /dev/gfx0.
