@@ -28,7 +28,7 @@
 1. 引入架构中立门面 `kernel/include/arch/smp.h`，提供路线图要求的单入口 `arch_smp_boot_aps(cpu_count, entry, per_cpu_data)`，消除同名 `smp_boot_aps()` 签名冲突。
 2. 建立公共编排与 AP 状态机 `kernel/core/smp.c`：
    - 收敛 `arch_boot_aps()` 为单一公共实现；
-   - 提供统一 AP C 入口 `smp_ap_common_entry(uint32_t cpu_id, percpu_t *cpu)`，在公共层强制执行 `cpu_init → online=1 → post_online → irq_enable → ipi_ready=1 → enter_idle` 状态机顺序。
+   - 提供统一 AP C 入口 `smp_ap_common_entry(uint32_t cpu_id, struct percpu *cpu)`，在公共层强制执行 `cpu_init → online=1 → post_online → irq_enable → ipi_ready=1 → enter_idle` 状态机顺序。
 3. **双架构统一 Fail-Closed**：任一 AP 在前置校验、准备、激活、上线握手或调度就绪等待失败时，由公共层统一输出诊断并经 `boot_failure_stop("smp", ...)` 永久停机；废弃 aarch64 的 degraded 启动路径。
 4. 保持既有阶段 9 调度交接边界不变（方案 A）：不重排 aarch64 的 `arch_boot_runtime()`、`aarch64_shootdown_probe`、`ap_work` 与 `ap_sched` 阶段 9 交接，使范围聚焦于「SMP 启动统一」。
 
@@ -44,15 +44,18 @@
 
 ### 2.1 架构中立门面：`kernel/include/arch/smp.h`
 
+为保持门面头零外部依赖（兼容 `qemutests/test_boot_facade_headers.py` 仅传 `-Ikernel/include` 的 freestanding 独立编译门禁，不传递拉入 `<sched/task.h>` 及 `libc` 头），使用 `struct percpu` 前向声明而非 `#include <percpu/percpu.h>`：
+
 ```c
 #ifndef ARCH_SMP_H
 #define ARCH_SMP_H
 
 #include <stdint.h>
-#include <percpu/percpu.h>
 
-/* 统一 AP C 入口签名（双架构汇编入口均按各自 ABI 传入 cpu_id 与 percpu_t*） */
-typedef void (*arch_smp_ap_entry_t)(uint32_t cpu_id, percpu_t *cpu)
+struct percpu;
+
+/* 统一 AP C 入口签名（双架构汇编入口均按各自 ABI 传入 cpu_id 与 struct percpu *） */
+typedef void (*arch_smp_ap_entry_t)(uint32_t cpu_id, struct percpu *cpu)
     __attribute__((noreturn));
 
 /* 统一 SMP 启动失败阶段分类 */
@@ -78,7 +81,7 @@ struct arch_smp_boot_status {
  * 单入口 SMP AP 启动（强覆盖，双架构各自实现）：
  * - cpu_count:    逻辑 CPU 总数（含 BSP，必须满足 1 <= cpu_count <= NR_CPUS）
  * - entry:        非空统一 AP C 入口（由公共层传入 smp_ap_common_entry）
- * - per_cpu_data: 指向 percpu_data[0..cpu_count-1]
+ * - per_cpu_data: 指向全局 percpu_data[0..cpu_count-1]
  *
  * 返回值：
  * - 0：所有 AP（1..cpu_count-1）均成功完成本架构阶段 8 握手；
@@ -87,10 +90,14 @@ struct arch_smp_boot_status {
  */
 int arch_smp_boot_aps(uint32_t cpu_count,
                       arch_smp_ap_entry_t entry,
-                      percpu_t *per_cpu_data);
+                      struct percpu *per_cpu_data);
 
 /* 只读查询最近一次 arch_smp_boot_aps() 的状态快照（强覆盖） */
 const struct arch_smp_boot_status *arch_smp_last_status(void);
+
+/* 公共 AP C 入口状态机（由 kernel/core/smp.c 实现，暴露原型以供宿主单测直接驱动） */
+void smp_ap_common_entry(uint32_t cpu_id, struct percpu *cpu)
+    __attribute__((noreturn));
 
 /*
  * AP 生命周期底层钩子（强覆盖，仅由 kernel/core/smp.c::smp_ap_common_entry 调用）：
@@ -99,10 +106,10 @@ const struct arch_smp_boot_status *arch_smp_last_status(void);
  * 3. arch_smp_ap_publish_ipi_ready: 开中断并执行屏障后发布 ipi_ready=1
  * 4. arch_smp_ap_enter_idle:        进入 idle / 调度交接循环（永不返回）
  */
-void arch_smp_ap_cpu_init(uint32_t cpu_id, percpu_t *cpu);
-void arch_smp_ap_post_online(uint32_t cpu_id, percpu_t *cpu);
-void arch_smp_ap_publish_ipi_ready(uint32_t cpu_id, percpu_t *cpu);
-void arch_smp_ap_enter_idle(uint32_t cpu_id, percpu_t *cpu)
+void arch_smp_ap_cpu_init(uint32_t cpu_id, struct percpu *cpu);
+void arch_smp_ap_post_online(uint32_t cpu_id, struct percpu *cpu);
+void arch_smp_ap_publish_ipi_ready(uint32_t cpu_id, struct percpu *cpu);
+void arch_smp_ap_enter_idle(uint32_t cpu_id, struct percpu *cpu)
     __attribute__((noreturn));
 
 /*
@@ -123,7 +130,9 @@ void arch_smp_post_boot_hook(uint32_t online_cpus);
 
 ## 3. 公共编排与 AP 状态机：`kernel/core/smp.c`
 
-`kernel/core/smp.c` 编译进双架构内核（`KERNEL_C_SOURCES`），并可独立编译进宿主单元测试。
+`kernel/core/smp.c` 编译进双架构内核，并可独立编译进宿主单元测试：
+- x86_64 由 `kernel/Makefile` 的 `$(wildcard core/*.c)` 自动拾取；
+- aarch64 在 `kernel/Makefile` 使用显式白名单 `KERNEL_C_SOURCES`，**必须显式追加 `core/smp.c`**（紧邻 `core/boot_failure.c` / `core/main.c`）。
 
 ### 3.1 BSP 公共编排：`arch_boot_aps(void)`
 `kernel/core/main.c` 阶段 8 继续调用 `arch_boot_aps()`（保持 `arch/boot.h` 与 `test_boot_contract_sequence.c` 契约不变），但其实现收敛为 `kernel/core/smp.c` 中的唯一公共定义：
@@ -136,7 +145,7 @@ void arch_smp_post_boot_hook(uint32_t online_cpus);
    - `int rc = arch_smp_boot_aps(num_cpus, smp_ap_common_entry, percpu_data);`
 3. **统一结果核验与 Fail-Closed**：
    - 若 `rc != 0`：读取 `const struct arch_smp_boot_status *st = arch_smp_last_status()`，取 `failed_cpu` 与 `failed_stage`（若 `st == NULL` 则回退 `cpu=0, stage=SMP_STAGE_INVARIANT`），调用 `smp_boot_fail(failed_cpu, failed_stage, rc)`。
-   - 若 `rc == 0`：核验 `st != NULL && st->requested == num_cpus && st->online == num_cpus`，否则调用 `smp_boot_fail(0, SMP_STAGE_INVARIANT, -EIO)`。
+   - 若 `rc == 0`：计算 `uint64_t expected_mask = (num_cpus == 64u) ? ~0ULL : ((1ULL << num_cpus) - 1ULL);`，核验 `st != NULL && st->requested == num_cpus && st->online == num_cpus && st->online_mask == expected_mask`，否则调用 `smp_boot_fail(0, SMP_STAGE_INVARIANT, -EIO)`。
 4. **成功标记与后置阶段**：
    - 输出统一完成标记：`[boot-1] complete discovered=<N> ready=<N>`（使用栈上十进制格式化 + `%s`，兼容 AArch64 mini-formatter）。
    - 调用 `arch_smp_post_boot_hook(num_cpus)`。
@@ -161,9 +170,10 @@ static const char *smp_stage_name(enum smp_boot_stage stage)
 2. 输出 `[boot-1] FATAL cpu=%s stage=%s\n`。
 3. 调用 `boot_failure_stop("smp", smp_stage_name(stage), rc, -1, (int)cpu)`，后者输出 `[boot-3] FATAL stage=smp component=<stage> rc=<rc> phase=-1 cpu=<cpu>\n`，关中断并永久 halt。
 
-### 3.3 公共 AP C 入口状态机：`smp_ap_common_entry(uint32_t cpu_id, percpu_t *cpu)`
+### 3.3 公共 AP C 入口状态机：`smp_ap_common_entry(uint32_t cpu_id, struct percpu *cpu)`
 ```c
-void smp_ap_common_entry(uint32_t cpu_id, percpu_t *cpu)
+__attribute__((noreturn))
+void smp_ap_common_entry(uint32_t cpu_id, struct percpu *cpu)
 {
     /* 1. 本核硬件初始化（在 online=1 对 BSP 可见之前完成） */
     arch_smp_ap_cpu_init(cpu_id, cpu);
@@ -207,8 +217,8 @@ void smp_ap_common_entry(uint32_t cpu_id, percpu_t *cpu)
 
 #### 4.1.2 `kernel/arch/x86_64/smp/smp.c`
 - 静态保存 `static struct arch_smp_boot_status x86_smp_status;` 并实现 `arch_smp_last_status()`。
-- 实现 `int arch_smp_boot_aps(uint32_t cpu_count, arch_smp_ap_entry_t entry, percpu_t *per_cpu_data)`：
-  - 校验 `!entry || !per_cpu_data || cpu_count == 0 || cpu_count > NR_CPUS` → 记录 `SMP_STAGE_INVARIANT` 并返回 `-EINVAL`。
+- 实现 `int arch_smp_boot_aps(uint32_t cpu_count, arch_smp_ap_entry_t entry, struct percpu *per_cpu_data)`：
+  - 校验 `!entry || per_cpu_data != percpu_data || cpu_count == 0 || cpu_count > NR_CPUS` → 记录 `SMP_STAGE_INVARIANT` 并返回 `-EINVAL`。
   - 初始化 `x86_smp_status`（`requested = cpu_count, online = 1, online_mask = 1ULL`）。
   - 执行 `boot1_fault_variant_identity()`、`ipi_init()`、`ipi_ready_publish_bsp()`、拷贝 trampoline 二进制到 `TRAMPOLINE_BASE`。
   - 逐核（`i = 1 .. cpu_count - 1`）：
@@ -241,23 +251,27 @@ void smp_ap_common_entry(uint32_t cpu_id, percpu_t *cpu)
 - `aarch64_smp_publish_boot(const struct aarch64_topology *topology, uint64_t entry_va)` 将 `entry_va` 写入每个槽的 `slots[i].entry`（拒绝 `entry_va == 0`），并在 `clean_to_poc()` 中一并清理到 PoC。
 
 #### 4.2.2 汇编入口：`kernel/arch/aarch64/boot/secondary_entry.S`
+严格遵守 AAPCS64：在槽位校验阶段（`bl aarch64_boot_install_translation` **之前**）即从 `[x6, #AARCH64_BOOT_ENTRY_OFFSET]` 加载并校验入口地址到 **callee-saved** 寄存器 `x20`（与 `x19` 保存 `cpu_id` 保持一致），不在 `bl` 之后依赖 caller-saved 寄存器 `x6`：
+```asm
+    /* 槽位校验阶段（bl aarch64_boot_install_translation 之前）： */
+    ldr     x20, [x6, #AARCH64_BOOT_ENTRY_OFFSET]
+    cbz     x20, secondary_panic
+```
 在 MMU 启用与 `vbar_el1 = exception_vectors` 之后（原 lines 118–125）：
 ```asm
-    /* 从已校验的 boot slot 加载统一 AP C 入口，传入 (x0=cpu_id, x1=&percpu_data[cpu_id]) */
-    ldr     x30, [x6, #AARCH64_BOOT_ENTRY_OFFSET]
-    cbz     x30, secondary_panic
+    /* 传入 (x0=cpu_id, x1=&percpu_data[cpu_id])，调用已校验的统一 AP C 入口 */
     mov     x0, x19
     mrs     x1, tpidr_el1
-    blr     x30
+    blr     x20
 ```
-- `x6` 在前文已指向 `&aarch64_boot_percpu[cpu_id]` 且校验了 `self`、`cpu_id`、`mpidr`、`stack`。
-- `tpidr_el1` 在前文已设为 `&percpu_data[cpu_id]`，作为第二参数 `percpu_t *cpu` 传入。
+- `x20` 与 `x19` 均为 AAPCS64 callee-saved 寄存器，跨 `bl aarch64_boot_install_translation` 安全保留，且在切栈和启用 MMU 之前即拦截 `entry == 0`。
+- `tpidr_el1` 在前文已设为 `&percpu_data[cpu_id]`，作为第二参数 `struct percpu *cpu` 传入。
 - 移除对 `secondary_idle` 的硬编码引用。
 
 #### 4.2.3 `kernel/arch/aarch64/smp/smp.c`
 - 静态保存 `static struct arch_smp_boot_status a64_smp_status;` 并实现 `arch_smp_last_status()`。
-- 实现 `int arch_smp_boot_aps(uint32_t cpu_count, arch_smp_ap_entry_t entry, percpu_t *per_cpu_data)`：
-  - 校验 `!entry || !per_cpu_data || cpu_count == 0 || cpu_count > NR_CPUS || boot_published` → 记录 `SMP_STAGE_INVARIANT` 返回 `-EINVAL`。
+- 实现 `int arch_smp_boot_aps(uint32_t cpu_count, arch_smp_ap_entry_t entry, struct percpu *per_cpu_data)`：
+  - 校验 `!entry || per_cpu_data != percpu_data || cpu_count == 0 || cpu_count > NR_CPUS || boot_published` → 记录 `SMP_STAGE_INVARIANT` 返回 `-EINVAL`（显式要求 `per_cpu_data == percpu_data`，与 `secondary_entry.S` 及 `kernel/percpu/percpu.c` 索引全局 `percpu_data[]` 的不变量对齐）。
   - 核对 `topology = dtb_topology()` 且 `topology->cpu_count == cpu_count`；校验 `cntfrq_el0()` 合法。
   - 初始化 `bench_lock` / `benchmark_total` / `benchmark_done[]`，调用 `aarch64_smp_publish_boot(topology, (uint64_t)(uintptr_t)entry)`（失败记 `SMP_STAGE_PREPARE` 返回 `-EINVAL`）。
   - 打印既有 `[smp] boot el=... conduit=...` 与 `[smp-test] no_ack_cpu=...` 日志。
@@ -300,11 +314,23 @@ void smp_ap_common_entry(uint32_t cpu_id, percpu_t *cpu)
 ### 5.2 既有测试更新
 1. **`qemutests/boot_lifecycle.py` & `qemutests/test_boot_lifecycle.py`**：
    - x86_64 的 `no-online` 与 `no-scheduler` 故障用例现在经 `boot_failure_stop("smp", ...)` 停机（不再触发 `kpanic`）；更新断言要求 `[boot-1] FATAL cpu=1 stage=online|scheduler` 与 `[boot-3] FATAL stage=smp component=online|scheduler ...` 且无任何 `kernel panic`，并保留 1 秒静默停机观察窗。
-2. **`qemutests/aarch64_uefi_smp.py` & `qemutests/test_aarch64_ap_boot_contract.py`**：
+   - `_FATAL_TEXT` 正则补齐 `activate`：`stage=(prepare|activate|online|scheduler|invariant)`，覆盖完整 `enum smp_boot_stage`。
+2. **`qemutests/aarch64_uefi_smp.py` & `qemutests/test_aarch64_harness.py`**：
    - 正常 1/2/4 核路径断言保持不变（`[smp] requested=N online=N status=PASS`、`[spinlock] ... PASS`、`[tick]`）。
-   - `no_ack_cpu=1` 故障用例从验证 `DEGRADED + [boot-1] a64-no-ack` 更新为验证 **Fail-Closed**：必须出现 `[boot-1] FATAL cpu=1 stage=online` 与 `[boot-3] FATAL stage=smp component=online ...`，且绝不出现 `[spinlock]`、`SHOOTDOWN-PROBE` 或 `[tick]`，观察窗口内保持静默停机。
-3. **头文件边界与静态审计**：
-   - 更新 `qemutests/test_boot_facade_headers.py`（若引用了旧 `core/smp.h`）与 `make test-static` / `test-aarch64-audit`。
+   - `aarch64_uefi_smp.py` 的 `no_ack_cpu=1` 故障用例从验证 `DEGRADED + [boot-1] a64-no-ack` 更新为验证 **Fail-Closed**：必须出现 `[boot-1] FATAL cpu=1 stage=online` 与 `[boot-3] FATAL stage=smp component=online ...`，且绝不出现 `[spinlock]`、`SHOOTDOWN-PROBE` 或 `[tick]`，观察窗口内保持静默停机。
+   - `test_aarch64_harness.py`（L366–434）的 6 个 `test_no_ack_*` 单元测试同步迁移为验证 Fail-Closed 证据契约。
+3. **`hosttests/cases/test_double_state_publish.c`**（源码顺序审计）：
+   - `suite_aarch64_boot_order()` 改为校验 `kernel/core/smp.c::arch_boot_aps()` 调用 `arch_smp_boot_aps()` 且早于 `subsys_prepare_cpus()`；
+   - `suite_ap_tail_order()` 改为校验 `kernel/core/smp.c::smp_ap_common_entry()` 中 `online=1`（RELEASE）→ `arch_smp_ap_post_online` → `arch_local_irq_enable()` → `arch_smp_ap_publish_ipi_ready` 顺序，以及 `kernel/arch/aarch64/smp/smp.c` 对应钩子顺序；
+   - `suite_x86_smp_order()` 改为校验 `arch_smp_boot_aps()` 与 `arch_smp_ap_cpu_init` / `arch_smp_ap_enter_idle` 及 `kernel/core/smp.c` 的 `[boot-1] complete` 顺序。
+4. **`qemutests/test_x86_intr_fault.py`**（`ApNmiOrderingTests`）：
+   - `test_ap_unmasks_nmi_only_after_descriptor_and_ist_setup`（L461–479）改为在 `arch_smp_ap_cpu_init()` 中校验 `lgdt`/`lidt`/`set_tss64`/`load_TR` 早于 `lapic_configure_nmi()`，并结合 `kernel/core/smp.c::smp_ap_common_entry()` 校验 `arch_smp_ap_cpu_init` 早于 `online=1` 与 `arch_smp_ap_publish_ipi_ready`。
+5. **`qemutests/test_aarch64_ap_boot_contract.py`**：
+   - `test_secondary_idle_polls_the_release_gate` 改为扫描 `arch_smp_ap_enter_idle()`；
+   - `test_ap_publishes_runtime_online_before_boot_ack` 改为校验 `smp_ap_common_entry()` 中 `online=1`（RELEASE）早于 `arch_smp_ap_post_online()` 且 `arch_smp_ap_post_online()` 内调用 `boot_online_set()`；
+   - 移除已废弃的 `test_no_ack_observation_after_probe_with_compile_guard`（`boot1_no_ack_observation` 已随 DEGRADED 路径移除），替换为检查 `NO_ACK` 在 Fail-Closed 下触发 `SMP_STAGE_ONLINE` 停机的契约测试。
+6. **头文件边界与静态审计**：
+   - 在 `qemutests/test_boot_facade_headers.py` 中新增 `<arch/smp.h>` 跨架构（`x86_64` 与 `aarch64`）独立 freestanding 编译测试；验证 `make test-static` / `test-aarch64-audit` 全绿。
 
 ### 5.3 验收命令清单
 - `make regen-test-catalog && make check-test-catalog`
