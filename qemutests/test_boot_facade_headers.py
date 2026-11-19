@@ -102,12 +102,12 @@ class BootFacadeHeadersTests(unittest.TestCase):
         #include <arch/boot.h>
 
         /* 2026-11-18: the VFS gate opened on aarch64 (devfs/tmpfs/fat32/
-         * ext2 + virtio-blk); userspace (/bin/init) stays gated behind
-         * OS01_HAS_USERSPACE == 0 until the aarch64 userland build chain
-         * exists.  The plain selftest late manifest grew by the
-         * aarch64_vfs acceptance case. */
+         * ext2 + virtio-blk).  2026-11-18 (81930db8): the userspace gate
+         * opened too — the aarch64 product boot chain (/bin/init ->
+         * serial shell) now ships with OS01_HAS_USERSPACE == 1.  The
+         * plain selftest late manifest stays at 10. */
         _Static_assert(OS01_HAS_VFS == 1, "aarch64 must have OS01_HAS_VFS == 1");
-        _Static_assert(OS01_HAS_USERSPACE == 0, "aarch64 must have OS01_HAS_USERSPACE == 0");
+        _Static_assert(OS01_HAS_USERSPACE == 1, "aarch64 must have OS01_HAS_USERSPACE == 1");
         _Static_assert(OS01_HAS_NET == 0, "aarch64 must have OS01_HAS_NET == 0");
         _Static_assert(OS01_HAS_PCI == 0, "aarch64 must have OS01_HAS_PCI == 0");
         _Static_assert(OS01_HAS_USB == 0, "aarch64 must have OS01_HAS_USB == 0");
