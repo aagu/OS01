@@ -42,7 +42,7 @@ make image            当前 profile 的磁盘镜像（镜像路径，见下文 
 make lib              默认 profile 的 sysroot 库（stamp）
 make user             默认 profile 的用户 ELF 与 BusyBox
 make run              默认 profile 启动 QEMU（-display gtk；无显示环境用 run_test.py 的方式串口验证）
-make run-aarch64-uefi aarch64-clang profile 启动 QEMU（-display none -serial stdio）
+make run-aarch64-uefi aarch64-clang profile 启动 QEMU（-display none -serial stdio；默认 SMP=1 即单核产品用户态运行——aarch64 user-mm 为单核 v1，显式 SMP=N 仍生效但多核启动按设计仅内核态）
 make print-run-paths  默认 profile 打印 firmware=/image= 绝对路径（手动 QEMU 用，见下文）
 make validate         内核 ELF / EFI 产物验证 + profile 信息打印
 make clean            清理指定 profile（默认 profile 还删除项目根兼容文件）
@@ -347,6 +347,9 @@ gdb build/x86_64-clang/kernel/kernel.elf
 
 ```bash
 make PROFILE=aarch64-clang run-aarch64-uefi
+# 默认 SMP=1：串口依次可见 init pid=1 → OS01 Shell（`echo hi` 交互可用）。
+# 多核（显式 SMP=N，N≥2）按设计降级 kernel-only（串口有 warn 行）；
+# 多核用户态调度是 roadmap 的独立后续任务。
 ```
 
 运行 `qemu-system-aarch64 -M virt -display none -serial stdio` + 64 MiB FAT 启动镜像（BOOTAA64.EFI + kernel.elf + 固件）。串口启动签名：`aarch64 uefi handoff ok`，接着 `phase1 boot ok`。`make PROFILE=aarch64-clang aarch64-uefi` 构建镜像 + 固件；`aarch64-uefi-kernel` 仅构建内核 ELF。三个目标都需要 `uefi` 能力（在 x86 profile 下干净失败）。

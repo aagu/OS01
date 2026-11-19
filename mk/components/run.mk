@@ -203,6 +203,16 @@ test-aarch64-audit: $(BUILD_DIR)/artifacts/kernel.elf
 #   llvm-nm build/x86_64-clang/kernel/kernel.elf | awk '$2=="T"||$2=="t"{print $3}' \
 #     | grep -E '^(vma_|uaccess_|fork_|x86_vma_destroy_node)'  # expect: fork_vma_copy, x86_vma_destroy_node, ...
 
+# The default product run is SINGLE-CORE: the aarch64 user-mm runtime
+# gate is single-core v1, and a multi-core boot comes up kernel-only
+# by design (init spawn refused with -EOPNOTSUPP, boot-5 falls back).
+# Bare `make PROFILE=aarch64-clang run-aarch64-uefi` therefore shows
+# the product userspace chain; an explicit SMP=<N> on the command line
+# (or environment) still wins for SMP bring-up work.
+# origin SMP: 'file' = the top-level SMP ?= 2 default (not requested);
+# command line / environment / override = the user asked for N CPUs.
+run-aarch64-uefi_SMP = $(if $(filter-out file undefined,$(origin SMP)),$(SMP),1)
+
 .PHONY: run-aarch64-uefi
 run-aarch64-uefi: aarch64-uefi
 	$(call require_aarch64_uefi)
@@ -215,13 +225,13 @@ run-aarch64-uefi: aarch64-uefi
 	  mkdir -p "$$dtb_dir"; \
 	  sparse="$$dtb_dir/qemu-virt.dtb.sparse"; \
 	  packed="$$dtb_dir/qemu-virt.dtb"; \
-	  $(AARCH64_QEMU) -M virt,gic-version=2 -cpu cortex-a53 -smp $(SMP) \
+	  $(AARCH64_QEMU) -M virt,gic-version=2 -cpu cortex-a53 -smp $(run-aarch64-uefi_SMP) \
 	    -machine "dumpdtb=$$sparse" -display $(DISPLAY) -m $(MEMORY); \
 	  dtc -I dtb -O dtb -o "$$packed" "$$sparse"; \
 	  rm -f "$$sparse"; \
 	  extra_dtb="-dtb $$packed" ;; \
 	esac; \
-	$(AARCH64_QEMU) -M virt,gic-version=2$${extra_dtb:+,acpi=off} -cpu cortex-a53 -smp $(SMP) -m $(MEMORY) \
+	$(AARCH64_QEMU) -M virt,gic-version=2$${extra_dtb:+,acpi=off} -cpu cortex-a53 -smp $(run-aarch64-uefi_SMP) -m $(MEMORY) \
 	  -drive if=pflash,format=raw,readonly=on,file=$(AARCH64_UEFI_FIRMWARE) \
 	  -drive if=none,file=$(AARCH64_UEFI_DISK),format=raw,readonly=on,id=disk \
 	  -device virtio-blk-device,drive=disk \
@@ -1810,7 +1820,7 @@ HELP_SEC_RUN := \
 HELP_SEC_AARCH64 := \
 	'aarch64-uefi' '(uefi)' 'Build aarch64 disk + firmware' \
 	'aarch64-uefi-kernel' '(uefi)' 'Build aarch64 kernel.elf only' \
-	'run-aarch64-uefi' '(uefi)' 'QEMU virt + cortex-a53 + virtio-blk (override SMP with SMP=N; AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to skip auto DTB)'
+	'run-aarch64-uefi' '(uefi)' 'QEMU virt + cortex-a53 + virtio-blk (default SMP=1 = the single-core product userspace run; explicit SMP=N wins, multi-core boots come up kernel-only; AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to skip auto DTB)'
 HELP_SEC_VALIDATE := \
 	'validate' '(rootfs)' 'kernel ELF + UEFI COFF + profile info' \
 	'validate-kernel' '(rootfs)' 'kernel ELF sanity (no undef, EM_X86_64, exports)' \
