@@ -10,7 +10,9 @@
 #include <unistd.h>
 #include <stdlib.h>      /* exit(3) — POSIX atexit-aware exit (AAGU-4.6) */
 #include <stdint.h>
+#include <stdbool.h>
 #include <string.h>
+#include <termios.h>
 
 // ── Line discipline: fd 0 is /dev/tty ─────────────────────
 // The tty layer owns echo and erase (canonical mode); the shell sees
@@ -304,6 +306,8 @@ void runcmd(struct cmd *cmd) {
 // is in raw mode (erase handled locally, no echo).
 
 static void readline(char *buf, int max) {
+    struct termios tio;
+    bool local_echo = (tcgetattr(0, &tio) == 0) && ((tio.c_lflag & ECHO) == 0);
     int n = 0;
 
     for (;;) {
@@ -311,18 +315,24 @@ static void readline(char *buf, int max) {
         if (read(0, &ch, 1) <= 0) continue;
 
         if (ch == '\n' || ch == '\r') {
+            if (local_echo) write(1, "\n", 1);
             buf[n] = '\0';
             return;
         }
         if (ch == 0x7f || ch == '\b') {
             // The tty already erased in canonical mode; this is the
             // raw-mode fallback so the buffer never keeps the byte.
-            if (n > 0) n--;
+            if (n > 0) {
+                n--;
+                if (local_echo) write(1, "\b \b", 3);
+            }
             continue;
         }
         if (ch < 0x20) continue;  // ignore other control bytes
-        if (n < max - 1)
+        if (n < max - 1) {
             buf[n++] = ch;
+            if (local_echo) write(1, &ch, 1);
+        }
     }
 }
 
