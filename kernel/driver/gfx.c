@@ -280,8 +280,10 @@ static int gfx_ioctl_get_info(file_t *f, gfx_info_t *kinfo)
 static struct {
     uint64_t full_success_ns;
     uint64_t rect_success_ns;
+    uint64_t batch_success_ns;
     uint64_t full_count;
     uint64_t rect_count;
+    uint64_t batch_count;
     uint64_t row_bytes_written;          /* full path: stride per row */
     uint64_t prefix_bytes_to_fold;       /* unconsumed success prefix
                                           * from a failed attempt */
@@ -340,16 +342,21 @@ static void stats_log_maybe(uint64_t now_ns)
 
     uint64_t full_ns   = atomic_load_u64(&g_present_stats.full_success_ns);
     uint64_t rect_ns   = atomic_load_u64(&g_present_stats.rect_success_ns);
+    uint64_t batch_ns  = atomic_load_u64(&g_present_stats.batch_success_ns);
     uint64_t full_n    = atomic_load_u64(&g_present_stats.full_count);
     uint64_t rect_n    = atomic_load_u64(&g_present_stats.rect_count);
+    uint64_t batch_n   = atomic_load_u64(&g_present_stats.batch_count);
     uint64_t bytes     = atomic_load_u64(&g_present_stats.row_bytes_written);
     uint64_t failed    = atomic_load_u64(&g_present_stats.failed_attempts);
     uint64_t avg_full  = full_n  ? full_ns  / full_n  : 0;
     uint64_t avg_rect  = rect_n  ? rect_ns  / rect_n  : 0;
+    uint64_t avg_batch = batch_n ? batch_ns / batch_n : 0;
 
     log_debug("gfx_present_stats: full=%llu avg_ns=%llu rect=%llu avg_ns=%llu "
+              "batch=%llu batch_avg_ns=%llu "
               "bytes=%llu failed=%llu\n",
-              full_n, avg_full, rect_n, avg_rect, bytes, failed);
+              full_n, avg_full, rect_n, avg_rect, batch_n, avg_batch,
+              bytes, failed);
 }
 
 // ── gfx_ioctl_present ──────────────────────────────────────
@@ -754,6 +761,263 @@ static int gfx_ioctl_present_rect(file_t *f, gfx_present_rect_req_t *ureq)
     return 0;
 }
 
+// ── gfx_ioctl_present_rects — damage-region BATCH present ─────
+//
+// Spec 2026-11-19 §5 (docs/superpowers/specs/2026-11-19-gfx-damage-
+// batch-present-design.md).  Per-rect semantics are exactly those of
+// gfx_ioctl_present_rect, but one ioctl carries up to
+// GFX_PRESENT_RECTS_MAX view-local rects from ONE full-view buffer:
+// single lease, single fault context, one shared max_w*4 bounce.
+// ANY invalid rect (or bad count / reserved / completed_rects-in /
+// stride / rects array) rejects the WHOLE batch with zero fb writes.
+// Rects run in array order and may overlap (later wins).
+//
+// completed_rects is IN/OUT: caller transmits 0 (else EINVAL); on
+// success we write back count; on failure the number of rects FULLY
+// completed before the failure point.  The write-back is best-effort
+// (copy_to_user_ft after the fault context is restored); it never
+// changes the return value or errno.
+static int gfx_ioctl_present_rects(file_t *f, gfx_present_rects_req_t *ureq)
+{
+    uint64_t t_present0 = arch_clocksource_read_ns();
+
+    gfx_view_t *v = (gfx_view_t *)f->dev_private;
+    if (!v || !ureq) return -EINVAL;
+
+    // Stage 1: validate + copy the request struct.
+    if (!syscall_check_user_range((uint64_t)ureq,
+                                  sizeof(gfx_present_rects_req_t), false))
+        return -EFAULT;
+    gfx_present_rects_req_t kreq;
+    if (copy_from_user_ft(&kreq, ureq, sizeof(kreq)) < 0)
+        return -EFAULT;
+
+    // Best-effort write-back helper point: on every path from here
+    // down, kreq.completed_rects carries k (0 for pre-execution
+    // rejections) and is copied back before returning.
+#define RECTS_WRITEBACK()                                          \
+    do {                                                           \
+        copy_to_user_ft(ureq, &kreq, sizeof(kreq));                \
+    } while (0)
+
+    // Stage 2: snapshot the view rectangle + mode_seq under the lock,
+    // then drop the lock BEFORE any user-range check / setjmp arm.
+    uint32_t v_x, v_y, v_w, v_h;
+    uint64_t v_mode_seq;
+    {
+        uint64_t flags = spin_lock_irqsave(&g_gfx_table.lock);
+        if (!v->configured) {
+            spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+            return -EINVAL;
+        }
+        v_x = v->desc_x;
+        v_y = v->desc_y;
+        v_w = v->desc_w;
+        v_h = v->desc_h;
+        v_mode_seq = v->mode_seq;
+        spin_unlock_irqrestore(&g_gfx_table.lock, flags);
+    }
+
+    // Stage 3: batch-level request fields.
+    if (kreq.reserved != 0)                       return -EINVAL;
+    if (kreq.completed_rects != 0)                return -EINVAL;
+    if (kreq.count == 0 || kreq.count > GFX_PRESENT_RECTS_MAX) return -EINVAL;
+    uint32_t expected_stride = v_w * 4u;
+    if (kreq.stride != expected_stride)           return -EINVAL;
+
+    // Stage 4: stage the rect array through the fault-tolerant path.
+    uint64_t array_bytes = (uint64_t)kreq.count * sizeof(gfx_rect_t);
+    if (array_bytes / sizeof(gfx_rect_t) != (uint64_t)kreq.count)
+        return -EFAULT;
+    if (!syscall_check_user_range((uint64_t)kreq.rects, array_bytes, false)) {
+        kreq.completed_rects = 0;
+        RECTS_WRITEBACK();
+        return -EFAULT;
+    }
+    gfx_rect_t *krects = kmalloc((size_t)array_bytes);
+    if (!krects) {
+        RECTS_WRITEBACK();
+        return -ENOMEM;
+    }
+    if (copy_from_user_ft(krects, (const void *)(uintptr_t)kreq.rects,
+                          (size_t)array_bytes) < 0) {
+        kfree(krects);
+        kreq.completed_rects = 0;
+        RECTS_WRITEBACK();
+        return -EFAULT;
+    }
+
+    // Stage 5: per-rect validation, single pass — geometry
+    // (subtraction form), overflow-safe envelope math, user range.
+    // ANY failure rejects the whole batch with zero fb writes.
+    uint32_t max_w = 0;
+    for (uint32_t i = 0; i < kreq.count; i++) {
+        const gfx_rect_t *r = &krects[i];
+        if (r->w == 0 || r->h == 0) {
+            kfree(krects);
+            RECTS_WRITEBACK();
+            return -EINVAL;
+        }
+        if (r->x > v_w || r->w > v_w - r->x) {
+            kfree(krects);
+            RECTS_WRITEBACK();
+            return -EINVAL;
+        }
+        if (r->y > v_h || r->h > v_h - r->y) {
+            kfree(krects);
+            RECTS_WRITEBACK();
+            return -EINVAL;
+        }
+        if (r->w > max_w) max_w = r->w;
+
+        if (kreq.pixels == 0) {
+            kfree(krects);
+            kreq.completed_rects = 0;
+            RECTS_WRITEBACK();
+            return -EFAULT;
+        }
+        uint64_t y_term = (uint64_t)r->y * (uint64_t)kreq.stride;
+        uint64_t x_term = (uint64_t)r->x * 4u;
+        if (y_term + x_term < y_term) {
+            kfree(krects);
+            kreq.completed_rects = 0;
+            RECTS_WRITEBACK();
+            return -EFAULT;
+        }
+        uint64_t first = kreq.pixels + y_term + x_term;
+        if (first < kreq.pixels) {
+            kfree(krects);
+            kreq.completed_rects = 0;
+            RECTS_WRITEBACK();
+            return -EFAULT;
+        }
+        uint64_t last_row_off = ((uint64_t)r->h - 1u) * (uint64_t)kreq.stride;
+        if (last_row_off / (uint64_t)kreq.stride != (uint64_t)r->h - 1u) {
+            kfree(krects);
+            kreq.completed_rects = 0;
+            RECTS_WRITEBACK();
+            return -EFAULT;
+        }
+        uint64_t length = last_row_off + (uint64_t)r->w * 4u;
+        if (length < last_row_off) {
+            kfree(krects);
+            kreq.completed_rects = 0;
+            RECTS_WRITEBACK();
+            return -EFAULT;
+        }
+        if (!syscall_check_user_range(first, length, false)) {
+            kfree(krects);
+            kreq.completed_rects = 0;
+            RECTS_WRITEBACK();
+            return -EFAULT;
+        }
+    }
+
+    // Stage 6: one lease for the whole batch; destination geometry
+    // comes from the lease snapshot only.
+    fb_lease_t lease;
+    int lrc = fb_gfx_writer_begin(&lease, v_mode_seq, v);
+    if (lrc < 0) {
+        kfree(krects);
+        RECTS_WRITEBACK();
+        return lrc;
+    }
+
+    // Stage 7: one shared bounce buffer sized to the widest rect.
+    void *row_buf = kmalloc((size_t)max_w * 4u);
+    if (!row_buf) {
+        fb_writer_end(&lease);
+        kfree(krects);
+        atomic_add_u64(&g_present_stats.failed_attempts, 1);
+        RECTS_WRITEBACK();
+        return -ENOMEM;
+    }
+
+    // Arm the fault context ONCE for the whole batch.  The volatile
+    // counters survive the longjmp (see gfx_ioctl_present_rect).
+    os01_jmp_buf jb;
+    void **old_jmp = current->fault_jmp;
+    void (*old_cb)(void *) = current->fault_cleanup;
+    void *old_arg = current->fault_cleanup_arg;
+    current->fault_jmp = (void **)jb;
+    current->fault_cleanup = NULL;
+    current->fault_cleanup_arg = NULL;
+
+    volatile uint64_t prefix_bytes_this_attempt = 0;
+    volatile uint32_t completed = 0;
+
+    int rc = 0;
+    if (__builtin_setjmp((void **)jb) == 0) {
+        for (uint32_t i = 0; i < kreq.count; i++) {
+            const gfx_rect_t *r = &krects[i];
+            uint32_t row_bytes = r->w * 4u;
+            for (uint32_t row = 0; row < r->h; row++) {
+                uint64_t row_addr = kreq.pixels +
+                                    ((uint64_t)r->y + (uint64_t)row) *
+                                    (uint64_t)kreq.stride +
+                                    (uint64_t)r->x * 4u;
+#ifdef OS01_HOST_TEST
+                if (copy_from_user_ft(row_buf,
+                                      (const void *)(uintptr_t)row_addr,
+                                      (size_t)row_bytes) < 0) {
+                    rc = -EFAULT;
+                    break;
+                }
+#else
+                __builtin_memcpy(row_buf, (const void *)(uintptr_t)row_addr,
+                                 (size_t)row_bytes);
+#endif
+                int wrc = fb_write_row_leased(&lease,
+                                              v_x + r->x,
+                                              v_y + r->y + row,
+                                              row_buf, row_bytes);
+                if (wrc < 0) { rc = wrc; break; }
+                prefix_bytes_this_attempt += (uint64_t)row_bytes;
+            }
+            if (rc < 0) break;
+            completed++;
+        }
+    } else {
+        /* Longjmp from an inline-memcpy fault: the failing rect's
+         * partial rows may be visible (counted in the prefix), rects
+         * after it were not attempted. */
+        atomic_add_u64(&g_present_stats.prefix_bytes_to_fold,
+                      prefix_bytes_this_attempt);
+        rc = -EFAULT;
+    }
+
+    current->fault_jmp = old_jmp;
+    current->fault_cleanup = old_cb;
+    current->fault_cleanup_arg = old_arg;
+
+    kfree(row_buf);
+    kfree(krects);
+    fb_writer_end(&lease);
+
+    /* Best-effort write-back — a fault here does not change rc. */
+    kreq.completed_rects = completed;
+    RECTS_WRITEBACK();
+
+    if (rc < 0) {
+        atomic_add_u64(&g_present_stats.failed_attempts, 1);
+        return rc;
+    }
+
+    /* Success path — same fold-then-add ordering as the rect path. */
+    fold_prefix_bytes();
+    atomic_add_u64(&g_present_stats.row_bytes_written,
+                   prefix_bytes_this_attempt);
+
+    {
+        uint64_t dt = arch_clocksource_read_ns() - t_present0;
+        atomic_add_u64(&g_present_stats.batch_success_ns, dt);
+        atomic_add_u64(&g_present_stats.batch_count, 1);
+    }
+    stats_log_maybe(arch_clocksource_read_ns());
+    return 0;
+#undef RECTS_WRITEBACK
+}
+
 // ── gfx_input_file_check ─────────────────────────────────────
 // The input descriptor must be READABLE and must belong to the
 // expected input device.  The device identity is checked against the
@@ -831,6 +1095,13 @@ static int gfx_ioctl_file(file_t *f, int cmd, void *arg)
         // itself does syscall_check_user_range + copy_from_user_ft
         // on the 32 B request struct.
         return gfx_ioctl_present_rect(f, (gfx_present_rect_req_t *)arg);
+    }
+    case GFX_PRESENT_RECTS: {
+        // Damage-region batch present: the handler stages the 32 B
+        // request struct AND the rect array through the
+        // fault-tolerant path; per-rect validation rejects the whole
+        // batch before any fb write.
+        return gfx_ioctl_present_rects(f, (gfx_present_rects_req_t *)arg);
     }
     case GFX_ACQUIRE: {
         gfx_view_t *v = (gfx_view_t *)f->dev_private;

@@ -658,6 +658,11 @@ static int do_present_rect(file_t *f, gfx_present_rect_req_t *req)
     return (int)fd_ioctl(f, GFX_PRESENT_RECT, (void *)req);
 }
 
+static int do_present_rects(file_t *f, gfx_present_rects_req_t *req)
+{
+    return (int)fd_ioctl(f, GFX_PRESENT_RECTS, (void *)req);
+}
+
 static int do_acquire(file_t *f)
 {
     return (int)fd_ioctl(f, GFX_ACQUIRE, NULL);
@@ -2097,8 +2102,446 @@ TEST_FUNC(test_present_rect_mid_fault_with_bridge) {
     file_put(f2);
 }
 
-TEST_LIST_BEGIN
-    TEST_ENTRY(test_create_view_rejects_zero_size),
+/* ── GFX_PRESENT_RECTS batch-present tests ────────────────────────
+ *
+ * Contract (spec 2026-11-19 §5): per-rect semantics mirror
+ * GFX_PRESENT_RECT; ANY invalid rect (or bad count / reserved /
+ * completed_rects-in / stride / rects array) rejects the WHOLE batch
+ * with zero fb writes; one lease; one fault context; rects run in
+ * array order; completed_rects is IN:0 / OUT:k (k = rects fully
+ * written before the failure point, written back best-effort).
+ */
+
+/* Fill the user buffer with the standard 0xCAFE pattern (8-col
+ * stride matches the (4,5,8,6) view). */
+static void rects_fill_pattern(uint32_t *user_buf)
+{
+    fill_user_buf_pattern(user_buf);
+}
+
+TEST_FUNC(test_rects_happy_two_rects_exact_writes) {
+    reset_test_state();
+    file_t *f = open_view_4_5_8_6();
+    assert_not_null(f);
+    gfx_info_t info;
+    assert_eq(0, do_get_info(f, &info));
+
+    uint32_t *user_buf = (uint32_t *)(g_user_sim.buf + 0xA000);
+    rects_fill_pattern(user_buf);
+
+    /* rect A = (2,1,3,2) → fb x 6..8, y 6..7 (3 rows? no, 2 rows).
+     * rect B = (6,4,2,1) → fb x 10..11, y 9 (1 row). */
+    gfx_rect_t *rects = (gfx_rect_t *)(g_user_sim.buf + 0xB000);
+    rects[0] = (gfx_rect_t){ 2, 1, 3, 2 };
+    rects[1] = (gfx_rect_t){ 6, 4, 2, 1 };
+
+    gfx_present_rects_req_t req = {
+        .pixels          = (uint64_t)user_buf,
+        .stride          = info.stride,
+        .reserved        = 0,
+        .rects           = (uint64_t)rects,
+        .count           = 2,
+        .completed_rects = 0,
+    };
+    reset_write_counters();
+    assert_eq(0, do_present_rects(f, &req));
+
+    /* Rect A pixels. */
+    for (uint32_t row = 0; row < 2; row++) {
+        for (uint32_t col = 0; col < 3; col++) {
+            uint32_t v_expected = 0xCAFE0000u + (row + 1) * 8 + (col + 2);
+            uint32_t v_actual   = test_fb_buf[(6 + row) * TEST_FB_WIDTH + (6 + col)];
+            assert_eq(v_expected, v_actual);
+        }
+    }
+    /* Rect B pixels: view-local (6,4) → fb (10,9). */
+    assert_eq(0xCAFE0000u + 4 * 8 + 6, test_fb_buf[9 * TEST_FB_WIDTH + 10]);
+    assert_eq(0xCAFE0000u + 4 * 8 + 7, test_fb_buf[9 * TEST_FB_WIDTH + 11]);
+    /* Sentinels around both rects. */
+    assert_eq(0xDEADBEEFu, test_fb_buf[6 * TEST_FB_WIDTH + 5]);
+    assert_eq(0xDEADBEEFu, test_fb_buf[9 * TEST_FB_WIDTH + 9]);
+    assert_eq(0xDEADBEEFu, test_fb_buf[9 * TEST_FB_WIDTH + 12]);
+    assert_eq(0xDEADBEEFu, test_fb_buf[8 * TEST_FB_WIDTH + 10]);
+    /* 3 rows total (2 + 1); bytes = 12 + 12 + 8 = 32. */
+    assert_eq(3u, g_write_row_calls);
+    assert_eq(32u, g_write_row_total_bytes);
+    assert_eq(8u,  g_write_row_min_bytes);
+    assert_eq(12u, g_write_row_max_bytes);
+    /* One lease, released. */
+    assert_eq(0, g_test_active_writers);
+    /* completed_rects written back = count on success. */
+    assert_eq(2u, req.completed_rects);
+
+    file_put(f);
+}
+
+TEST_FUNC(test_rects_max_count_boundary) {
+    reset_test_state();
+    file_t *f = open_view_4_5_8_6();
+    assert_not_null(f);
+    gfx_info_t info;
+    assert_eq(0, do_get_info(f, &info));
+
+    uint32_t *user_buf = (uint32_t *)(g_user_sim.buf + 0xA000);
+    rects_fill_pattern(user_buf);
+
+    /* Exactly MAX 1x1 rects marching down the view's first column
+     * (view is 8x6; the last 58 rects repeat earlier pixels). */
+    gfx_rect_t *rects = (gfx_rect_t *)(g_user_sim.buf + 0xB000);
+    for (uint32_t i = 0; i < GFX_PRESENT_RECTS_MAX; i++) {
+        rects[i] = (gfx_rect_t){ 0, i % 6, 1, 1 };
+    }
+
+    gfx_present_rects_req_t req = {
+        .pixels = (uint64_t)user_buf, .stride = info.stride,
+        .reserved = 0, .rects = (uint64_t)rects,
+        .count = GFX_PRESENT_RECTS_MAX, .completed_rects = 0,
+    };
+    reset_write_counters();
+    assert_eq(0, do_present_rects(f, &req));
+    assert_eq(GFX_PRESENT_RECTS_MAX, req.completed_rects);
+    assert_eq(GFX_PRESENT_RECTS_MAX, g_write_row_calls);
+    assert_eq(GFX_PRESENT_RECTS_MAX * 4u, g_write_row_total_bytes);
+    /* First-column pixels match the buffer. */
+    for (uint32_t r = 0; r < 6; r++) {
+        assert_eq(0xCAFE0000u + r * 8,
+                  test_fb_buf[(5 + r) * TEST_FB_WIDTH + 4]);
+    }
+    assert_eq(0, g_test_active_writers);
+
+    /* MAX+1 → EINVAL, zero writes. */
+    gfx_present_rects_req_t over = req;
+    over.count = GFX_PRESENT_RECTS_MAX + 1;
+    reset_write_counters();
+    assert_eq(-EINVAL, do_present_rects(f, &over));
+    assert_eq(0u, g_write_row_calls);
+    assert_eq(0xDEADBEEFu, test_fb_buf[0]);
+    assert_eq(0, g_test_active_writers);
+
+    file_put(f);
+}
+
+TEST_FUNC(test_rects_reject_zero_writes) {
+    reset_test_state();
+    file_t *f = open_view_4_5_8_6();
+    assert_not_null(f);
+    gfx_info_t info;
+    assert_eq(0, do_get_info(f, &info));
+
+    uint32_t *user_buf = (uint32_t *)(g_user_sim.buf + 0xD000);
+    rects_fill_pattern(user_buf);
+    gfx_rect_t *rects = (gfx_rect_t *)(g_user_sim.buf + 0xE000);
+    rects[0] = (gfx_rect_t){ 0, 0, 1, 1 };
+    rects[1] = (gfx_rect_t){ 2, 1, 3, 2 };
+
+#define RECTS_REQ(fields) \
+    (gfx_present_rects_req_t) { \
+        .pixels = (uint64_t)user_buf, .stride = info.stride, \
+        .reserved = 0, .rects = (uint64_t)rects, \
+        .count = 2, .completed_rects = 0, fields }
+
+    /* count == 0 → EINVAL. */
+    gfx_present_rects_req_t count0 = RECTS_REQ(.count = 0);
+    assert_eq(-EINVAL, do_present_rects(f, &count0));
+
+    /* completed_rects in-field non-zero → EINVAL. */
+    gfx_present_rects_req_t cr_nz = RECTS_REQ(.completed_rects = 1);
+    assert_eq(-EINVAL, do_present_rects(f, &cr_nz));
+
+    /* reserved non-zero → EINVAL. */
+    gfx_present_rects_req_t res_nz = RECTS_REQ(.reserved = 1);
+    assert_eq(-EINVAL, do_present_rects(f, &res_nz));
+
+    /* stride mismatch → EINVAL. */
+    gfx_present_rects_req_t bad_stride = RECTS_REQ(.stride = info.stride + 4);
+    assert_eq(-EINVAL, do_present_rects(f, &bad_stride));
+
+    /* rects array pointer in kernel range → EFAULT. */
+    gfx_present_rects_req_t kr_rects = RECTS_REQ(.rects = 0x100000ULL);
+    assert_eq(-EFAULT, do_present_rects(f, &kr_rects));
+
+    /* rects == 0 → EFAULT. */
+    gfx_present_rects_req_t null_rects = RECTS_REQ(.rects = 0);
+    assert_eq(-EFAULT, do_present_rects(f, &null_rects));
+
+    /* pixels == 0 → EFAULT. */
+    gfx_present_rects_req_t null_pixels = RECTS_REQ(.pixels = 0);
+    assert_eq(-EFAULT, do_present_rects(f, &null_pixels));
+
+    /* Per-rect field violations — index 0 and index 1 both probed. */
+    gfx_rect_t bad;
+    gfx_present_rects_req_t per_field;
+
+    rects[0] = (gfx_rect_t){ 0, 0, 0, 1 };     /* w == 0 */
+    per_field = RECTS_REQ();
+    assert_eq(-EINVAL, do_present_rects(f, &per_field));
+
+    rects[0] = (gfx_rect_t){ 0, 0, 1, 0 };     /* h == 0 */
+    per_field = RECTS_REQ();
+    assert_eq(-EINVAL, do_present_rects(f, &per_field));
+
+    rects[0] = (gfx_rect_t){ 0, 0, UINT32_MAX, 1 }; /* huge w */
+    per_field = RECTS_REQ();
+    assert_eq(-EINVAL, do_present_rects(f, &per_field));
+
+    rects[0] = (gfx_rect_t){ 0, 1, 1, UINT32_MAX }; /* huge h */
+    per_field = RECTS_REQ();
+    assert_eq(-EINVAL, do_present_rects(f, &per_field));
+
+    rects[0] = (gfx_rect_t){ 8, 0, 1, 1 };     /* x == view_w */
+    per_field = RECTS_REQ();
+    assert_eq(-EINVAL, do_present_rects(f, &per_field));
+
+    rects[0] = (gfx_rect_t){ 0, 6, 1, 1 };     /* y == view_h */
+    per_field = RECTS_REQ();
+    assert_eq(-EINVAL, do_present_rects(f, &per_field));
+
+    /* The SECOND rect violating must also reject the whole batch. */
+    rects[0] = (gfx_rect_t){ 0, 0, 1, 1 };     /* valid again */
+    rects[1] = (gfx_rect_t){ 2, 1, 3, 0 };     /* h == 0 */
+    per_field = RECTS_REQ();
+    assert_eq(-EINVAL, do_present_rects(f, &per_field));
+    rects[1] = (gfx_rect_t){ 2, 1, 3, 2 };     /* restore */
+
+#undef RECTS_REQ
+
+    /* Nothing was written anywhere. */
+    for (size_t i = 0; i < TEST_FB_SIZE / 4; i += 997) {
+        assert_eq(0xDEADBEEFu, test_fb_buf[i]);
+    }
+    assert_eq(0u, g_write_row_calls);
+    assert_eq(0, g_test_active_writers);
+
+    file_put(f);
+}
+
+/* Mid-batch fault via the user-sim copy injector (copy_from_user_ft
+ * rc<0 path).  Counted copy calls: 1 = CREATE_VIEW staging (from
+ * open_view_4_5_8_6), 2 = request struct, 3 = rects array, then row
+ * copies.  fault_after_calls=5 → the 6th copy (rect 1's second row)
+ * faults.  Rect 0 is fully written → completed_rects=1. */
+TEST_FUNC(test_rects_mid_fault_sim_partial_prefix) {
+    reset_test_state();
+    file_t *f = open_view_4_5_8_6();
+    assert_not_null(f);
+    gfx_info_t info;
+    assert_eq(0, do_get_info(f, &info));
+
+    uint32_t *user_buf = (uint32_t *)(g_user_sim.buf + 0xA000);
+    rects_fill_pattern(user_buf);
+    gfx_rect_t *rects = (gfx_rect_t *)(g_user_sim.buf + 0xB000);
+    rects[0] = (gfx_rect_t){ 0, 0, 8, 1 };   /* view row 0 */
+    rects[1] = (gfx_rect_t){ 0, 1, 8, 2 };   /* view rows 1..2 */
+    rects[2] = (gfx_rect_t){ 0, 3, 8, 1 };   /* view row 3 */
+
+    gfx_present_rects_req_t req = {
+        .pixels = (uint64_t)user_buf, .stride = info.stride,
+        .reserved = 0, .rects = (uint64_t)rects,
+        .count = 3, .completed_rects = 0,
+    };
+    reset_write_counters();
+    g_user_sim.fault_after_calls = 5;   /* 6th copy_from_user_ft faults */
+
+    int rc = do_present_rects(f, &req);
+    assert_eq(-EFAULT, rc);
+    assert_eq(1u, req.completed_rects);   /* rect 0 done, rect 1 in flight */
+    /* Rows written: rect0 row0 (fb y=5), rect1 row0 (fb y=6). */
+    assert_eq(2u, g_write_row_calls);
+    assert_eq(64u, g_write_row_total_bytes);
+    for (uint32_t col = 0; col < 8; col++) {
+        assert_eq(0xCAFE0000u + col,
+                  test_fb_buf[5 * TEST_FB_WIDTH + 4 + col]);
+        assert_eq(0xCAFE0000u + 8 + col,
+                  test_fb_buf[6 * TEST_FB_WIDTH + 4 + col]);
+    }
+    /* rect1 row1 (fb y=7) and rect2 (fb y=8) untouched. */
+    for (uint32_t col = 0; col < 8; col++) {
+        assert_eq(0xDEADBEEFu, test_fb_buf[7 * TEST_FB_WIDTH + 4 + col]);
+        assert_eq(0xDEADBEEFu, test_fb_buf[8 * TEST_FB_WIDTH + 4 + col]);
+    }
+    assert_eq(0, g_test_active_writers);
+    assert_null(test_task.fault_jmp);
+    assert_null(test_task.fault_cleanup);
+    assert_null(test_task.fault_cleanup_arg);
+
+    file_put(f);
+}
+
+/* Mid-batch fault via the REAL page-fault bridge (longjmp path):
+ * rect 1's row source sits on a PROT_NONE page. */
+TEST_FUNC(test_rects_mid_fault_bridge_prefix) {
+    reset_test_state();
+    file_t *f = open_view_4_5_8_6();
+    assert_not_null(f);
+    gfx_info_t info;
+    assert_eq(0, do_get_info(f, &info));
+
+    size_t page = 4096;
+    uint8_t *region = (uint8_t *)mmap(NULL, 2 * page,
+                                      PROT_READ | PROT_WRITE,
+                                      MAP_PRIVATE | MAP_ANONYMOUS,
+                                      -1, 0);
+    assert_true(region != MAP_FAILED);
+    assert_eq(0, mprotect(region + page, page, PROT_NONE));
+
+    /* pixels = region + page - 32: rect0 row0 = [page-32, page)
+     * (writable), rect1 row0 = pixels + stride = [page, page+32)
+     * (PROT_NONE → fault).  Stride = 32 (8x6 view). */
+    uint8_t *pixels = region + page - 32;
+    uint32_t *row0_src = (uint32_t *)pixels;
+    for (uint32_t c = 0; c < 8; c++) row0_src[c] = 0xCAFE0000u + c;
+
+    g_bridge_ctx.task = &test_task;
+    assert_eq(0, gfx_host_fault_install(test_get_jump, &g_bridge_ctx,
+                                        region + page, page));
+
+    gfx_rect_t *rects = (gfx_rect_t *)(g_user_sim.buf + 0xB000);
+    rects[0] = (gfx_rect_t){ 0, 0, 8, 1 };
+    rects[1] = (gfx_rect_t){ 0, 1, 8, 1 };
+
+    volatile int fault_seen = 0;
+    if (__builtin_setjmp(g_test_jmp_buf) == 0) {
+        gfx_present_rects_req_t req = {
+            .pixels = (uint64_t)pixels, .stride = info.stride,
+            .reserved = 0, .rects = (uint64_t)rects,
+            .count = 2, .completed_rects = 0,
+        };
+        int rc = do_present_rects(f, &req);
+        assert_eq(-EFAULT, rc);
+        /* rect 0 completed fully before rect 1's row faulted. */
+        assert_eq(1u, req.completed_rects);
+        fault_seen = 1;
+    } else {
+        fault_seen = 1;
+    }
+    assert_eq(1, fault_seen);
+
+    assert_null(test_task.fault_jmp);
+    assert_null(test_task.fault_cleanup);
+    assert_null(test_task.fault_cleanup_arg);
+    assert_eq(0, g_test_active_writers);
+    assert_eq(1u, g_write_row_calls);
+    assert_eq(32u, g_write_row_total_bytes);
+    /* rect0 row visible at fb y=5; rect1's target (fb y=6) sentinel. */
+    for (uint32_t col = 0; col < 8; col++) {
+        assert_eq(0xCAFE0000u + col,
+                  test_fb_buf[5 * TEST_FB_WIDTH + 4 + col]);
+        assert_eq(0xDEADBEEFu, test_fb_buf[6 * TEST_FB_WIDTH + 4 + col]);
+    }
+
+    gfx_host_fault_restore();
+    munmap(region, 2 * page);
+    file_put(f);
+}
+
+TEST_FUNC(test_rects_eacces_zero_writes) {
+    reset_test_state();
+    file_t *f = open_gfx0();
+    assert_not_null(f);
+    gfx_view_desc_t v = { 4, 5, 8, 6 };
+    assert_eq(0, do_create_view(f, &v));
+    gfx_info_t info;
+    assert_eq(0, do_get_info(f, &info));
+
+    uint32_t *user_buf = (uint32_t *)(g_user_sim.buf + 0xA000);
+    rects_fill_pattern(user_buf);
+    gfx_rect_t *rects = (gfx_rect_t *)(g_user_sim.buf + 0xB000);
+    rects[0] = (gfx_rect_t){ 0, 0, 1, 1 };
+
+    gfx_present_rects_req_t req = {
+        .pixels = (uint64_t)user_buf, .stride = info.stride,
+        .reserved = 0, .rects = (uint64_t)rects,
+        .count = 1, .completed_rects = 0,
+    };
+    assert_eq(-EACCES, do_present_rects(f, &req));
+    assert_eq(0xDEADBEEFu, test_fb_buf[0]);
+    assert_eq(0u, g_write_row_calls);
+    assert_eq(0, g_test_active_writers);
+
+    file_put(f);
+}
+
+TEST_FUNC(test_rects_enomem_cleanup) {
+    reset_test_state();
+    file_t *f = open_view_4_5_8_6();
+    assert_not_null(f);
+    gfx_info_t info;
+    assert_eq(0, do_get_info(f, &info));
+
+    uint32_t *user_buf = (uint32_t *)(g_user_sim.buf + 0xA000);
+    rects_fill_pattern(user_buf);
+    gfx_rect_t *rects = (gfx_rect_t *)(g_user_sim.buf + 0xB000);
+    rects[0] = (gfx_rect_t){ 0, 0, 1, 1 };
+    rects[1] = (gfx_rect_t){ 2, 1, 3, 2 };
+
+    gfx_present_rects_req_t req = {
+        .pixels = (uint64_t)user_buf, .stride = info.stride,
+        .reserved = 0, .rects = (uint64_t)rects,
+        .count = 2, .completed_rects = 0,
+    };
+
+    /* 1st kmalloc (rects array) fails → ENOMEM before the lease. */
+    g_kmalloc_fail_after = 0;
+    reset_write_counters();
+    assert_eq(-ENOMEM, do_present_rects(f, &req));
+    assert_eq(0u, g_write_row_calls);
+    assert_eq(0, g_test_active_writers);
+
+    /* 2nd kmalloc (row bounce) fails → ENOMEM, lease released. */
+    g_kmalloc_fail_after = 1;
+    assert_eq(-ENOMEM, do_present_rects(f, &req));
+    assert_eq(0u, g_write_row_calls);
+    assert_eq(0, g_test_active_writers);
+    g_kmalloc_fail_after = -1;
+
+    /* Recovery: same request succeeds now. */
+    reset_write_counters();
+    assert_eq(0, do_present_rects(f, &req));
+    assert_eq(3u, g_write_row_calls);
+    assert_eq(2u, req.completed_rects);
+
+    file_put(f);
+}
+
+/* One shared pixels base means overlapping rects re-write identical
+ * content; the observable contract is "all rows written, counters
+ * exact, fb matches the buffer". */
+TEST_FUNC(test_rects_overlap_in_order) {
+    reset_test_state();
+    file_t *f = open_view_4_5_8_6();
+    assert_not_null(f);
+    gfx_info_t info;
+    assert_eq(0, do_get_info(f, &info));
+
+    uint32_t *user_buf = (uint32_t *)(g_user_sim.buf + 0xA000);
+    rects_fill_pattern(user_buf);
+    gfx_rect_t *rects = (gfx_rect_t *)(g_user_sim.buf + 0xB000);
+    rects[0] = (gfx_rect_t){ 0, 0, 8, 3 };   /* view rows 0..2 */
+    rects[1] = (gfx_rect_t){ 0, 2, 8, 1 };   /* view row 2 again */
+
+    gfx_present_rects_req_t req = {
+        .pixels = (uint64_t)user_buf, .stride = info.stride,
+        .reserved = 0, .rects = (uint64_t)rects,
+        .count = 2, .completed_rects = 0,
+    };
+    reset_write_counters();
+    assert_eq(0, do_present_rects(f, &req));
+    /* 4 rows total; bytes = 3*32 + 1*32 = 128. */
+    assert_eq(4u, g_write_row_calls);
+    assert_eq(128u, g_write_row_total_bytes);
+    for (uint32_t r = 0; r < 3; r++) {
+        for (uint32_t c = 0; c < 8; c++) {
+            assert_eq(0xCAFE0000u + r * 8 + c,
+                      test_fb_buf[(5 + r) * TEST_FB_WIDTH + 4 + c]);
+        }
+    }
+    assert_eq(2u, req.completed_rects);
+    assert_eq(0, g_test_active_writers);
+
+    file_put(f);
+}
+
+TEST_LIST_BEGIN    TEST_ENTRY(test_create_view_rejects_zero_size),
     TEST_ENTRY(test_create_view_rejects_uint32_max_overflow),
     TEST_ENTRY(test_create_view_rejects_stride_overflow),
     TEST_ENTRY(test_create_view_exact_fit_right_edge),
@@ -2138,6 +2581,14 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_present_rect_invalid_geometry),
     TEST_ENTRY(test_present_rect_errors_and_cleanup),
     TEST_ENTRY(test_present_rect_mid_fault_with_bridge),
+    TEST_ENTRY(test_rects_happy_two_rects_exact_writes),
+    TEST_ENTRY(test_rects_max_count_boundary),
+    TEST_ENTRY(test_rects_reject_zero_writes),
+    TEST_ENTRY(test_rects_mid_fault_sim_partial_prefix),
+    TEST_ENTRY(test_rects_mid_fault_bridge_prefix),
+    TEST_ENTRY(test_rects_eacces_zero_writes),
+    TEST_ENTRY(test_rects_enomem_cleanup),
+    TEST_ENTRY(test_rects_overlap_in_order),
 TEST_LIST_END
 
 int main(void) {
