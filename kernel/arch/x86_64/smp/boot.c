@@ -3,7 +3,8 @@
 // x86_64 SMP bring-up helpers — extracted from kernel/core/main.c
 // as part of the kernel-main refactor (Task 5).
 //
-// Owns two ordered phases that previously lived inline in kernel_main:
+// Owns the per-CPU construction phase that previously lived inline in
+// kernel_main:
 //
 //   x86_64_boot_percpu() — single-CPU MADT traversal with NR_CPUS
 //                          drop-out branch, percpu_init() per enabled
@@ -11,13 +12,13 @@
 //                          online writes in that exact order, and the
 //                          num_cpus publication only AFTER the loop
 //                          completes.  The "publish at end" ordering
-//                          matters: AP spin-ups in the next phase read
+//                          matters: AP spin-ups in the next stage read
 //                          num_cpus to know how many APs to start.
 //
-//   x86_64_boot_aps()    — tick_start() (now this_cpu() is valid for
-//                          the BSP) → smp_boot_aps() (INIT-SIPI-SIPI
-//                          for every AP) → BSP CPU prepare dispatch
-//                          (subsys_prepare_cpus).  No state, no locals.
+// The stage-8 AP bring-up is the unified kernel/core/smp.c
+// arch_boot_aps() since the SMP boot unification (spec 2026-11-19);
+// the x86_64 side of it lives in smp/smp.c (arch/smp.h strong
+// overrides).
 
 #include <arch/x86_64/smp_boot.h>
 #include <arch/boot.h>
@@ -43,7 +44,6 @@
 #include <arch/cpu.h>
 #include <arch/irq.h>
 #include <core/assert.h>
-#include <core/smp.h>         // smp_boot_aps
 
 // ── M3 Task 12: ipi_ready publication (x86 side) ─────────
 // Mirrors aarch64's ipi_ready_publish_and_count (vmm_gate.c): a CPU must
@@ -144,13 +144,10 @@ void arch_boot_smp_prepare(void)
     tick_start();
 }
 
-void x86_64_boot_aps(void)
-{
-    smp_boot_aps();
-
-    // BSP CPU 数据准备 dispatch
-    subsys_prepare_cpus();
-}
+/* arch_boot_aps() (stage 8 AP bring-up + subsys_prepare_cpus) is the
+ * unified kernel/core/smp.c orchestrator since the SMP boot unification
+ * (spec 2026-11-19); the x86_64 backend implements the arch/smp.h
+ * strong overrides in smp/smp.c. */
 
 // ── Boot Facade Strong Overrides ─────────────────────────────
 
@@ -165,11 +162,6 @@ void arch_boot_percpu(void)
     }
     x86_64_boot_percpu();
     x86_boot_irq_context_prepare();
-}
-
-void arch_boot_aps(void)
-{
-    x86_64_boot_aps();
 }
 
 void arch_boot_runtime(void)

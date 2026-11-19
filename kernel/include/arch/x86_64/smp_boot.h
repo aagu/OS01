@@ -4,18 +4,20 @@
 // ── x86_64 SMP bring-up (Task 5 of kernel-main refactor) ─────────
 //
 // Pulled out of kernel/core/main.c to keep kernel_main() a thin call
-// sequence.  The two helpers together own the per-CPU + SMP stage:
+// sequence.  Owns the per-CPU construction stage:
 //
 //   x86_64_boot_percpu() — MADT traversal, percpu_init(), BSP
 //                          TSS/GS/online, num_cpus publication.
 //                          Must run BEFORE the AP boot sequence so that
-//                          smp_boot_aps() can iterate over a fully
+//                          the SMP AP bring-up can iterate over a fully
 //                          populated percpu_data[] and so that
 //                          this_cpu() is valid for the tick source.
 //
-//   x86_64_boot_aps()    — tick_start() → smp_boot_aps() →
-//                          subsys_prepare_cpus().  Owns the BSP→AP
-//                          bring-up and the BSP CPU prepare dispatch.
+//   AP bring-up          — arch_boot_aps() is the unified
+//                          kernel/core/smp.c orchestrator (spec
+//                          2026-11-19); the x86_64 backend lives in
+//                          smp/smp.c as the arch/smp.h strong
+//                          overrides.
 //
 // Call order in kernel_main (post-Task-6):
 //     x86_64_boot_subsystems(bootctx);
@@ -28,8 +30,8 @@
 //     fs_boot_mounts();
 //     tty_boot_init();
 //     fs_boot_probe_devfs();
-//     x86_64_boot_aps();              // AP bringup (still after the devfs
-//                                     // smoke probe)
+//     arch_boot_aps();                // unified AP bringup (still after the
+//                                     // devfs smoke probe)
 //
 // BSP per-CPU registration moved forward in Task 6 so the CSPRNG, FS,
 // and TTY code paths see a valid this_cpu() (num_cpus != 0 doubles as
@@ -38,6 +40,5 @@
 // the boot log still appears after /dev/null.
 
 void x86_64_boot_percpu(void);
-void x86_64_boot_aps(void);
 
 #endif // _ARCH_X86_64_SMP_BOOT_H

@@ -86,7 +86,9 @@ trampoline_long:
     // Load kernel stack
     movq    trampoline_data + 16(%rip), %rsp // tdata->stack
 
-    // Call ap_entry
+    // Call the unified AP C entry with SysV args (cpu_id, percpu base)
+    movl    trampoline_data + 36(%rip), %edi // arg1: tdata->cpu_id
+    movq    trampoline_data + 8(%rip),  %rsi // arg2: tdata->gs_base (percpu_data[i])
     movq    trampoline_data + 24(%rip), %rax // tdata->entry
     call    *%rax
 

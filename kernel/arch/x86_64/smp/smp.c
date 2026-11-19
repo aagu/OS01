@@ -1,5 +1,7 @@
 #include <arch/x86_64/trampoline.h>
 #include <arch/x86_64/smp/boot_sync.h>
+#include <arch/smp.h>
+#include <errno.h>
 #include <percpu/percpu.h>
 #include <intr/apic.h>
 #include <intr/ipi.h>
@@ -103,12 +105,34 @@ static void ap_init_lapic(void)
     lapic_write(LAPIC_EOI, 0);
 }
 
-void ap_entry(void)
-{
-    percpu_t *cpu = this_cpu();
+// ── Unified arch/smp.h status snapshot ─────────────────────
 
+static struct arch_smp_boot_status x86_smp_status;
+
+/* Record a failed AP bring-up and hand the negative errno to the
+ * caller; the unified Fail-Closed stop (log + boot_failure_stop) is
+ * owned by kernel/core/smp.c::smp_boot_fail. */
+static int x86_smp_fail(uint32_t cpu, enum smp_boot_stage stage,
+                        int32_t arch_rc, int ret)
+{
+    x86_smp_status.failed_cpu = cpu;
+    x86_smp_status.failed_stage = stage;
+    x86_smp_status.arch_rc = arch_rc;
+    return ret;
+}
+
+const struct arch_smp_boot_status *arch_smp_last_status(void)
+{
+    return &x86_smp_status;
+}
+
+/* ── AP lifecycle hooks (strong overrides, called only by
+ * kernel/core/smp.c::smp_ap_common_entry) ─────────────────── */
+
+void arch_smp_ap_cpu_init(uint32_t cpu_id, struct percpu *cpu)
+{
     debug_sched("SMP: AP %u (APIC ID %u) reported\n",
-                  cpu->cpu_id, cpu->arch_processor_id);
+                  cpu_id, cpu->arch_processor_id);
 
     uint64_t apic_msr = rdmsr(IA32_APIC_BASE);
     if (!(apic_msr & APIC_BASE_ENABLE)) {
@@ -154,10 +178,10 @@ void ap_entry(void)
         :: "r"((uint16_t)KERNEL_DS) : "memory", "rax"
     );
 
-    // TSS — per-CPU, installed by smp_boot_aps via set_tss_descriptor.
-    cpu->tss = &init_tss[cpu->cpu_id];
+    // TSS — per-CPU, installed by arch_smp_boot_aps via set_tss_descriptor.
+    cpu->tss = &init_tss[cpu_id];
 
-    // Initialise the idle task's thread (allocated by smp_boot_aps).
+    // Initialise the idle task's thread (allocated by arch_smp_boot_aps).
     // current = idle task (get_current_task via RSP masking).
     memset(cpu->idle->thread, 0, sizeof(thread_t));
     cpu->idle->thread->rsp0 = (uint64_t)cpu->idle + STACK_SIZE;
@@ -179,10 +203,10 @@ void ap_entry(void)
 
     // Load the per-CPU Task Register.  Each CPU has its own TSS
     // descriptor in the shared GDT at slot 8+2*cpu_id (installed by
-    // smp_boot_aps).  Without this, the CPU would use the BSP's TSS
+    // arch_smp_boot_aps).  Without this, the CPU would use the BSP's TSS
     // and corrupt the BSP's ring-0 stack pointer on every context
     // switch.
-    load_TR((8 + cpu->cpu_id * 2));
+    load_TR((8 + cpu_id * 2));
 
     // NMI ignores IF. Keep LINT inputs masked until the kernel GDT/IDT,
     // selectors and per-CPU TSS/IST are usable (GS was set by trampoline).
@@ -197,16 +221,21 @@ void ap_entry(void)
     // publish entirely).
     {
         bool tick_started = lapic_timer_start(100);
-        sched_accounting_cpu_start(cpu->cpu_id, 100, tick_started);
+        sched_accounting_cpu_start(cpu_id, 100, tick_started);
     }
 
-    /* BOOT-1: the AP publishes its own runtime online — LAPIC, GDT/IDT,
-     * selectors, idle/thread, TSS/TR, NMI routing and the local tick
-     * attempt above are all complete here.  Release store: the BSP's
-     * bounded wait acquire-reads this exact publication.  Publishing
-     * BEFORE the TSC handshake avoids BSP/AP mutual spin (spec §5.2). */
-    boot1_fault_before_online(cpu->cpu_id);
-    __atomic_store_n(&cpu->online, 1, __ATOMIC_RELEASE);
+    /* BOOT-1: everything the AP publishes online AFTER is complete here
+     * (LAPIC, GDT/IDT, selectors, idle/thread, TSS/TR, NMI routing and
+     * the local tick attempt).  The online=1 publication itself is the
+     * common entry's job.  Fault injection sits at the very end so the
+     * delay-online / no-online variants block precisely before it. */
+    boot1_fault_before_online(cpu_id);
+}
+
+void arch_smp_ap_post_online(uint32_t cpu_id, struct percpu *cpu)
+{
+    (void)cpu_id;
+
     uint32_t w = 0;
     while (w++ < SYNC_SPIN_LIMIT &&
            !__atomic_load_n(&cpu->tsc_sync_go, __ATOMIC_ACQUIRE))  // 2. 有界等 BSP
@@ -215,15 +244,24 @@ void ap_entry(void)
         cpu->tsc_boot = rdtsc();         // 3. 先写采样值 …
         __atomic_store_n(&cpu->tsc_sampled, 1, __ATOMIC_RELEASE);  // 4. … 再发布完成
     }
+}
 
-    arch_local_irq_enable();
+void arch_smp_ap_publish_ipi_ready(uint32_t cpu_id, struct percpu *cpu)
+{
+    (void)cpu;
     /* M3 Task 12: AP publishes ipi_ready after IDT/handler are live
-     * (lidt above) and IRQs are unmasked (arch_local_irq_enable above).
-     * No smp_starting gate on x86 (aarch64-only sequencing device). */
-    ipi_ready_publish_ap(cpu->cpu_id);
-    boot1_fault_after_ipi_ready(cpu->cpu_id);
+     * (lidt in arch_smp_ap_cpu_init) and IRQs are unmasked
+     * (arch_local_irq_enable in the common entry).  No smp_starting
+     * gate on x86 (aarch64-only sequencing device). */
+    ipi_ready_publish_ap(cpu_id);
+    boot1_fault_after_ipi_ready(cpu_id);
+}
+
+void arch_smp_ap_enter_idle(uint32_t cpu_id, struct percpu *cpu)
+{
+    (void)cpu_id;   /* only the (NDEBUG-eliminated) debug line uses it */
     debug_sched("SMP: AP %u online (idle pid=%d), entering idle\n",
-                  cpu->cpu_id, cpu->idle->pid);
+                  cpu_id, cpu->idle->pid);
 
     /* RELEASE: paired with the acquire loads in the constructor /
      * placement / balance / schedule readers (P1 spec §6). */
@@ -270,24 +308,20 @@ static task_t *create_idle_task(uint32_t cpu_num)
     return tsk;
 }
 
-/* BOOT-1: local noreturn fatal helper.  A failed AP boot stops the BSP
- * for good — no continuation into task_init, no PID 1.  Any resource an
- * AP may already be using (idle stack, thread, task-list node, TSS,
- * trampoline data) is NEVER freed or reused after the SIPI went out;
- * fail-closed replaces the old "free and continue" degradation, whose
- * safety against a late AP was unprovable (spec §6). */
-static void boot_fatal_cpu(uint32_t cpu, const char *stage) __attribute__((noreturn));
-static void boot_fatal_cpu(uint32_t cpu, const char *stage)
+int arch_smp_boot_aps(uint32_t cpu_count, arch_smp_ap_entry_t entry,
+                      struct percpu *per_cpu_data)
 {
-    log_err("[boot-1] FATAL cpu=%u stage=%s\n", cpu, stage);
-    kpanic("BOOT-1: AP boot failed, cpu=%u stage=%s", cpu, stage);
-    /* kpanic() halts forever but its shared declaration is not marked
-     * noreturn; pin the noreturn contract locally. */
-    __builtin_unreachable();
-}
+    /* The assembly/runtime paths index the global percpu_data[] — a
+     * non-global percpu base is a boot protocol error (spec §4.1.2). */
+    if (!entry || per_cpu_data != percpu_data ||
+        cpu_count == 0u || cpu_count > (uint32_t)NR_CPUS)
+        return x86_smp_fail(0, SMP_STAGE_INVARIANT, -EINVAL, -EINVAL);
 
-void smp_boot_aps(void)
-{
+    /* BSP counts as online from the start; each AP adds itself. */
+    x86_smp_status.requested = cpu_count;
+    x86_smp_status.online = 1;
+    x86_smp_status.online_mask = 1ULL;
+
     boot1_fault_variant_identity();
     ipi_init();
     /* M3 Task 12: BSP publishes ipi_ready only after the TLB IPI handler
@@ -305,27 +339,25 @@ void smp_boot_aps(void)
 
     trampoline_data_t *tdata = (trampoline_data_t *)Phy_To_Virt(TRAMPOLINE_DATA_BASE);
 
-    for (uint32_t i = 0; i < num_cpus; i++) {
-        if (i == 0) continue;  // skip BSP (already running)
-
-        uint32_t ap_id = percpu_data[i].arch_processor_id;
+    for (uint32_t i = 1; i < cpu_count; i++) {
+        uint32_t ap_id = per_cpu_data[i].arch_processor_id;
         debug_sched("SMP: booting AP %u (APIC ID %u)\n", i, ap_id);
 
         /* BOOT-1 stage 1: the target must start with no publication.
          * Residual online/scheduler_ok is a boot protocol error — it is
          * never cleared to mask it (spec §6 step 1). */
-        if (__atomic_load_n(&percpu_data[i].online, __ATOMIC_ACQUIRE) != 0 ||
-            __atomic_load_n(&percpu_data[i].scheduler_ok, __ATOMIC_ACQUIRE) != 0)
-            boot_fatal_cpu(i, "invariant");
+        if (__atomic_load_n(&per_cpu_data[i].online, __ATOMIC_ACQUIRE) != 0 ||
+            __atomic_load_n(&per_cpu_data[i].scheduler_ok, __ATOMIC_ACQUIRE) != 0)
+            return x86_smp_fail(i, SMP_STAGE_INVARIANT, -EINVAL, -EINVAL);
 
-        // Create the AP's idle task — the AP runs ap_entry() on
+        // Create the AP's idle task — the AP runs the unified C entry on
         // this task's kernel stack, so get_current_task() = idle.
         // Allocation failure happens BEFORE the SIPI, so nothing was
         // exposed to the AP yet; fatal here is safe (spec §6).
         task_t *idle = create_idle_task(i);
         if (!idle)
-            boot_fatal_cpu(i, "prepare");
-        percpu_data[i].idle = idle;
+            return x86_smp_fail(i, SMP_STAGE_PREPARE, -ENOMEM, -ENOMEM);
+        per_cpu_data[i].idle = idle;
         // Add to the global task list so schedule() can find it.
         // Must use task_list_add() which holds task_list_lock:
         // previously-booted APs may already be running schedule()
@@ -337,16 +369,16 @@ void smp_boot_aps(void)
         // Without per-CPU TSS areas each core's context-switch path
         // would overwrite every other core's ring-0 stack pointer.
         set_tss_descriptor(8 + i * 2, &init_tss[i]);
-        percpu_data[i].tss_hw = &init_tss[i];   // AP uses its own TSS
+        per_cpu_data[i].tss_hw = &init_tss[i];   // AP uses its own TSS
 
         /* Trampoline data fill — the ONLY fill site.  BOOT-1: the next
          * AP's fill happens at the top of the next iteration, i.e. only
          * after this AP published scheduler_ok (stage 3 below), so the
          * still-running trampoline handshake can never be overwritten. */
         tdata->cr3     = bsp_cr3;
-        tdata->gs_base = (uint64_t)&percpu_data[i];
+        tdata->gs_base = (uint64_t)&per_cpu_data[i];
         tdata->stack   = (uint64_t)idle + STACK_SIZE;
-        tdata->entry   = (uint64_t)ap_entry;
+        tdata->entry   = (uint64_t)(uintptr_t)entry;
         tdata->apic_id = ap_id;
         tdata->cpu_id  = i;
         __sync_synchronize();
@@ -371,16 +403,16 @@ void smp_boot_aps(void)
          * publication.  A constructed CPU is not a running CPU, so the
          * pre-SIPI construction cannot satisfy this wait.  The helper's
          * budget is a polling budget, not a wall-clock deadline. */
-        if (!x86_smp_wait_u32_acquire(&percpu_data[i].online,
+        if (!x86_smp_wait_u32_acquire(&per_cpu_data[i].online,
                                       X86_SMP_READY_SPIN_LIMIT))
-            boot_fatal_cpu(i, "online");
+            return x86_smp_fail(i, SMP_STAGE_ONLINE, -ETIMEDOUT, -ETIMEDOUT);
 
         debug_sched("SMP: AP %u (APIC ID %u) booted successfully\n", i, ap_id);
 
         // TSC 握手采样：BSP release 发起、acquire 等 AP 回写，算跨核偏移。
         // tsc_boot 在 sampled 之前由 AP 写入；超时仍按既有策略 offset=0
         // 并告警 —— 采样超时不是启动失败（spec §6 step 4）。
-        __atomic_store_n(&percpu_data[i].tsc_sync_go, 1, __ATOMIC_RELEASE);
+        __atomic_store_n(&per_cpu_data[i].tsc_sync_go, 1, __ATOMIC_RELEASE);
         uint64_t bsp_tsc = rdtsc();
         {
             /* tsc_sampled is a u64 word, so this advisory wait keeps its
@@ -390,32 +422,35 @@ void smp_boot_aps(void)
              * failure (spec §6 step 4). */
             uint32_t w = 0;
             while (w++ < SYNC_SPIN_LIMIT &&
-                   !__atomic_load_n(&percpu_data[i].tsc_sampled,
+                   !__atomic_load_n(&per_cpu_data[i].tsc_sampled,
                                     __ATOMIC_ACQUIRE))
                 arch_cpu_pause();
         }
-        if (!__atomic_load_n(&percpu_data[i].tsc_sampled, __ATOMIC_ACQUIRE)) {
+        if (!__atomic_load_n(&per_cpu_data[i].tsc_sampled, __ATOMIC_ACQUIRE)) {
             debug_sched("SMP: TSC sync AP%u timeout, offset unset\n", i);
-            percpu_data[i].tsc_offset = 0;
+            per_cpu_data[i].tsc_offset = 0;
         } else {
-            uint64_t ap_tsc = percpu_data[i].tsc_boot;
-            percpu_data[i].tsc_offset = (int64_t)(bsp_tsc - ap_tsc);
+            uint64_t ap_tsc = per_cpu_data[i].tsc_boot;
+            per_cpu_data[i].tsc_offset = (int64_t)(bsp_tsc - ap_tsc);
             debug_sched("SMP: TSC sync AP%u: offset=%+ld\n", i,
-                        (long)percpu_data[i].tsc_offset);
+                        (long)per_cpu_data[i].tsc_offset);
         }
 
         /* BOOT-1 stage 3: scheduler_ok gates trampoline reuse — the next
          * AP's trampoline fill only happens after this publication is
          * acquire-observed (spec §4 invariant 6). */
-        if (!x86_smp_wait_u32_acquire(&percpu_data[i].scheduler_ok,
+        if (!x86_smp_wait_u32_acquire(&per_cpu_data[i].scheduler_ok,
                                       X86_SMP_READY_SPIN_LIMIT))
-            boot_fatal_cpu(i, "scheduler");
+            return x86_smp_fail(i, SMP_STAGE_SCHEDULER, -ETIMEDOUT, -ETIMEDOUT);
 
         /* Invariant re-check under acquire: once scheduler_ok was
          * observed, online ∧ ipi_ready must both hold (spec §6 step 5). */
-        if (__atomic_load_n(&percpu_data[i].online, __ATOMIC_ACQUIRE) != 1 ||
-            __atomic_load_n(&percpu_data[i].ipi_ready, __ATOMIC_ACQUIRE) != 1)
-            boot_fatal_cpu(i, "invariant");
+        if (__atomic_load_n(&per_cpu_data[i].online, __ATOMIC_ACQUIRE) != 1 ||
+            __atomic_load_n(&per_cpu_data[i].ipi_ready, __ATOMIC_ACQUIRE) != 1)
+            return x86_smp_fail(i, SMP_STAGE_INVARIANT, -EIO, -EIO);
+
+        x86_smp_status.online++;
+        x86_smp_status.online_mask |= (1ULL << i);
 
         log_info("[boot-1] ready cpu=%u online=1 ipi_ready=1 scheduler_ok=1\n",
                  i);
@@ -423,9 +458,9 @@ void smp_boot_aps(void)
         for (volatile uint32_t d = 0; d < 10000; d++) arch_cpu_pause();
     }
 
-    /* BOOT-1: all discovered CPUs satisfied the boot contract (BSP
-     * included — the loop above is fatal on any AP failure).  Emitted
-     * exactly once; N includes the BSP, so a single-CPU boot has no AP
-     * ready lines but still gets this line (spec §6). */
-    log_info("[boot-1] complete discovered=%u ready=%u\n", num_cpus, num_cpus);
+    /* BOOT-1: all APs satisfied the boot contract.  The unified
+     * "[boot-1] complete discovered=N ready=N" marker and the post-boot
+     * hook / subsys_prepare_cpus() ordering are owned by
+     * kernel/core/smp.c::arch_boot_aps. */
+    return 0;
 }
