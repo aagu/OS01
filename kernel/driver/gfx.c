@@ -57,7 +57,9 @@
 #include <string.h>
 #include <stdint.h>
 #include <stdlib.h>              // free — file_alloc uses calloc, not kmalloc
+#ifdef __x86_64__
 #include <arch/x86_64/uaccess.h>
+#endif
 
 // ── The input device ops ─────────────────────────────────────
 // The keyboard / mouse device ops live in the x86-only PS/2 drivers
@@ -65,8 +67,10 @@
 // architecture-neutral.  The references are weak so a platform without
 // an input chain still links: there the ops do not exist, no input can
 // be bound, and every bind is refused with EINVAL.
+#if defined(__x86_64__) || defined(OS01_HOST_TEST)
 extern const struct devfs_ops keyboard_ops __attribute__((weak));
 extern const struct devfs_ops mouse_ops __attribute__((weak));
+#endif
 
 // ── Per-file view state is declared in kernel/include/driver/gfx.h
 //    so the test TU can reference the struct.  Here we only operate
@@ -465,6 +469,8 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq,
         return -ENOMEM;
     }
 
+    int rc;
+#if defined(__x86_64__) || defined(OS01_HOST_TEST)
     os01_jmp_buf jb;
     void **old_jmp = current->fault_jmp;
     void (*old_cb)(void *) = current->fault_cleanup;
@@ -473,23 +479,23 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq,
     current->fault_cleanup = NULL;
     current->fault_cleanup_arg = NULL;
 
-    int rc;
     if (__builtin_setjmp((void **)jb) == 0) {
+#endif
         rc = 0;
         for (uint32_t row = 0; row < v_h; row++) {
             uint64_t row_addr = kreq.pixels + (uint64_t)row * (uint64_t)kreq.stride;
 #ifdef OS01_TEST_GFX_PRESENT_AB
             uint64_t before_copy = probe ? arch_clocksource_read_ns() : 0;
 #endif
-#ifdef OS01_HOST_TEST
+#if defined(__x86_64__) && !defined(OS01_HOST_TEST)
+            __builtin_memcpy(row_buf, (const void *)(uintptr_t)row_addr,
+                             (size_t)kreq.stride);
+#else
             if (copy_from_user_ft(row_buf, (const void *)(uintptr_t)row_addr,
                                   (size_t)kreq.stride) < 0) {
                 rc = -EFAULT;
                 break;
             }
-#else
-            __builtin_memcpy(row_buf, (const void *)(uintptr_t)row_addr,
-                             (size_t)kreq.stride);
 #endif
             int wrc;
 #ifdef OS01_TEST_GFX_PRESENT_AB
@@ -508,6 +514,7 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq,
                 wrc = fb_write_row_leased(&lease, v_x, v_y + row, row_buf, kreq.stride);
             if (wrc < 0) { rc = wrc; break; }
         }
+#if defined(__x86_64__) || defined(OS01_HOST_TEST)
     } else {
         rc = -EFAULT;
     }
@@ -515,6 +522,7 @@ static int gfx_ioctl_present(file_t *f, gfx_present_req_t *ureq,
     current->fault_jmp = old_jmp;
     current->fault_cleanup = old_cb;
     current->fault_cleanup_arg = old_arg;
+#endif
 
     kfree(row_buf);
     fb_writer_end(&lease);
@@ -656,6 +664,10 @@ static int gfx_ioctl_present_rect(file_t *f, gfx_present_rect_req_t *ureq)
         return -ENOMEM;
     }
 
+    volatile uint64_t prefix_bytes_this_attempt = 0;
+
+    int rc = 0;
+#if defined(__x86_64__) || defined(OS01_HOST_TEST)
     // Arm the fault context ONCE for the whole loop.  The prefix
     // counter is volatile so the longjmp side still sees a valid
     // store (longjmp is a control-flow transfer, not a memory
@@ -668,24 +680,24 @@ static int gfx_ioctl_present_rect(file_t *f, gfx_present_rect_req_t *ureq)
     current->fault_cleanup = NULL;
     current->fault_cleanup_arg = NULL;
 
-    volatile uint64_t prefix_bytes_this_attempt = 0;
-
-    int rc = 0;
     if (__builtin_setjmp((void **)jb) == 0) {
+#endif
         for (uint32_t i = 0; i < kreq.h; i++) {
             uint64_t row_addr = kreq.pixels +
                                 ((uint64_t)kreq.y + (uint64_t)i) *
                                 (uint64_t)kreq.stride +
                                 (uint64_t)kreq.x * 4u;
-#ifdef OS01_HOST_TEST
+#if defined(__x86_64__) && !defined(OS01_HOST_TEST)
+            __builtin_memcpy(row_buf, (const void *)(uintptr_t)row_addr,
+                             (size_t)row_bytes);
+#else
             if (copy_from_user_ft(row_buf, (const void *)(uintptr_t)row_addr,
                                   (size_t)row_bytes) < 0) {
+                atomic_add_u64(&g_present_stats.prefix_bytes_to_fold,
+                              prefix_bytes_this_attempt);
                 rc = -EFAULT;
                 break;
             }
-#else
-            __builtin_memcpy(row_buf, (const void *)(uintptr_t)row_addr,
-                             (size_t)row_bytes);
 #endif
             int wrc = fb_write_row_leased(&lease,
                                           v_x + kreq.x,
@@ -694,6 +706,7 @@ static int gfx_ioctl_present_rect(file_t *f, gfx_present_rect_req_t *ureq)
             if (wrc < 0) { rc = wrc; break; }
             prefix_bytes_this_attempt += (uint64_t)row_bytes;
         }
+#if defined(__x86_64__) || defined(OS01_HOST_TEST)
     } else {
         /* Longjmp from inline-memcpy fault.  Spec §5: early rows
          * may have become visible; we count the SUCCESSFUL rows
@@ -707,6 +720,7 @@ static int gfx_ioctl_present_rect(file_t *f, gfx_present_rect_req_t *ureq)
     current->fault_jmp = old_jmp;
     current->fault_cleanup = old_cb;
     current->fault_cleanup_arg = old_arg;
+#endif
 
     kfree(row_buf);
     fb_writer_end(&lease);
@@ -1028,9 +1042,13 @@ static int gfx_ioctl_file(file_t *f, int cmd, void *arg)
             return -EBADF;
         }
 
+#if defined(__x86_64__) || defined(OS01_HOST_TEST)
         int crc = gfx_input_file_check(kbd_file, &keyboard_ops);
         if (crc == 0 && mouse_file)
             crc = gfx_input_file_check(mouse_file, &mouse_ops);
+#else
+        int crc = -EINVAL;
+#endif
         if (crc < 0) {
             file_put(kbd_file);
             if (mouse_file) file_put(mouse_file);

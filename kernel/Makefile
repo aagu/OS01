@@ -89,6 +89,9 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_boot.c \
                    core/main.c \
                    driver/logo.c \
                    driver/arch_fb_write.c \
+                   driver/fb.c \
+                   driver/fb_state.c \
+                   driver/gfx.c \
                    subsys/subsys.c \
                    random/random.c \
                    ../libc/random/chacha20.c \

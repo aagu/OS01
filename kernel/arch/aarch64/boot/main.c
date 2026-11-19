@@ -12,6 +12,9 @@
 #include <core/printk.h>  /* for serial_printk (selftest markers) */
 #include <arch/fb_write.h>            /* ARCH_NAME (via <arch/identity.h>) */
 #include <driver/logo.h>              /* boot_logo_show */
+#include <driver/fb.h>                /* fb_ops */
+#include <driver/fb_state.h>          /* fb_bootstrap_state, fb_publish_initial_mapping */
+#include <driver/gfx.h>               /* gfx_ops, gfx_init */
 #include <core/selftest.h> /* for selftest_run_all (OS01_SELFTEST builds) */
 #include <selftest/result.h> /* protocol-v1 coordinator (OS01_SELFTEST builds) */
 #include <memory/memory.h>   /* for struct boot_context / Virt_To_Phy */
@@ -371,8 +374,19 @@ static void aarch64_boot_fb_init(const struct boot_context *handoff)
         Pos.YPosition   = 0;
 
         frame_buffer_init();
-        if (!Pos.FB_addr)
+        if (!Pos.FB_addr) {
             log_warn("[fb] mapping failed; color_printk disabled\n");
+        } else {
+            struct fb_info gop_info = {
+                .width  = (uint32_t)Pos.XResolution,
+                .height = (uint32_t)Pos.YResolution,
+                .stride = (uint32_t)Pos.XResolution * 4U,
+                .bpp    = 32U,
+                .format = FB_FORMAT_RGB32,
+            };
+            fb_bootstrap_state((uint64_t)Pos.Phy_addr, Pos.FB_length, &gop_info);
+            fb_publish_initial_mapping(Pos.FB_addr, Pos.FB_length);
+        }
     }
 
     /* OS01 boot logo.  Drawn FIRST so the [fb] banner below lands under
@@ -789,7 +803,18 @@ static const struct devfs_ops mem_dev_ops = {
 
 int arch_boot_device_nodes(void)
 {
-    return devfs_register_chrdev("mem", NULL, &mem_dev_ops);
+    int rc = devfs_register_chrdev("mem", NULL, &mem_dev_ops);
+    if (rc < 0)
+        return rc;
+    if (Pos.FB_addr) {
+        if (devfs_register_chrdev("fb", NULL, &fb_ops) < 0)
+            log_warn("[fb] devfs_register_chrdev(\"fb\") failed\n");
+        if (devfs_register_chrdev("gfx0", NULL, &gfx_ops) == 0)
+            gfx_init();
+        else
+            log_warn("[gfx] devfs_register_chrdev(\"gfx0\") failed\n");
+    }
+    return 0;
 }
 #endif
 

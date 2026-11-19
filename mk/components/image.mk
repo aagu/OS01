@@ -263,7 +263,7 @@ $(AARCH64_SELFTEST_MARKER): FORCE
 $(AARCH64_UEFI_DISK): $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
 		$(BUILD_DIR)/artifacts/kernel.elf $(AARCH64_UEFI_FIRMWARE) \
 		$(HOST_MKDISK) $(INITTAB_FILE) \
-		$(if $(filter userland,$(PROFILE_CAPABILITIES)),$(USER_ARTIFACT_DIR)/init.elf $(USER_ARTIFACT_DIR)/sh.elf) \
+		$(if $(filter userland,$(PROFILE_CAPABILITIES)),$(USER_ARTIFACT_DIR)/init.elf $(USER_ARTIFACT_DIR)/sh.elf $(USER_ARTIFACT_DIR)/terminal.elf) \
 		$(if $(filter selftest,$(IMAGE_VARIANT)),$(AARCH64_SELFTEST_MARKER))
 ifeq ($(IMAGE_VARIANT),selftest)
 	@$(MAKE) -C tools check-deps HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools
@@ -290,6 +290,7 @@ else
 	@# rootfs contract installs user programs extension-less (/bin/<name>).
 	@mcopy -i $@ $(USER_ARTIFACT_DIR)/init.elf ::/bin/init
 	@mcopy -i $@ $(USER_ARTIFACT_DIR)/sh.elf ::/bin/sh
+	@mcopy -i $@ $(USER_ARTIFACT_DIR)/terminal.elf ::/bin/terminal
 	@mcopy -i $@ $(INITTAB_FILE) ::/etc/inittab
 endif
 

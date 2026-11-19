@@ -1,6 +1,6 @@
 # OS01 /etc/inittab (aarch64 product)
 # Format: id:action:process
-# The serial shell is the shared user/sh.c program installed as /bin/sh
-# (fd 0/1/2 = /dev/tty, canonical ASCII line input — no framebuffer on
-# this arch, so the x86 /bin/terminal PTY chain does not apply).
-tty1:respawn:/bin/sh
+# /bin/terminal opens /dev/fb + /dev/gfx0 and spawns /bin/sh on a PTY
+# when a framebuffer is present, or falls back to /bin/sh on /dev/tty
+# in headless boots.
+tty1:respawn:/bin/terminal

@@ -48,6 +48,7 @@ LIBGFX_DIR := $(abspath $(dir $(LOCAL_MAKEFILE)))
 # (single-writer sysroot) is designed to forbid.
 CFLAGS := --sysroot=$(STAGING_DIR)/kernel-headers \
           -ffreestanding -fno-builtin -Wall -Wextra -O2 \
+          $(filter -mgeneral-regs-only,$(RUNTIME_CFLAGS_user)) \
           -I$(STAGING_DIR)/kernel-headers/usr/include \
           -I$(LIBGFX_DIR) \
           -isystem $(STAGING_DIR)/libc/usr/include

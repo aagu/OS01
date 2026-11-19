@@ -28,7 +28,8 @@
 #include <uapi/fb.h>
 #include <sys/wait.h>
 
-#define ASH_PATH "/bin/busybox"
+#define BUSYBOX_PATH "/bin/busybox"
+#define SH_PATH      "/bin/sh"
 #define FRAME_INTERVAL_MS 33
 #define MAX_PRESENT_FAILURES 5
 
@@ -85,7 +86,10 @@ static int send_winsize(int pty_fd)
 
 int main(void)
 {
-    char *ash_argv[] = { "ash", NULL };
+    struct stat st;
+    bool has_busybox = (stat(BUSYBOX_PATH, &st) == 0);
+    const char *shell_path = has_busybox ? BUSYBOX_PATH : SH_PATH;
+    char *ash_argv[] = { has_busybox ? "ash" : "sh", NULL };
     signal(SIGINT, SIG_IGN);
 
     int serial_fd = open("/dev/serial", O_WRONLY);
@@ -94,7 +98,7 @@ int main(void)
     int tty_fd = open("/dev/tty", O_RDONLY);
     if (tty_fd < 0) {
         serial_msg(serial_fd, "[terminal] ERROR: cannot open /dev/tty\r\n");
-        exec(ASH_PATH, ash_argv, environ);
+        exec(shell_path, ash_argv, environ);
         return 1;
     }
 
@@ -103,7 +107,7 @@ int main(void)
     if (!term_font_validate(_binary_terminal_font_psf_start, font_size, &font)) {
         serial_msg(serial_fd, "[terminal] ERROR: invalid embedded PSF2 font\r\n");
         dup2(tty_fd, 0); close(tty_fd);
-        exec(ASH_PATH, ash_argv, environ);
+        exec(shell_path, ash_argv, environ);
         return 1;
     }
 
@@ -114,7 +118,7 @@ int main(void)
     if (fb_fd < 0) {
         serial_msg(serial_fd, "[terminal] ERROR: cannot open /dev/fb\r\n");
         dup2(tty_fd, 0); close(tty_fd);
-        exec(ASH_PATH, ash_argv, environ);
+        exec(shell_path, ash_argv, environ);
         return 1;
     }
 
@@ -123,7 +127,7 @@ int main(void)
         serial_msg(serial_fd, "[terminal] ERROR: invalid /dev/fb state\r\n");
         close(fb_fd);
         dup2(tty_fd, 0); close(tty_fd);
-        exec(ASH_PATH, ash_argv, environ);
+        exec(shell_path, ash_argv, environ);
         return 1;
     }
 
@@ -133,7 +137,7 @@ int main(void)
         serial_msg(serial_fd, "[terminal] ERROR: non-positive terminal geometry\r\n");
         close(fb_fd);
         dup2(tty_fd, 0); close(tty_fd);
-        exec(ASH_PATH, ash_argv, environ);
+        exec(shell_path, ash_argv, environ);
         return 1;
     }
 
@@ -143,7 +147,7 @@ int main(void)
         serial_msg(serial_fd, "[terminal] ERROR: gfx_open failed\r\n");
         close(fb_fd); // Do NOT surrender kernel console
         dup2(tty_fd, 0); close(tty_fd);
-        exec(ASH_PATH, ash_argv, environ);
+        exec(shell_path, ash_argv, environ);
         return 1;
     }
 
@@ -155,7 +159,7 @@ int main(void)
         gfx_close(gfx);
         close(fb_fd);
         dup2(tty_fd, 0); close(tty_fd);
-        exec(ASH_PATH, ash_argv, environ);
+        exec(shell_path, ash_argv, environ);
         return 1;
     }
 
@@ -171,7 +175,7 @@ int main(void)
         terminal_display_close(&disp);
         close(fb_fd);
         dup2(tty_fd, 0); close(tty_fd);
-        exec(ASH_PATH, ash_argv, environ);
+        exec(shell_path, ash_argv, environ);
         return 1;
     }
     terminal_display_sync_owner(&disp);
@@ -187,7 +191,7 @@ int main(void)
         terminal_display_close(&disp);
         close(fb_fd);
         dup2(tty_fd, 0); close(tty_fd);
-        exec(ASH_PATH, ash_argv, environ);
+        exec(shell_path, ash_argv, environ);
         return 1;
     }
 
@@ -197,7 +201,7 @@ int main(void)
         serial_msg(serial_fd, "[terminal] ERROR: open /dev/ptmx failed\r\n");
         term_core_free(&core); terminal_display_close(&disp); close(fb_fd);
         dup2(tty_fd, 0); close(tty_fd);
-        exec(ASH_PATH, ash_argv, environ);
+        exec(shell_path, ash_argv, environ);
         return 1;
     }
     int slave = open("/dev/pts0", O_RDWR);
@@ -206,7 +210,7 @@ int main(void)
         close(pty_fd); term_core_free(&core); terminal_display_close(&disp);
         close(fb_fd);
         dup2(tty_fd, 0); close(tty_fd);
-        exec(ASH_PATH, ash_argv, environ);
+        exec(shell_path, ash_argv, environ);
         return 1;
     }
 
@@ -224,7 +228,7 @@ int main(void)
         gfx_close(disp.gfx);
         dup2(slave, 0); dup2(slave, 1); dup2(slave, 2);
         close(slave); close(pty_fd); close(tty_fd); close(fb_fd);
-        exec(ASH_PATH, ash_argv, environ);
+        exec(shell_path, ash_argv, environ);
         exit(1);
     }
     close(slave);

@@ -82,3 +82,11 @@ void arch_console_putchar(char c)
     // primitive (identical discipline to the x86 console_putchar).
     write_serial_unlocked(c);
 }
+
+/* Framebuffer console coordination stubs: on aarch64 the kernel console
+ * is PL011 serial rather than a framebuffer text console, so surrendering
+ * or resizing the framebuffer does not need to pause/resume a glyph console. */
+void console_surrender_fb(void) {}
+void console_force_enable_locked(void) {}
+void console_set_active_locked(bool active) { (void)active; }
+void console_notify_resize_locked(void) {}

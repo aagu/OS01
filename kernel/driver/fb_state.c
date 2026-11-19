@@ -29,9 +29,30 @@
  * that set still links on a platform without a PS/2 chain: there the
  * route is absent, no lease can exist, and every bind is refused with
  * -ENODEV. */
+#ifdef __aarch64__
+/* aarch64 has no PS/2 input-route chain yet; provide no-op stubs so
+ * high-half AArch64 linking never sees undefined weak symbols at 0. */
+int input_route_bind(const void *view, struct file *kbd, struct file *mouse,
+                     uint64_t *generation, uint32_t *initial_modifiers)
+{
+    (void)view; (void)kbd; (void)mouse;
+    (void)generation; (void)initial_modifiers;
+    return -ENODEV;
+}
+void input_route_unbind(const void *view, uint64_t generation, int reason)
+{
+    (void)view; (void)generation; (void)reason;
+}
+int input_route_lease_live(const void **view, uint64_t *generation)
+{
+    (void)view; (void)generation;
+    return 0;
+}
+#else
 #pragma weak input_route_bind
 #pragma weak input_route_unbind
 #pragma weak input_route_lease_live
+#endif
 
 /* ── Display coordinator private state ── */
 static spinlock_T display_state_lock;
@@ -101,6 +122,25 @@ static void fb_input_revoke_locked(int reason);
 static bga_caps_t      g_bga_caps __attribute__((unused));
 static struct fb_info  g_bga_modes[FB_MAX_MODES];
 static uint32_t        g_bga_modes_count;
+
+/* Weak defaults for architectures without PCI BGA (e.g. aarch64).
+ * x86_64's kernel/arch/x86_64/driver/bga.c provides the strong symbols. */
+__attribute__((weak))
+uint32_t bga_filter_modes(const bga_caps_t *caps, uint64_t mapped_size,
+                          struct fb_info out[FB_MAX_MODES])
+{
+    (void)caps;
+    (void)mapped_size;
+    (void)out;
+    return 0;
+}
+
+__attribute__((weak))
+enum bga_result bga_apply_mode(const struct fb_info *target)
+{
+    (void)target;
+    return BGA_FAILED;
+}
 
 void fb_bootstrap_state(uint64_t phys, uint64_t gop_bytes, const struct fb_info *info)
 {

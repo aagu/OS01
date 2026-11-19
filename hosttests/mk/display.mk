@@ -42,7 +42,7 @@ test-gfx-file-lifecycle: $(TEST_BLD)/test_gfx_file_lifecycle.elf
 	$<
 
 
-# kernel/arch/x86_64/driver/gfx.c against gfx_test_runtime.h, which provides the
+# kernel/driver/gfx.c against gfx_test_runtime.h, which provides the
 # heavy stubs the lifecycle test already declares (kmalloc/kfree,
 # current, schedule, vfs_node_get/put, lwip, ...).  kernel/driver/fb.c
 # is NOT compiled (VMA/VMM/scheduler headers are out of scope for
@@ -50,7 +50,7 @@ test-gfx-file-lifecycle: $(TEST_BLD)/test_gfx_file_lifecycle.elf
 # a host-heap fb buffer so the gfx device's present contract is
 # observed end-to-end.  Tested production symbols: gfx_ops (open,
 # ioctl_file, release_file).
-$(TEST_BLD)/gfx_gfx_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/gfx.c \
+$(TEST_BLD)/gfx_gfx_production.o: $(TESTS_DIR)/kernel/driver/gfx.c \
 		$(TESTS_DIR)/kernel/include/driver/gfx.h \
 		$(TESTS_DIR)/kernel/include/uapi/gfx.h \
 		$(TEST_MOCK)/gfx_test_runtime.h
@@ -345,7 +345,7 @@ test-fb-mtrr: $(TEST_BLD)/test_fb_mtrr.elf
 # Framebuffer writer admission, leases, and raw mmap rollback test (QEMU resolution switcher Task 3)
 FB_WRITERS_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_TEST -I$(TEST_MOCK) -include $(TEST_MOCK)/fb_resolution_runtime.h $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC)
 
-$(TEST_BLD)/gfx_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/gfx.c
+$(TEST_BLD)/gfx_production.o: $(TESTS_DIR)/kernel/driver/gfx.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FB_WRITERS_HOST_CFLAGS) -c $< -o $@
 

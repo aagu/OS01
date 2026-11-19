@@ -295,16 +295,54 @@ void gfx__fill_rect_impl(gfx_handle_t *h,
 #define CS_BOTTOM 0x04
 #define CS_TOP    0x08
 
-static uint8_t cs_outcode(double x, double y,
+static uint8_t cs_outcode(int64_t x, int64_t y,
                           int32_t fx, int32_t fy,
                           int32_t right, int32_t top)
 {
     uint8_t code = CS_INSIDE;
-    if (x < (double)fx)        code |= CS_LEFT;
-    if (x >= (double)right)    code |= CS_RIGHT;
-    if (y < (double)fy)        code |= CS_BOTTOM;
-    if (y >= (double)top)      code |= CS_TOP;
+    if (x < (int64_t)fx)     code |= CS_LEFT;
+    if (x >= (int64_t)right) code |= CS_RIGHT;
+    if (y < (int64_t)fy)     code |= CS_BOTTOM;
+    if (y >= (int64_t)top)   code |= CS_TOP;
     return code;
+}
+
+static uint64_t div_u128_u64(unsigned __int128 num, uint64_t den)
+{
+    if (num <= (unsigned __int128)UINT64_MAX) {
+        return (uint64_t)num / den;
+    }
+    /* Rare fallback for extreme INT32_MIN/MAX endpoints: binary long
+     * division avoids emitting a __udivti3 compiler-rt libcall. */
+    uint64_t rem_hi = (uint64_t)(num >> 64);
+    uint64_t lo = (uint64_t)num;
+    uint64_t q = 0;
+    for (int i = 63; i >= 0; --i) {
+        uint64_t bit = (lo >> i) & 1ULL;
+        uint64_t carry = rem_hi >> 63;
+        rem_hi = (rem_hi << 1) | bit;
+        if (carry || rem_hi >= den) {
+            rem_hi -= den;
+            q |= (1ULL << i);
+        }
+    }
+    return q;
+}
+
+static int64_t cs_interp(int64_t base, int64_t delta_num, int64_t edge_diff,
+                         int64_t delta_den)
+{
+    /* Exact 128-bit product avoids overflow even for INT32_MIN/MAX
+     * endpoints, with round-half-away-from-zero to nearest integer. */
+    __int128 num = (__int128)delta_num * (__int128)edge_diff;
+    __int128 den = (__int128)delta_den;
+    bool neg = false;
+    if (num < 0) { num = -num; neg = !neg; }
+    if (den < 0) { den = -den; neg = !neg; }
+    uint64_t u_den = (uint64_t)den;
+    unsigned __int128 u_num = (unsigned __int128)num + (unsigned __int128)(u_den / 2ULL);
+    uint64_t q = div_u128_u64(u_num, u_den);
+    return neg ? (base - (int64_t)q) : (base + (int64_t)q);
 }
 
 void gfx_line(gfx_handle_t *h,
@@ -325,15 +363,15 @@ void gfx_line(gfx_handle_t *h,
     int32_t right = (int32_t)(fx + fw);
     int32_t top   = (int32_t)(fy + fh);
 
-    /* Cohen-Sutherland iterative clipping.  At most 4
-     * iterations regardless of endpoint range; each iteration
-     * clips one endpoint against one edge using double math. */
-    double x0d = (double)x0;
-    double y0d = (double)y0;
-    double x1d = (double)x1;
-    double y1d = (double)y1;
-    double dxd = x1d - x0d;
-    double dyd = y1d - y0d;
+    /* Cohen-Sutherland iterative clipping using exact 64/128-bit integer
+     * math (no floating point, so -mgeneral-regs-only targets like aarch64
+     * compile cleanly). */
+    int64_t x0d = (int64_t)x0;
+    int64_t y0d = (int64_t)y0;
+    int64_t x1d = (int64_t)x1;
+    int64_t y1d = (int64_t)y1;
+    int64_t dxd = x1d - x0d;
+    int64_t dyd = y1d - y0d;
 
     for (int iter = 0; iter < 8; ++iter) {  /* 8 = 4 edges x 2 endpoints */
         uint8_t code0 = cs_outcode(x0d, y0d, fx, fy, right, top);
@@ -341,22 +379,23 @@ void gfx_line(gfx_handle_t *h,
         if ((code0 | code1) == 0) break;            /* both inside */
         if ((code0 & code1) != 0) return;          /* both outside same region */
         uint8_t code = code0 ? code0 : code1;
-        double nx = x0d, ny = y0d;
+        int64_t nx = x0d, ny = y0d;
         if (code & CS_LEFT) {
-            /* x = fx; parameterise the line as x = x0 + dx*t = fx
-             * so t = (fx - x0) / dx.  Use only when dx != 0. */
-            nx = (double)fx;
-            ny = y0d + dyd * ((double)fx - x0d) / dxd;
+            if (dxd == 0) return;
+            nx = (int64_t)fx;
+            ny = cs_interp(y0d, dyd, (int64_t)fx - x0d, dxd);
         } else if (code & CS_RIGHT) {
-            /* x = right - 1 (inclusive) — last visible column. */
-            nx = (double)(right - 1);
-            ny = y0d + dyd * ((double)(right - 1) - x0d) / dxd;
+            if (dxd == 0) return;
+            nx = (int64_t)(right - 1);
+            ny = cs_interp(y0d, dyd, (int64_t)(right - 1) - x0d, dxd);
         } else if (code & CS_BOTTOM) {
-            ny = (double)fy;
-            nx = x0d + dxd * ((double)fy - y0d) / dyd;
+            if (dyd == 0) return;
+            ny = (int64_t)fy;
+            nx = cs_interp(x0d, dxd, (int64_t)fy - y0d, dyd);
         } else { /* CS_TOP */
-            ny = (double)(top - 1);
-            nx = x0d + dxd * ((double)(top - 1) - y0d) / dyd;
+            if (dyd == 0) return;
+            ny = (int64_t)(top - 1);
+            nx = cs_interp(x0d, dxd, (int64_t)(top - 1) - y0d, dyd);
         }
         if (code == code0) { x0d = nx; y0d = ny; }
         else               { x1d = nx; y1d = ny; }
@@ -369,12 +408,10 @@ void gfx_line(gfx_handle_t *h,
     uint8_t code1 = cs_outcode(x1d, y1d, fx, fy, right, top);
     if ((code0 | code1) != 0) return;
 
-    /* Round to integer pixel coordinates (round-half-away-from-
-     * zero so both endpoints are reliably included). */
-    int32_t ix0 = (int32_t)(x0d + (x0d < 0 ? -0.5 : 0.5));
-    int32_t iy0 = (int32_t)(y0d + (y0d < 0 ? -0.5 : 0.5));
-    int32_t ix1 = (int32_t)(x1d + (x1d < 0 ? -0.5 : 0.5));
-    int32_t iy1 = (int32_t)(y1d + (y1d < 0 ? -0.5 : 0.5));
+    int32_t ix0 = (int32_t)x0d;
+    int32_t iy0 = (int32_t)y0d;
+    int32_t ix1 = (int32_t)x1d;
+    int32_t iy1 = (int32_t)y1d;
 
     /* Snap to the visible rect — defensive against double rounding. */
     if (ix0 < fx)            ix0 = fx;
