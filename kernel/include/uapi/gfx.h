@@ -145,6 +145,54 @@ _Static_assert(offsetof(gfx_present_rect_req_t, y)       == 20, "y offset");
 _Static_assert(offsetof(gfx_present_rect_req_t, w)       == 24, "w offset");
 _Static_assert(offsetof(gfx_present_rect_req_t, h)       == 28, "h offset");
 
+/* GFX_PRESENT_RECTS — input; damage-region BATCH present (roadmap P3
+ * 脏矩形与批量提交, spec
+ * docs/superpowers/specs/2026-11-19-gfx-damage-batch-present-design.md).
+ * One ioctl submits up to GFX_PRESENT_RECTS_MAX view-local rectangles
+ * from ONE full-view buffer, replacing the terminal's per-rect
+ * GFX_PRESENT_RECT round.  Per-rect semantics are exactly those of
+ * GFX_PRESENT_RECT: view-local coordinates, destination = view origin
+ * + (x, y), stride MUST equal view_w*4, no implicit clipping, drawing
+ * clip does not affect the request.  Rects are processed in array
+ * order and may overlap (later wins).  ANY invalid rect rejects the
+ * WHOLE batch with zero framebuffer writes.
+ *
+ * completed_rects is IN/OUT: the caller must transmit 0 (else EINVAL);
+ * on success the kernel writes back count; on failure it writes back
+ * the number of rects FULLY completed before the failure point (the
+ * faulting rect's partial rows stay unknown).  The write-back is
+ * best-effort: if it faults, the ioctl's return value and errno are
+ * unchanged and userspace must treat k as unknown (0). */
+#define GFX_PRESENT_RECTS      0x470D
+#define GFX_PRESENT_RECTS_MAX  64u   /* aligns with TERM_DAMAGE_MAX_RECTS */
+
+typedef struct {
+    uint32_t x;           /* view-local start column */
+    uint32_t y;           /* view-local start row */
+    uint32_t w;           /* width in pixels (must be > 0) */
+    uint32_t h;           /* height in pixels (must be > 0) */
+} gfx_rect_t;
+
+_Static_assert(sizeof(gfx_rect_t) == 16, "gfx_rect_t must be 16 bytes (ABI)");
+
+typedef struct {
+    uint64_t pixels;          /* in: this-process user pointer; FULL view base */
+    uint32_t stride;          /* in: must equal view_w * 4 */
+    uint32_t reserved;        /* in: must be 0 */
+    uint64_t rects;           /* in: user pointer to gfx_rect_t[count] */
+    uint32_t count;           /* in: 1..GFX_PRESENT_RECTS_MAX */
+    uint32_t completed_rects; /* in: 0; out: rects fully written pre-failure */
+} gfx_present_rects_req_t;
+
+_Static_assert(sizeof(gfx_present_rects_req_t) == 32,
+               "gfx_present_rects_req_t must be 32 bytes (ABI)");
+_Static_assert(offsetof(gfx_present_rects_req_t, pixels)          == 0,  "pixels offset");
+_Static_assert(offsetof(gfx_present_rects_req_t, stride)          == 8,  "stride offset");
+_Static_assert(offsetof(gfx_present_rects_req_t, reserved)        == 12, "reserved offset");
+_Static_assert(offsetof(gfx_present_rects_req_t, rects)           == 16, "rects offset");
+_Static_assert(offsetof(gfx_present_rects_req_t, count)           == 24, "count offset");
+_Static_assert(offsetof(gfx_present_rects_req_t, completed_rects) == 28, "completed_rects offset");
+
 /* GFX_BIND_INPUT — INOUT; binds the physical-input lease to the
  * calling view.  The whole struct must be readable AND writable; the
  * input result fields (generation / initial_modifiers) must be 0 on
