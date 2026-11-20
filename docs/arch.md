@@ -201,6 +201,14 @@ AArch64 `head.S` 负责 BSP 从固件交接到 `kernel_main`：建立 EL1、栈�
 早期向量与诊断、高半区到低物理符号的地址桥分别在 `boot/secondary_entry.S`、
 `boot/early_vectors.S` 和 `boot/boot_symbols.S`。
 
+**EL3 分支仅 QEMU 支持（2026-11-20 标注）**：`head.S` 的 EL3→EL1 降级分支（`CurrentEL==3`
+→ 盲写 `SCR_EL3`/`SPSR_EL3`/`ELR_EL3` 后 `eret`）**仅服务 QEMU `-M virt,secure=on` 裸 ELF
+`-kernel` 启动**——该场景复位落入 Secure EL3 且 secure world 无其他使用方，盲写安全。真机
+固件（TF-A / UEFI）从不在 EL3 交接内核（先降到 EL2/EL1 再进入），盲写反而会踩掉 secure
+world 依赖位；真机主路径是紧随其后的 EL2/EL1 降级分支（2a），PSCI 次核入口
+`secondary_entry.S` 亦只支持 EL1/EL2，均不受影响。roadmap 真机审计条件阻断项就此以标注
+方式闭环。
+
 **fail-closed 契约**：loader 在分配任何内核段之前校验 ELF——`e_entry` 必须等于配置入口，
 否则以可区分的诊断 `UEFI-A64: kernel entry mismatch` 拒绝（`elf.c:100-101`、`boot.c:305-306`）；
 内核侧同样 fail-closed 取证 `UEFI-A64: layout entry=… context=…`

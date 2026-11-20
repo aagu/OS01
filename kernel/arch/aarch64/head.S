@@ -43,10 +43,17 @@ _start:
     msr     daifset, #0xf
     mov     x19, x0
 
-    /* 2. EL3 → EL1 drop if at EL3.  When QEMU is launched with
-     *    `-M virt,secure=on` the kernel is dropped into Secure EL3
-     *    (which the machine provides for PSCI SMC handling).
-     *    We must drop to Non-Secure EL1 before doing anything else.
+    /* 2. EL3 → EL1 drop if at EL3.  QEMU-ONLY PATH: this executes only
+     *    when QEMU is launched with `-M virt,secure=on` and the bare
+     *    ELF is reset into Secure EL3 (which the machine provides for
+     *    PSCI SMC handling).  We must drop to Non-Secure EL1 before
+     *    doing anything else.
+     *
+     *    Never taken on real hardware: TF-A and UEFI firmware hand the
+     *    kernel off at EL2/EL1, not EL3, and the stores below blindly
+     *    overwrite SCR_EL3/SPSR_EL3 — on a real secure monitor that
+     *    would clobber secure-world-dependent bits.  Real-hardware
+     *    entries take the EL2/EL1 drop in step 2a below instead.
      *    Idempotent: `-M virt` (the default) starts at EL2 and
      *    skips this branch. */
     mrs     x0, CurrentEL

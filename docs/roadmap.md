@@ -92,7 +92,6 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 |------|------|----------|----------|
 | GICv2 按 Group 0 编程（IGROUPR 清位，CTLR 只写 bit0） | `kernel/arch/aarch64/intr/gic_driver.c:103-105`（注释自认"QEMU 无 EL3"）、`:76`（`GICD_CTLR=1u`）、`:135`（`GICC_CTLR=1u`） | 经 TF-A 启动的真机上 IRQ 被路由为 Group 1，Group 0 中断以 FIQ 信号出现 → 内核在 EL1 的 IRQ 入口永远收不到，**所有 IRQ 静默丢失** | ❌ **仍开放**：真机写 IGROUPR=1 + GICD_CTLR/GICC_CTLR 的 EnableGrp1（bit1），或按 GICD_IIDR/板型检测分组模式 |
 | 非 BSP CPU 强制 enable-method=psci | `kernel/arch/aarch64/platform/dtb_parse.c:108`（`exact(n->enable,"psci")`）、`:361-362`（非 BSP 无 psci → -3 FATAL） | spin-table 平台（老 RPi 固件、`cpu-release-addr`）全部 AP 拒启（-3 FATAL） | ❌ **仍开放**：若目标板需要，加 spin-table 等待路径 |
-| EL3 分支盲写 SCR_EL3/SPSR_EL3 | `kernel/arch/aarch64/head.S:52-53`（`CurrentEL==3` 判定）、`:63`（`msr scr_el3`）、`:70`（`msr spsr_el3`） | 仅 QEMU `-M virt,secure=on` 场景成立；真机 TF-A 不从 EL3 起跑，且盲写会踩掉 secure world 依赖位 | ❌ **仍开放**：标注仅 QEMU 支持（真机主路径是 EL2/EL1 分支，不受影响） |
 | timer 中断形状校验偏脆（要求 interrupts 第二项 = PPI 14） | `kernel/arch/aarch64/platform/dtb_parse.c:200-207`（`len < 24 \|\| len % 12 \|\| data+12 != 1 \|\| data+16 != 14`；`cntp_ppi` 写死 30 = 16+14，GICv2 架构定值本身正确） | 真机 DT 省略 secure timer 项时条目位移被 -4 拒 | ❌ **仍开放**：改为按"non-secure physical timer 的 PPI 30"匹配而非固定槽位 |
 
 **平台能力上限（非阻断，选型需知）**：PA 上限 40-bit/1 TiB（`kernel/arch/aarch64/head.S` TCR IPS=0b010、`kernel/arch/aarch64/memory/page_table.c:51`；正解读
@@ -190,6 +189,7 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 
 | 闭环项 | 日期 | 详情 |
 |--------|------|------|
+| **aarch64 EL3 分支标注仅 QEMU 支持**（`head.S` EL3→EL1 盲写 `SCR_EL3`/`SPSR_EL3` 边界化：仅 QEMU `-M virt,secure=on` 场景，真机 TF-A/UEFI 从 EL2/EL1 交接走 2a 分支，不受影响） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [arch.md](arch.md#aarch64-平台值解绑2026-11-18--2026-11-19) |
 | **libc 统一 libk.a 内核子集与审计基线**（x86_64 / aarch64 同一份 32 对象 / 77 符号，审计基线架构中立） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [libc.md](libc/libc.md) |
 | **libc aarch64 / x86_64 齐平**（`libc_arch` facade + per-arch override；setjmp 汇编 override、floatscan/strtod/vsscanf 经 float_abi 移植） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [libc.md](libc/libc.md) |
 | **ELF 分段 NX 细化**（W^X 叶策略：`.data`/`.bss` RW+NX、`.rodata` RO+NX、仅 `.text` 可执行） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [cow-mmap.md](memory/cow-mmap.md#elf-分段叶子-nx-细化2026-11-20) |

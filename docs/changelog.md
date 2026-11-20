@@ -7,6 +7,10 @@
 
 ## 2026-11-20
 
+- docs(boot,aarch64): **EL3 分支标注仅 QEMU 支持（roadmap P2 真机审计条件阻断项闭环）**——`head.S` 的 `CurrentEL==3` 分支盲写 `SCR_EL3`/`SPSR_EL3`/`ELR_EL3` 后 `eret`，此前注释只描述 QEMU 场景、未写真机边界：
+  - 注释明确该分支**仅服务 QEMU `-M virt,secure=on` 裸 ELF `-kernel` 启动**（复位落入 Secure EL3 且 secure world 无其他使用方，盲写安全）；真机固件（TF-A / UEFI）从不在 EL3 交接内核、盲写会踩掉 secure world 依赖位，真机主路径是紧随其后的 EL2/EL1 降级分支（2a），次核入口 `secondary_entry.S` 亦只支持 EL1/EL2（`kernel/arch/aarch64/head.S`）。
+  - roadmap 条件阻断表移除该行（剩余解法即「标注仅 QEMU 支持」，无代码行为变更）；边界叙述入 `docs/arch.md` §aarch64 平台值解绑。
+  - 验收：QEMU `-M virt,secure=on` 裸 ELF `-kernel` gdbstub 取证——复位 `cpsr` M[3:0]=`0xD`（EL3h）→ 断点停于 EL3 分支 `eret`（`0x40080040`，三次 `msr` 盲写之后）→ 单步 `eret` 后 `cpsr=0x3c5`（EL1h + DAIF 屏蔽，恰为所写 `SPSR_EL3` 值）、`pc` 落于注释所述 2a `CurrentEL` 检查处；随后进 `kernel_main` 至无 handoff 场景的设计内 fail-closed 诊断（`boot/main.c:415-416`），串口输出与 secure=off（EL2 路径）逐字一致；`make PROFILE=aarch64-clang test-aarch64 MODE=boot-contract`（UEFI 产品镜像 SMP 1/2/4）PASS，EL2/EL1 主路径不受影响。
 - docs: **roadmap 全量瘦身 —— 只留未完成项，闭环历史归 changelog**：
 
   **做了什么**
