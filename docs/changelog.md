@@ -7,6 +7,21 @@
 
 ## 2026-11-20
 
+- refactor(sched,arch): **用户态进入与返回门面（`arch/context.h`）**——双架构统一用户态首入准备、共享返回工作顺序与原生帧恢复入口（spec `docs/superpowers/specs/2026-11-20-user-context-facade-design.md`、plan `docs/superpowers/plans/2026-11-20-user-context-facade.md`；`8a49bc26` / `803f6c03` / `57216054`）：
+
+  **做了什么**
+  - **首次用户态调度准备（`8a49bc26`）**：在 `kernel/include/arch/context.h` 声明 `arch_task_prepare_user_entry(task_t *, struct pt_regs *)`，从 `kernel/include/sched/task.h` 收回 `ret_from_intr` 公共声明。x86_64 在 `task_arch.c` 实现强定义并在 `exec.c::spawn_user_task` / `fork.c::do_fork`（非 `PF_KTHREAD`）接入；aarch64 收回 `aarch64_el0_restore` 公共声明、将 `aarch64_user_first_entry` 改为 `static` 并在 `user_task.c` 实现强定义。更新 3 个 hosttests 替身并新增 `qemutests/test_context_facade.py`（目录已登记）。
+  - **原生帧恢复门面（`803f6c03`）**：在 `kernel/include/arch/context.h` 汇编段定义 `ARCH_CONTEXT_RESTORE_FRAME`（`arch_context_restore_frame`），在 x86_64 `RESTORE_ALL` / `x86_intr_restore_only` 同址处与 aarch64 `restore_pt_regs` 同址处导出现行恢复标签，保留 IST/NMI/spurious/EL1h/legacy probe 原局部路径。
+  - **链接选择的共享返回工作（`57216054`）**：新增 `kernel/sched/context_return.c` 实现 `context_run_return_work(frame, mode)`（`CONTEXT_RETURN_FULL=0` / `CONTEXT_RETURN_SIGNAL_ONLY=1`）及弱默认 `arch_context_run_deferred_work(void)`。x86_64 在 `arch/x86_64/intr/context_return.c` 提供强 softirq / GS `need_resched` / signal 钩子，将 `ret_from_intr` 改为 16B 对齐 ABI 适配器、`do_system_call` 接入 `CONTEXT_RETURN_SIGNAL_ONLY`；aarch64 在 `user_task.c` 将 `aarch64_user_irq_return` 转为强 `arch_context_reschedule_return`，在 `trap.c` 提供强信号钩子并在 `aarch64_el0_irq` 接入 `CONTEXT_RETURN_FULL`，在 `aarch64_user_first_entry`、`aarch64_user_syscall` 与 yield 接入 `CONTEXT_RETURN_SIGNAL_ONLY`。扩展 `qemutests/intr_dispatch_audit.py` 与 `test_intr_dispatch_audit.py` 验证真实 ELF 符号、调用序与模式参数。
+
+  **验收（工作树实测）**
+  - `make check-test-catalog` PASS；`make PROFILE=x86_64-clang test-host` EXIT=0（239 binaries + python 套件全过）。
+  - `make PROFILE=x86_64-clang test-static` PASS（含 `intr-dispatch-audit`、`assertion-policy`、`stack-frame-audit` 等全部静态门禁）；`make PROFILE=aarch64-clang test-aarch64-audit` PASS。
+  - 普通 ELF 符号实证：x86_64 `arch_context_restore_frame` / `RESTORE_ALL` / `x86_intr_restore_only` 同址（`0xffff800000105a58`），`arch_context_run_deferred_work` 为 `T`；aarch64 `arch_context_restore_frame` / `restore_pt_regs` 同址（`0xffff0000400e1064`），`arch_context_run_deferred_work` 为 `W`；双侧 `arch_task_prepare_user_entry`、`context_run_return_work`、`arch_context_reschedule_return`、`arch_context_deliver_return_signals` 均为唯一强 `T`。
+  - x86_64 QEMU：`SUITE=intr-x86`（#BP/NMI）、`SUITE=boot-irq-time`、`OS01_SYSTEST=1 test-syscall`（fork/exec/waitpid 与 `sigreturn saved rax`）与 `KERNEL_SELFTEST=1 test-kernel-selftest`（43/43 PASS，含 `uaccess: dispatch longjmp restore OK`）均 PASS。
+  - aarch64 M4 与运行期：`KERNEL_SELFTEST=1 AARCH64_EL0_TEST=1 SMP=1` 启动串口全部 28 项 PASS（`[TEST] END suite=kernel-selftest total=28 passed=28 failed=0 skipped=0`）；`test-aarch64 MODE=user-runtime` 四用例（`irq` / `asid` / `smp` / `product` 1/2/4/8 核）全 PASS。
+  - `make PROFILE=x86_64-clang test-harness`：67/68 模块 PASS（含 `test_context_facade`、`test_intr_dispatch_audit`、`test_boot_irq_time`、`test_mock_core_dup`）；仅 `qemutests.test_doom_runner::test_normal_build_has_no_diag_or_testctl`（`DOOM_TEST=0 -n image` rc=2）失败，与本变更无关。
+
 - docs(boot,aarch64): **EL3 分支标注仅 QEMU 支持（roadmap P2 真机审计条件阻断项闭环）**——`head.S` 的 `CurrentEL==3` 分支盲写 `SCR_EL3`/`SPSR_EL3`/`ELR_EL3` 后 `eret`，此前注释只描述 QEMU 场景、未写真机边界：
   - 注释明确该分支**仅服务 QEMU `-M virt,secure=on` 裸 ELF `-kernel` 启动**（复位落入 Secure EL3 且 secure world 无其他使用方，盲写安全）；真机固件（TF-A / UEFI）从不在 EL3 交接内核、盲写会踩掉 secure world 依赖位，真机主路径是紧随其后的 EL2/EL1 降级分支（2a），次核入口 `secondary_entry.S` 亦只支持 EL1/EL2（`kernel/arch/aarch64/head.S`）。
   - roadmap 条件阻断表移除该行（剩余解法即「标注仅 QEMU 支持」，无代码行为变更）；边界叙述入 `docs/arch.md` §aarch64 平台值解绑。

@@ -13,7 +13,7 @@
 |-------|------|---------|------|
 | **P0** | 工程与测试基础设施 | 1 | flake 账本入库 |
 | **P1** | 安全加固 | 3 | ASLR-A / ASLR-B / UBSan+KASan |
-| **P2** | aarch64 适配 | 12 | 内存与执行体 3 · 架构统一 3 · 真机阻断 6 |
+| **P2** | aarch64 适配 | 11 | 内存与执行体 3 · 架构统一 2 · 真机阻断 6 |
 | **P2** | 架构治理 / 扩展性 | 0 | 新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填该节 |
 | **P3** | GUI | 7 | GUI-4/5/6 + 优化与验证 4 |
 | **P4** | 硬件适配 | 6 | USB 3 · NVMe · HPET · ACPI S3 |
@@ -61,13 +61,10 @@ aarch64 已有 EL0 用户态，但 ASLR 本项先不扩大到 aarch64。
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| 上下文切换统一（剩余项） | **用户态进入/返回纳入 `arch/context.h` 门面**（x86 `iretq` 与 aarch64 `eret` 仍各走各的实现：`kernel/arch/x86_64/intr/entry.S:52,67` vs `kernel/arch/aarch64/intr/entry.S:184,196-201`）。现有门面只有 `arch_task_switch` / `arch_kthread_prepare` / `arch_current_task` 一族（`kernel/include/arch/context.h`），无用户态进入/返回入口。设计 spec 与 plan 已落地（[spec](superpowers/specs/2026-11-20-user-context-facade-design.md)、[plan](superpowers/plans/2026-11-20-user-context-facade.md)，commit `1b81778a`），**代码尚未开始** | EL1 调度 ✅；M4 ✅；SMP 用户调度 ✅ | Tilck |
 | CPU 特性探测 | `arch_cpu_features()` 返回统一位图（has_fpu / has_virt / has_cache_coherency）；x86 CPUID 与 aarch64 ID_AA64* 各实现一份（仓库内目前无此接口；`kernel/include/arch/cpuid.h` 只是 CPUID 指令门面，`kernel/include/arch/features.h` 是编译期子系统开关，二者都不产出特性位图） | 独立 | Linux cpufeature |
 | GICv2 Phase 2 | SError/真机覆盖率（**SError 三个向量槽目前是自跳，无保存/诊断/恢复路径**——`kernel/arch/aarch64/intr/entry.S:61,89,105` 均为 `b .`）；handler 表扩容（生产路径只注册 SGI 3/4、CNTP PPI 与 PL011 console RX SPI（`kernel/arch/aarch64/platform/console.c:57-60`），SGI 0~2 仅自测用，SGI 5-15 与 PPI 16-29、31 未注册） | GICv2 Phase 1 ✅；`dtb_gicd_base` 解耦 ✅（2026-11-18） | |
 
-**距离「用户态就绪的统一内核」还差多远（粗估，一个人全职）**：剩余差距集中在 `arch/context.h` 用户态进入/返回门面、
-运行期跨核任务迁移、EL0 FP/SIMD 剩余项与跨进程 inode 级 `MAP_SHARED`。详见 `docs/arch.md` §aarch64 用户态现状与末段、
-统一 kernel_main spec/plan。
+**距离「用户态就绪的统一内核」还差多远（粗估，一个人全职）**：剩余差距集中在运行期跨核任务迁移、EL0 FP/SIMD 剩余项与跨进程 inode 级 `MAP_SHARED`。详见 `docs/arch.md` §aarch64 用户态现状与末段、统一 kernel_main spec/plan。
 
 **永远无法统一的（ISA/HW 差异）**：`head.S`/`entry.S` 指令集差异；MMU 页表格式（PTE bit-position）；
 中断控制器驱动；SoC 外设（UART/timer/GPIO 等）。靠 arch 抽象层封装，统一接口、不统一实现。
@@ -189,6 +186,7 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 
 | 闭环项 | 日期 | 详情 |
 |--------|------|------|
+| **用户态进入与返回门面**（`arch/context.h`：`arch_task_prepare_user_entry`、共享返回编排 `context_run_return_work`、`arch_context_restore_frame` 同址恢复） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [arch.md](arch.md#facade--override-矩阵) · [spec](superpowers/specs/2026-11-20-user-context-facade-design.md) · [plan](superpowers/plans/2026-11-20-user-context-facade.md) |
 | **aarch64 EL3 分支标注仅 QEMU 支持**（`head.S` EL3→EL1 盲写 `SCR_EL3`/`SPSR_EL3` 边界化：仅 QEMU `-M virt,secure=on` 场景，真机 TF-A/UEFI 从 EL2/EL1 交接走 2a 分支，不受影响） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [arch.md](arch.md#aarch64-平台值解绑2026-11-18--2026-11-19) |
 | **libc 统一 libk.a 内核子集与审计基线**（x86_64 / aarch64 同一份 32 对象 / 77 符号，审计基线架构中立） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [libc.md](libc/libc.md) |
 | **libc aarch64 / x86_64 齐平**（`libc_arch` facade + per-arch override；setjmp 汇编 override、floatscan/strtod/vsscanf 经 float_abi 移植） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [libc.md](libc/libc.md) |

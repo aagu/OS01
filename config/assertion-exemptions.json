@@ -79,6 +79,13 @@
       "notes": "Incremental build test touching/reading source files"
     },
     {
+      "path": "qemutests/test_context_facade.py",
+      "reason_class": "structural-invariant",
+      "policy_ref": "docs/superpowers/plans/2026-11-20-user-context-facade.md",
+      "owner": "sched/arch",
+      "notes": "Verifies arch_task_prepare_user_entry callers and ARCH_CONTEXT_RESTORE_FRAME assembler/C boundary invariants"
+    },
+    {
       "path": "qemutests/test_doom_build_contract.py",
       "reason_class": "pending",
       "owner": "user/doom",
