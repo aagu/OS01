@@ -76,28 +76,38 @@ void task_list_add(task_t *tsk)
 }
 
 __attribute__((noreturn)) static void idle_task_resume(void);
-
+static int64_t blocker_state_snapshot(task_t *task);
 
 /* Called on the incoming stack, after the architecture has stopped using
  * prev. A wake between schedule's dequeue and this point observes on_cpu
- * and leaves enqueueing to us. Use the same lock as task_wake so neither
- * side can miss that handoff. No access to prev is allowed after release:
- * a waiter may immediately reap a zombie once on_cpu becomes zero. */
-void task_finish_switch(task_t *prev)
+ * and leaves enqueueing to us. Use task_list_lock -> rq_lock when prev is
+ * a zombie so orphan reparenting and self-reap responsibility are decided
+ * atomically before on_cpu clears. No access to prev is allowed after
+ * release: a waiter may immediately reap a zombie once on_cpu becomes zero. */
+bool task_finish_switch(task_t *prev)
 {
     /* prev is VALID until on_cpu clears below; everything the notify
-     * needs is captured while the rq_lock is held, and after the
+     * needs is captured while the locks are held, and after the
      * unlock ONLY captured values are used — a waiter may reclaim a
      * zombie prev the instant on_cpu drops. */
 #ifdef AARCH64_AP_SCHED_WAKE_TEST
     /* prev is still valid here: on_cpu has not been cleared. */
     aarch64_ap_sched_before_finish(prev);
 #endif
+    bool is_zombie = (__atomic_load_n(&prev->state, __ATOMIC_ACQUIRE) == TASK_ZOMBIE);
+    uint64_t tl_flags = 0;
+    if (is_zombie)
+        tl_flags = spin_lock_irqsave(&task_list_lock);
+
     percpu_t *rq = &percpu_data[__atomic_load_n(&prev->cpu,
                                                 __ATOMIC_ACQUIRE)];
     unsigned notify_target = rq->cpu_id;
     bool reenqueued = false;
     uint64_t flags = spin_lock_irqsave(&rq->rq_lock);
+    bool self_reap = (prev->flags & PF_SELF_REAP) != 0;
+    task_t *wake_parent = (prev->state == TASK_ZOMBIE && !self_reap)
+        ? prev->parent : NULL;
+
     if (prev->state == TASK_RUNNING && !prev->on_rq && prev != rq->idle) {
         enqueue_task(prev, rq);
         __atomic_store_n(&rq->need_resched, 1, __ATOMIC_RELEASE);
@@ -109,11 +119,24 @@ void task_finish_switch(task_t *prev)
     __atomic_store_n(&prev->on_cpu, 0, __ATOMIC_RELEASE);
     spin_unlock_irqrestore(&rq->rq_lock, flags);
 
+    if (is_zombie) {
+        /* Wake waiting parent after prev->on_cpu == 0 (reapable), while
+         * task_list_lock still protects wake_parent from concurrent reap. */
+        if (wake_parent) {
+            int64_t pstate = blocker_state_snapshot(wake_parent);
+            if (pstate == TASK_INTERRUPTIBLE || pstate == TASK_RUNNING)
+                task_wake(wake_parent);
+        }
+        spin_unlock_irqrestore(&task_list_lock, tl_flags);
+    }
+
     /* P2 wake producer: the wake-during-switch re-enqueue is a wake —
      * notify the (possibly remote) target through the same delivery
      * path as every other producer. */
     if (reenqueued && (int)notify_target != (int)cpu_id())
         sched_notify_remote_cpu(notify_target);
+
+    return self_reap;
 }
 
 /* ── task_wake: mark RUNNING + enqueue (exported) ─── */
@@ -246,7 +269,8 @@ static void blocker_wake_locked(task_t *task)
         return;
     bool cond = task->blocker.check && task->blocker.check(task);
     bool signal_wake = !cond && task->blocker.signal_can_wake &&
-                       (task->signal & ~task->blocked) != 0;
+                       (__atomic_load_n(&task->signal, __ATOMIC_ACQUIRE) &
+                        ~task->blocked) != 0;
     if (!cond && !signal_wake)
         return;
 
@@ -308,6 +332,52 @@ void task_exit_zombie(void)
     arch_local_irq_restore(flags);
 }
 
+void task_publish_process_exit(task_t *self, task_t *reparent_to,
+                               uint64_t status, list_t *reap_head)
+{
+    uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+    if (reparent_to) {
+        list_t *p = init_task_union.task.list.next;
+        while (p != &init_task_union.task.list) {
+            task_t *child = container_of(p, task_t, list);
+            p = p->next;
+            if (child->parent != self)
+                continue;
+            child->parent = reparent_to;
+            if (child->state == TASK_ZOMBIE) {
+                list_del(&child->list);
+                if (__atomic_load_n(&child->on_cpu, __ATOMIC_ACQUIRE) == 0) {
+                    list_add_to_before(reap_head, &child->list);
+                } else {
+                    child->list.next = NULL;
+                    child->list.prev = NULL;
+                    child->flags |= PF_SELF_REAP;
+                }
+            }
+        }
+    }
+
+    task_t *parent = self->parent;
+    bool waitable_parent = (parent && parent != reparent_to &&
+                            (parent->flags & PF_PROCESS) &&
+                            parent->state != TASK_ZOMBIE);
+
+    percpu_t *rq = &percpu_data[__atomic_load_n(&self->cpu, __ATOMIC_ACQUIRE)];
+    uint64_t rq_flags = spin_lock_irqsave(&rq->rq_lock);
+    self->exit_code = status;
+    __atomic_store_n(&self->on_cpu, 1, __ATOMIC_RELEASE);
+    if (!waitable_parent) {
+        list_del(&self->list);
+        self->list.next = NULL;
+        self->list.prev = NULL;
+        self->flags |= PF_SELF_REAP;
+    }
+    __atomic_store_n(&self->state, TASK_ZOMBIE, __ATOMIC_RELEASE);
+    spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
+
+    spin_unlock_irqrestore(&task_list_lock, tl_flags);
+}
+
 /*
  * Scan all tasks for blocked ones whose conditions are now met.
  *
@@ -349,7 +419,8 @@ void sched_unblock_blocked(void)
 #endif
         bool was_scan_woken = t->blocker.check && t->blocker.check(t);
         bool signal_wake = t->blocker.signal_can_wake &&
-                           (t->signal & ~t->blocked) != 0;
+                           (__atomic_load_n(&t->signal, __ATOMIC_ACQUIRE) &
+                            ~t->blocked) != 0;
         if (was_scan_woken || signal_wake) {
             blocker_wake_locked(t);
 #ifdef AARCH64_AP_SCHED_WAKE_TEST
@@ -455,7 +526,9 @@ int blocker_wait(blocker_check_t check, int type, bool signal_can_wake)
     }
     /* Callback can traverse the task list (waitpid); keep lifetime ownership
      * until the interruption decision is complete, without holding rq_lock. */
-    bool interrupted = signal_can_wake && (self->signal & ~self->blocked) &&
+    bool interrupted = signal_can_wake &&
+                       (__atomic_load_n(&self->signal, __ATOMIC_ACQUIRE) &
+                        ~self->blocked) &&
                        !check(self);
     spin_unlock_irqrestore(&task_list_lock, resume_flags);
     return interrupted ? -EINTR : 0;

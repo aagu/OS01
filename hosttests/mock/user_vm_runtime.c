@@ -219,6 +219,7 @@ struct fake_leaf {
 static struct fake_leaf g_leaves[MAX_LEAVES];
 static int g_leaf_count;
 static int g_replace_cow_calls;
+static void (*g_on_replace_cow_cb)(uint64_t old_pa);
 
 /* One tree = (root, VA).  Parent and child fake roots therefore hold
  * independent leaves at the same VA, which is what the fork tests
@@ -335,7 +336,26 @@ int aarch64_user_vm_replace_cow(uint64_t *root, uint64_t va,
 
     l->pa = new_pa;
     l->vm = VM_USER_RW | VM_NO_EXEC;
+    if (g_on_replace_cow_cb) {
+        void (*cb)(uint64_t) = g_on_replace_cow_cb;
+        g_on_replace_cow_cb = NULL;
+        cb(old_pa);
+    }
     return 0;
+}
+
+void aarch64_elf_clean_code_page(const unsigned char *page)
+{
+    (void)page;
+}
+
+void aarch64_elf_sync_icache(void)
+{
+}
+
+void user_vm_test_on_replace_cow(void (*cb)(uint64_t old_pa))
+{
+    g_on_replace_cow_cb = cb;
 }
 
 int      user_vm_test_leaf_count(void) { return g_leaf_count; }

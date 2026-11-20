@@ -879,9 +879,21 @@ static void aarch64_user_task_exit(uint64_t status)
     }
     aarch64_user_clear_tls();
 
-    /* The image and the private state are released with interrupts
-     * enabled. */
+    /* Detach our fd-table under task_list_lock, then drop the reference
+     * outside the lock (files_unpin drop-to-zero may free/close files). */
+    files_t *fs = NULL;
+    {
+        uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+        fs = t->files;
+        t->files = NULL;
+        spin_unlock_irqrestore(&task_list_lock, tl_flags);
+    }
+
+    /* The files table, image, and private state are released with
+     * interrupts enabled. */
     arch_local_irq_enable();
+    if (fs)
+        files_unpin(fs);
     aarch64_user_image_destroy(image);
     if (owner)
         kfree(owner);
@@ -898,48 +910,13 @@ static void aarch64_user_task_exit(uint64_t status)
     }
 #endif
 
-    /* Atomically under task_list_lock:
-     *   1. Re-parent surviving children to idle and collect unwaited
-     *      orphan ZOMBIEs (on_cpu == 0) onto reap_head for lock-free
-     *      reclamation;
-     *   2. Decide whether t has a live waitable PF_PROCESS parent and
-     *      should remain on task_list as TASK_ZOMBIE or self-reap. */
+    /* Atomically publish ZOMBIE, reparent surviving children to idle,
+     * and determine reap destination before switching away. */
     task_t *idle = percpu_data[0].idle;
     list_t reap_head;
     list_init(&reap_head);
-    bool waitable_parent = false;
 
-    uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
-    if (idle) {
-        list_t *p = init_task_union.task.list.next;
-        while (p != &init_task_union.task.list) {
-            task_t *child = container_of(p, task_t, list);
-            p = p->next;
-            if (child->parent != t)
-                continue;
-            child->parent = idle;
-            if (child->state == TASK_ZOMBIE) {
-                list_del(&child->list);
-                if (__atomic_load_n(&child->on_cpu, __ATOMIC_ACQUIRE) == 0) {
-                    list_add_to_before(&reap_head, &child->list);
-                } else {
-                    child->list.next = NULL;
-                    child->list.prev = NULL;
-                    child->flags |= PF_SELF_REAP;
-                }
-            }
-        }
-    }
-
-    task_t *parent = t->parent;
-    if (parent && parent != idle &&
-        (parent->flags & PF_PROCESS) &&
-        parent->state != TASK_ZOMBIE) {
-        waitable_parent = true;
-        t->exit_code = status;
-        __atomic_store_n(&t->on_cpu, 1, __ATOMIC_RELEASE);
-    }
-    spin_unlock_irqrestore(&task_list_lock, tl_flags);
+    task_publish_process_exit(t, idle, status, &reap_head);
 
     while (!list_is_empty(&reap_head)) {
         list_t *node = reap_head.next;
@@ -950,11 +927,6 @@ static void aarch64_user_task_exit(uint64_t status)
         sched_free_reaped_task(orphan);
     }
 
-    if (!waitable_parent)
-        task_exit_self_reap(status);
-
-    task_wake_parent(t);
-    task_exit_zombie();
     schedule();
     for (;;)
         arch_cpu_halt();

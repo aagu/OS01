@@ -50,11 +50,9 @@ int aarch64_elf_view_parse(const void *bytes, size_t size, bool reject_tls,
  * zeroed or already-released view. */
 void aarch64_elf_view_release(struct aarch64_elf_view *view);
 
-/* Clean the data cache for one freshly written code page and, after all
- * pages are written, invalidate the instruction cache.  The two steps
- * are split because the clean must happen per page while the kernel
- * copy is hot in the data cache, and the invalidate must happen once the
- * mappings exist. */
+/* Clean the data cache to PoU for one freshly written code page and,
+ * after all pages are written, broadcast an inner-shareable instruction
+ * cache invalidation (dsb ish -> ic ialluis -> dsb ish -> isb). */
 void aarch64_elf_clean_code_page(const unsigned char *page);
 void aarch64_elf_sync_icache(void);
 

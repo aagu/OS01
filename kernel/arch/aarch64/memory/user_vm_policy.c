@@ -31,6 +31,7 @@
 #include <memory/memory.h>      /* Phy_To_Virt */
 #include <memory/pmm.h>         /* alloc_4k_page / free_4k_page / PAGE_4K_* */
 #include <memory/slab.h>        /* kmalloc / kfree */
+#include <arch/aarch64/user_elf.h>     /* aarch64_elf_clean_code_page / sync_icache */
 #include <arch/aarch64/user_vm_leaf.h>    /* leaf adapter (arch_user_vm_*) */
 #include <arch/aarch64/user_vm_policy.h>  /* this TU's policy API */
 #include <arch/aarch64/user_vm_internal.h> /* shared fork internals */
@@ -303,15 +304,21 @@ static int cow_private_page(mm_t *mm, user_vm_page_t *r, uint64_t *root)
         return -ENOMEM;
     memcpy(Phy_To_Virt(new_pa), Phy_To_Virt(r->pa), PAGE_4K_SIZE);
 
-    int rc = arch_user_vm_replace_cow(root, r->va, r->pa, new_pa);
+    uint64_t old_pa = r->pa;
+    int rc = arch_user_vm_replace_cow(root, r->va, old_pa, new_pa);
     if (rc != 0) {
         free_4k_page(new_pa);
         return (rc == -ENOMEM) ? -ENOMEM : -EFAULT;
     }
 
+    /* Release the old PA only after the leaf swap and TLB invalidation
+     * have completed; if a concurrent owner dropped its reference first,
+     * this is the last reference and we free old_pa here. */
     bool last = false;
-    if (pmm_cow_release(r->pa, &last) != 0 || last)
+    if (pmm_cow_release(old_pa, &last) != 0)
         arch_user_vm_invariant("cow copy release mismatch");
+    if (last)
+        free_4k_page(old_pa);
 
     r->pa = new_pa;
     r->share = USER_VM_PAGE_PRIVATE;
@@ -1039,6 +1046,7 @@ int64_t user_vm_mprotect(mm_t *mm, uint64_t addr, uint64_t len,
      * hardware RO/NX — the first real write does the COW.  A private
      * page takes the requested hardware word directly. */
     uint32_t logical = target_vm(prot);
+    bool need_icache_sync = false;
     for (list_t *lp = mm->resident_list.next; lp; lp = lp->next) {
         user_vm_page_t *r = container_of(lp, user_vm_page_t, list);
         if (r->va < addr) continue;
@@ -1049,11 +1057,19 @@ int64_t user_vm_mprotect(mm_t *mm, uint64_t addr, uint64_t len,
             (prot & PROT_WRITE))
             hw = VM_USER_RO | VM_NO_EXEC;
 
+        uint32_t old_vm = 0;
         if (arch_vmm_update_4k(root, r->pa, r->va, hw,
-                               NULL, NULL) != 0)
+                               NULL, &old_vm) != 0)
             arch_user_vm_invariant("mprotect leaf update failed");
+        if (!(hw & VM_NO_EXEC) && (old_vm & VM_NO_EXEC)) {
+            aarch64_elf_clean_code_page(
+                (const unsigned char *)Phy_To_Virt(r->pa));
+            need_icache_sync = true;
+        }
         r->logical = logical;
     }
+    if (need_icache_sync)
+        aarch64_elf_sync_icache();
     return 0;
 }
 
@@ -1215,6 +1231,11 @@ int user_vm_fault(mm_t *mm, uint64_t far, bool write)
             resident_remove_leaf(mm, rec, root);
             return -EFAULT;
         }
+    }
+    if (!(map_vm & VM_NO_EXEC)) {
+        aarch64_elf_clean_code_page(
+            (const unsigned char *)Phy_To_Virt(rec->pa));
+        aarch64_elf_sync_icache();
     }
     return 0;
 }
@@ -1398,8 +1419,10 @@ int user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len, bool write)
                                          cow[i].new_pa) != 0)
                 arch_user_vm_invariant("copy replace mismatch");
             bool last = false;
-            if (pmm_cow_release(cow[i].old_pa, &last) != 0 || last)
+            if (pmm_cow_release(cow[i].old_pa, &last) != 0)
                 arch_user_vm_invariant("copy replace release mismatch");
+            if (last)
+                free_4k_page(cow[i].old_pa);
             r->pa = cow[i].new_pa;
             r->share = USER_VM_PAGE_PRIVATE;
         } else {

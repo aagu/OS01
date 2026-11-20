@@ -258,7 +258,8 @@ int64_t do_select(int nfds, void *readfds, void *writefds,
         return do_select_nofds(ms);
     }
 
-    if (current->signal & ~current->blocked)
+    if (__atomic_load_n(&current->signal, __ATOMIC_ACQUIRE) &
+        ~current->blocked)
         return -EINTR;
 
     int64_t ms = -1;
@@ -378,7 +379,8 @@ int64_t do_pselect6(int nfds, void *readfds, void *writefds,
         mask_swapped = true;
     }
 
-    if (current->signal & ~current->blocked) {
+    if (__atomic_load_n(&current->signal, __ATOMIC_ACQUIRE) &
+        ~current->blocked) {
         ret = -EINTR;
         goto out;
     }

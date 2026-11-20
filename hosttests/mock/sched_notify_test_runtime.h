@@ -66,6 +66,7 @@
 /* Same values as sched/task.h. */
 #define PF_SELF_REAP  (1 << 5)
 #define PF_KTHREAD    (1 << 0)
+#define PF_PROCESS    (1 << 2)
 #define TASK_RUNNING       (1 << 0)
 #define TASK_INTERRUPTIBLE (1 << 1)
 #define TASK_UNINTERRUPTIBLE (1 << 2)
@@ -300,7 +301,7 @@ void schedule(void);
 int blocker_wait(blocker_check_t check, int type, bool signal_can_wake);
 void blocker_wake(task_t *task);
 void task_wake(task_t *t);
-void task_finish_switch(task_t *prev);
+bool task_finish_switch(task_t *prev);
 void sched_notify_remote_cpu(unsigned cpu);
 void sched_notify_remote(task_t *tsk);
 unsigned sched_pick_cpu_mask(uint64_t allowed);

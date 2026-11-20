@@ -27,7 +27,7 @@ int task_send_signal(int pid, int sig)
     } else if (target->flags & PF_KTHREAD) {
         ret = -EPERM;
     } else {
-        target->signal |= (1ULL << sig);
+        __atomic_fetch_or(&target->signal, (1ULL << sig), __ATOMIC_RELEASE);
         if (target->state == TASK_INTERRUPTIBLE)
             task_wake(target);
     }
@@ -50,7 +50,7 @@ int signal_pgrp(pid_t target, int sig)
         task_t *t = container_of(pos, task_t, list);
         pos = task_list_next(pos);
         if (t->pgrp == target && !(t->flags & PF_KTHREAD)) {
-            t->signal |= (1ULL << sig);
+            __atomic_fetch_or(&t->signal, (1ULL << sig), __ATOMIC_RELEASE);
             if (t->state == TASK_INTERRUPTIBLE)
                 task_wake(t);
             matched++;

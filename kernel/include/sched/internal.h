@@ -145,4 +145,12 @@ void kthread_exit(uint64_t code);
  * of a detached zombie task after its on_cpu has cleared. */
 void sched_free_reaped_task(task_t *child);
 
+/* Atomically publish process exit under task_list_lock -> rq_lock:
+ * reparent surviving children to reparent_to (collecting off-CPU orphan
+ * zombies onto reap_head and marking on-CPU orphan zombies PF_SELF_REAP),
+ * then mark self TASK_ZOMBIE (and PF_SELF_REAP + detached if no waitable
+ * parent remains). */
+void task_publish_process_exit(task_t *self, task_t *reparent_to,
+                               uint64_t status, list_t *reap_head);
+
 #endif /* KERNEL_SCHED_INTERNAL_H */

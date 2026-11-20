@@ -308,7 +308,10 @@ int user_vm_clone_fork(mm_t *parent, mm_t *child, int (*publish)(void *),
     }
 
     /* The child mm is complete; task publication is the last fallible
-     * step. */
+     * step.  On success the child root is owned by the published child
+     * task (which may start on another CPU immediately), so we only free
+     * parent-side staging data below; on failure the child was never
+     * published and fail: retains exclusive ownership of child_root. */
     for (struct clone_stage *st = stages; st; st = st->next) {
         aarch64_user_vm_resident_insert(child, st->child);
         st->child_inserted = true;

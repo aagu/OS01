@@ -1345,6 +1345,60 @@ TEST_FUNC(test_cow_write_fault_copies_multi_ref_page)
     free_4k_page(old_pa);
 }
 
+static void drop_peer_cow_ref(uint64_t old_pa)
+{
+    bool peer_last = true;
+    assert_eq(0, pmm_cow_release(old_pa, &peer_last));
+    assert_false(peer_last);
+}
+
+TEST_FUNC(test_cow_write_fault_concurrent_last_ref_frees_old_page)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    uint64_t old_pa = fault_private_page(mm, HEAP_BASE);
+    memset(Phy_To_Virt(old_pa), 0x5a, PAGE_4K_SIZE);
+    user_vm_page_t *r = make_shared_page(mm, HEAP_BASE, 2,
+                                         VM_USER_RW | VM_NO_EXEC);
+
+    user_vm_test_on_replace_cow(drop_peer_cow_ref);
+    assert_eq(0, user_vm_cow_fault(mm, HEAP_BASE + 0x40));
+
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, r->share);
+    assert_true(r->pa != old_pa);
+    assert_eq(0, user_vm_test_cow_refs(old_pa));
+    assert_eq(0, user_vm_test_cow_refs(r->pa));
+    assert_eq(1, user_vm_test_free_count());   /* old_pa freed once */
+    for (size_t i = 0; i < PAGE_4K_SIZE; i++)
+        assert_eq(0x5a, ((const uint8_t *)Phy_To_Virt(r->pa))[i]);
+
+    destroy_mm(mm);
+    assert_eq(2, user_vm_test_free_count());   /* + private copy */
+}
+
+TEST_FUNC(test_prepare_copy_concurrent_last_ref_frees_old_page)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    uint64_t old_pa = fault_private_page(mm, HEAP_BASE);
+    memset(Phy_To_Virt(old_pa), 0x3c, PAGE_4K_SIZE);
+    user_vm_page_t *r = make_shared_page(mm, HEAP_BASE, 2,
+                                         VM_USER_RW | VM_NO_EXEC);
+
+    user_vm_test_on_replace_cow(drop_peer_cow_ref);
+    assert_eq(0, user_vm_prepare_copy(mm, HEAP_BASE, PAGE_4K_SIZE, true));
+
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, r->share);
+    assert_true(r->pa != old_pa);
+    assert_eq(0, user_vm_test_cow_refs(old_pa));
+    assert_eq(1, user_vm_test_free_count());   /* old_pa freed once */
+    for (size_t i = 0; i < PAGE_4K_SIZE; i++)
+        assert_eq(0x3c, ((const uint8_t *)Phy_To_Virt(r->pa))[i]);
+
+    destroy_mm(mm);
+    assert_eq(2, user_vm_test_free_count());   /* + private copy */
+}
+
 TEST_FUNC(test_cow_write_fault_upgrades_unique_ref)
 {
     user_vm_test_reset();
@@ -2266,6 +2320,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_clone_fork_stash_mixed_success_and_second_fork),
     TEST_ENTRY(test_clone_fork_stash_rollback_unmaps_stashed_child),
     TEST_ENTRY(test_cow_write_fault_copies_multi_ref_page),
+    TEST_ENTRY(test_cow_write_fault_concurrent_last_ref_frees_old_page),
+    TEST_ENTRY(test_prepare_copy_concurrent_last_ref_frees_old_page),
     TEST_ENTRY(test_cow_write_fault_upgrades_unique_ref),
     TEST_ENTRY(test_cow_write_fault_rejections),
     TEST_ENTRY(test_mprotect_shared_keeps_hardware_readonly),

@@ -1100,7 +1100,8 @@ _Static_assert(__builtin_offsetof(task_t, signal) == 80,
 
 int arch_do_signal_delivery(pt_regs_t *regs)
 {
-    uint64_t pending = current->signal;
+    uint64_t pending = (uint64_t)__atomic_load_n(&current->signal,
+                                                 __ATOMIC_ACQUIRE);
     if (!pending)
         return 0;
 
@@ -1117,21 +1118,24 @@ int arch_do_signal_delivery(pt_regs_t *regs)
                 continue;
             void (*handler)(int) = current->sighand[sig].sa_handler;
             if (handler == SIG_IGN) {
-                current->signal &= ~(1ULL << sig);
+                __atomic_fetch_and(&current->signal, ~(1ULL << sig),
+                                   __ATOMIC_ACQ_REL);
                 continue;
             }
             if (handler == SIG_DFL) {
                 switch (sig) {
                 case SIGCHLD: case SIGURG: case SIGWINCH:
                 case SIGCONT: case SIGTSTP: case SIGTTIN: case SIGTTOU:
-                    current->signal &= ~(1ULL << sig);
+                    __atomic_fetch_and(&current->signal, ~(1ULL << sig),
+                                       __ATOMIC_ACQ_REL);
                     break;
                 default:
                     // Fatal on a NULL frame: keep pending for the
                     // normal ring3 return (PID 1 also just clears,
                     // matching the init contract).
                     if (current->pid == 1)
-                        current->signal &= ~(1ULL << sig);
+                        __atomic_fetch_and(&current->signal, ~(1ULL << sig),
+                                           __ATOMIC_ACQ_REL);
                     break;
                 }
             }
@@ -1151,12 +1155,14 @@ int arch_do_signal_delivery(pt_regs_t *regs)
         void (*handler)(int) = current->sighand[sig].sa_handler;
 
         if (handler == SIG_IGN) {
-            current->signal &= ~(1ULL << sig);
+            __atomic_fetch_and(&current->signal, ~(1ULL << sig),
+                               __ATOMIC_ACQ_REL);
             continue;
         }
 
         if (handler == SIG_DFL) {
-            current->signal &= ~(1ULL << sig);
+            __atomic_fetch_and(&current->signal, ~(1ULL << sig),
+                               __ATOMIC_ACQ_REL);
             switch (sig) {
             case SIGCHLD: case SIGURG: case SIGWINCH:
             case SIGCONT:
@@ -1178,7 +1184,8 @@ int arch_do_signal_delivery(pt_regs_t *regs)
                  * the user frame and no kernel locks are abandoned
                  * mid-syscall. */
                 if (!(regs->cs & 3)) {
-                    current->signal |= (1ULL << sig);
+                    __atomic_fetch_or(&current->signal, (1ULL << sig),
+                                      __ATOMIC_RELEASE);
                     break;
                 }
                 log_err("task %d killed by signal %d (default)\n",
@@ -1208,7 +1215,8 @@ int arch_do_signal_delivery(pt_regs_t *regs)
         if (!restorer) {
             log_err("task %d: signal %d handler has no restorer, "
                     "killing\n", (int)current->pid, sig);
-            current->signal &= ~(1ULL << sig);
+            __atomic_fetch_and(&current->signal, ~(1ULL << sig),
+                               __ATOMIC_ACQ_REL);
             do_exit((uint64_t)sig);
             return 1;  // unreachable
         }
@@ -1260,7 +1268,8 @@ int arch_do_signal_delivery(pt_regs_t *regs)
         current->blocked |= (1ULL << (sig - 1));
         current->blocked |= current->sighand[sig].sa_mask;
 
-        current->signal &= ~(1ULL << sig);
+        __atomic_fetch_and(&current->signal, ~(1ULL << sig),
+                           __ATOMIC_ACQ_REL);
         return 1;  // handler delivered
     }
     return 0;  // nothing deliverable
@@ -1268,7 +1277,8 @@ int arch_do_signal_delivery(pt_regs_t *regs)
 
 int arch_signal_pending_fatal(void)
 {
-    uint64_t pending = current->signal;
+    uint64_t pending = (uint64_t)__atomic_load_n(&current->signal,
+                                                 __ATOMIC_ACQUIRE);
     if (!pending)
         return false;
 

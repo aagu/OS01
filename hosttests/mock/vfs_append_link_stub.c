@@ -30,6 +30,21 @@
 
 struct file;
 
+__attribute__((weak)) void mutex_init(void *m)
+{
+    (void)m;
+}
+
+__attribute__((weak)) void mutex_lock(void *m)
+{
+    (void)m;
+}
+
+__attribute__((weak)) void mutex_unlock(void *m)
+{
+    (void)m;
+}
+
 int vfs_append(struct file *f, uint64_t size, const void *buffer)
 {
     (void)f;

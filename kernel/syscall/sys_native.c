@@ -316,7 +316,7 @@ int64_t sys_native_kill(syscall_ctx_t *ctx)
                 continue;
             if (t->pid == 1)
                 continue;
-            t->signal |= (1ULL << sig);
+            __atomic_fetch_or(&t->signal, (1ULL << sig), __ATOMIC_RELEASE);
             if (t->state == TASK_INTERRUPTIBLE)
                 task_wake(t);
             matched++;

@@ -102,7 +102,7 @@ int do_futex_wait(int *uaddr, int val)
     }
     self->state = TASK_RUNNING;
 
-    if (self->signal)
+    if (__atomic_load_n(&self->signal, __ATOMIC_ACQUIRE))
         return -EINTR;
 
     return 0;

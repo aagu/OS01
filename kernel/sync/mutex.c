@@ -24,7 +24,9 @@ static int mutex_acquire(mutex_t *m, int interruptible)
         wait_queue_arm(&m->wq);
         int acquired = arch_atomic_cas((volatile uint64_t *)&m->owner, 0,
                                       (uint64_t)current->pid);
-        if (!acquired && !(interruptible && current->signal))
+        if (!acquired &&
+            !(interruptible &&
+              __atomic_load_n(&current->signal, __ATOMIC_ACQUIRE)))
             schedule();
 
         // Wake-one may remove this same node on another CPU.
@@ -34,7 +36,8 @@ static int mutex_acquire(mutex_t *m, int interruptible)
         arch_local_irq_restore(irq_flags);
         if (acquired)
             return 0;
-        if (interruptible && current->signal) {
+        if (interruptible &&
+            __atomic_load_n(&current->signal, __ATOMIC_ACQUIRE)) {
             // We may have consumed unlock's wake-one before cancellation.
             // Let the next waiter retry rather than leave a free lock idle.
             wait_queue_wake_one(&m->wq);

@@ -50,6 +50,7 @@ static void suite_self_reap_capture(void)
     prev_task.thread = &thd_obj;
     prev_task.fpu_save = fpu_buf;
     prev_task.stack_alloc_base = stk_buf;
+    mock_poison_prev_on_rq_unlock = &prev_task;
 
     task_switch_complete(&prev_task);
 
@@ -88,6 +89,7 @@ static void suite_non_self_reap(void)
     prev_task.thread = &thd_obj;
     prev_task.fpu_save = fpu_buf;
     prev_task.stack_alloc_base = stk_buf;
+    mock_poison_prev_on_rq_unlock = &prev_task;
 
     task_switch_complete(&prev_task);
 
@@ -122,6 +124,7 @@ static void suite_self_reap_null_thread(void)
     prev_task.thread = NULL;
     prev_task.fpu_save = fpu_buf;
     prev_task.stack_alloc_base = stk_buf;
+    mock_poison_prev_on_rq_unlock = &prev_task;
 
     task_switch_complete(&prev_task);
 
@@ -186,19 +189,125 @@ static void suite_self_reap_stack_counter(void)
     prev_task.thread = &thd_obj;
     prev_task.fpu_save = fpu_buf;
     prev_task.stack_alloc_base = stk_buf;
+    mock_poison_prev_on_rq_unlock = &prev_task;
     task_switch_complete(&prev_task);
     assert_true(sched_self_reap_stack_count() == before);
 
     /* (c) a self-reap switch that frees a stack counts exactly one. */
     prev_task.flags = PF_SELF_REAP;
+    prev_task.thread = &thd_obj;
+    prev_task.fpu_save = fpu_buf;
+    prev_task.stack_alloc_base = stk_buf;
+    mock_poison_prev_on_rq_unlock = &prev_task;
     task_switch_complete(&prev_task);
     assert_true(sched_self_reap_stack_count() == before + 1);
 
     /* A self-reap switch WITHOUT a stack frees no stack, so it must
      * not bump the counter either. */
+    prev_task.flags = PF_SELF_REAP;
+    prev_task.thread = &thd_obj;
+    prev_task.fpu_save = fpu_buf;
     prev_task.stack_alloc_base = NULL;
+    mock_poison_prev_on_rq_unlock = &prev_task;
     task_switch_complete(&prev_task);
     assert_true(sched_self_reap_stack_count() == before + 1);
+}
+
+static task_t g_idle_task;
+static task_t g_parent_task;
+static task_t g_child_task;
+static list_t g_parent_reap_head;
+
+static void reparent_parent_before_tail_finish(void)
+{
+    task_publish_process_exit(&g_parent_task, &g_idle_task, 0, &g_parent_reap_head);
+    mock_poison_prev_on_rq_unlock = &g_child_task;
+}
+
+static void init_proc_task(task_t *t, int64_t pid, task_t *parent,
+                           thread_t *thd, void *fpu, void *stk)
+{
+    memset(t, 0, sizeof(*t));
+    list_init(&t->list);
+    t->pid = pid;
+    t->flags = PF_PROCESS;
+    t->state = TASK_RUNNING;
+    t->parent = parent;
+    t->on_cpu = 1;
+    t->thread = thd;
+    t->fpu_save = fpu;
+    t->stack_alloc_base = stk;
+}
+
+static void suite_orphan_exit_handoff(void)
+{
+    TEST_SUITE("orphan exit handoff (parent-first and child-first)");
+
+    /* (1) Parent reparents first; arriving child publishes ZOMBIE and self-reaps. */
+    switch_tail_reset();
+    memset(&g_idle_task, 0, sizeof(g_idle_task));
+    g_idle_task.pid = 0;
+    g_idle_task.flags = PF_KTHREAD;
+    percpu_data[0].idle = &g_idle_task;
+
+    init_proc_task(&g_parent_task, 10, &g_idle_task, NULL, NULL, NULL);
+    init_proc_task(&g_child_task, 11, &g_parent_task, &thd_obj, fpu_buf, stk_buf);
+    list_add_to_before(&init_task_union.task.list, &g_parent_task.list);
+    list_add_to_before(&init_task_union.task.list, &g_child_task.list);
+
+    list_t child_reap_head;
+    list_init(&g_parent_reap_head);
+    list_init(&child_reap_head);
+
+    task_publish_process_exit(&g_parent_task, &g_idle_task, 0, &g_parent_reap_head);
+    assert_true(list_is_empty(&g_parent_reap_head));
+    assert_true(g_child_task.parent == &g_idle_task);
+
+    task_publish_process_exit(&g_child_task, &g_idle_task, 42, &child_reap_head);
+    assert_true(list_is_empty(&child_reap_head));
+    assert_true(g_child_task.state == TASK_ZOMBIE);
+    assert_true((g_child_task.flags & PF_SELF_REAP) != 0);
+
+    mock_poison_prev_on_rq_unlock = &g_child_task;
+    task_switch_complete(&g_child_task);
+    assert_eq(1, spy_finish_calls);
+    assert_eq(3, spy_kfree_calls);
+    assert_true((void *)spy_kfreed[0] == (void *)&thd_obj);
+    assert_true(spy_kfreed[1] == (void *)fpu_buf);
+    assert_true(spy_kfreed[2] == (void *)stk_buf);
+    assert_true(spy_kfreed[0] != (void *)SWITCH_TAIL_POISON_THREAD);
+
+    /* (2) Child publishes ZOMBIE first; parent reparenting happens before
+     * child switch tail clears on_cpu — final reap belongs only to tail. */
+    switch_tail_reset();
+    memset(&g_idle_task, 0, sizeof(g_idle_task));
+    g_idle_task.pid = 0;
+    g_idle_task.flags = PF_KTHREAD;
+    percpu_data[0].idle = &g_idle_task;
+
+    init_proc_task(&g_parent_task, 20, &g_idle_task, NULL, NULL, NULL);
+    init_proc_task(&g_child_task, 21, &g_parent_task, &thd_obj, fpu_buf, stk_buf);
+    list_add_to_before(&init_task_union.task.list, &g_parent_task.list);
+    list_add_to_before(&init_task_union.task.list, &g_child_task.list);
+
+    list_init(&g_parent_reap_head);
+    list_init(&child_reap_head);
+
+    task_publish_process_exit(&g_child_task, &g_idle_task, 43, &child_reap_head);
+    assert_true(list_is_empty(&child_reap_head));
+    assert_true(g_child_task.state == TASK_ZOMBIE);
+    assert_true((g_child_task.flags & PF_SELF_REAP) == 0);
+
+    mock_on_before_task_list_lock = reparent_parent_before_tail_finish;
+    task_switch_complete(&g_child_task);
+
+    assert_true(list_is_empty(&g_parent_reap_head));
+    assert_eq(1, spy_finish_calls);
+    assert_eq(3, spy_kfree_calls);
+    assert_true((void *)spy_kfreed[0] == (void *)&thd_obj);
+    assert_true(spy_kfreed[1] == (void *)fpu_buf);
+    assert_true(spy_kfreed[2] == (void *)stk_buf);
+    assert_true(spy_kfreed[0] != (void *)SWITCH_TAIL_POISON_THREAD);
 }
 
 int main(void)
@@ -209,6 +318,7 @@ int main(void)
     suite_self_reap_null_thread();
     suite_self_reap_stack_counter();
     suite_kthread_yield_irq_restore();
+    suite_orphan_exit_handoff();
     printf("\n%s: %d total, %d passed, %d failed\n", "test_switch_complete",
            __test_stats.total, __test_stats.passed, __test_stats.failed);
     return __test_stats.failed ? 1 : 0;

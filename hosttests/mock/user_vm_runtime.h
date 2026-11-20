@@ -28,6 +28,11 @@
 /* ── Skip heavy production headers ─────────────────────────── */
 #ifndef KERNEL_TASK_H
 #define KERNEL_TASK_H
+#ifndef OS01_AARCH64_USER_ELF_H
+#define OS01_AARCH64_USER_ELF_H
+void aarch64_elf_clean_code_page(const unsigned char *page);
+void aarch64_elf_sync_icache(void);
+#endif
 #endif
 #ifndef _ARCH_CPU_H
 #define _ARCH_CPU_H
@@ -208,6 +213,7 @@ int      user_vm_test_leaf_state_in(uint64_t *root, uint64_t va);
 uint64_t user_vm_test_leaf_pa_in(uint64_t *root, uint64_t va);
 uint32_t user_vm_test_leaf_vm_in(uint64_t *root, uint64_t va);
 int      user_vm_test_replace_cow_calls(void);
+void     user_vm_test_on_replace_cow(void (*cb)(uint64_t old_pa));
 
 /* ── Transaction-layer boundary controls (M4 Task 3) ──────── */
 struct task_struct *user_vm_test_task(int slot);

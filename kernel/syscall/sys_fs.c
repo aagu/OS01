@@ -593,6 +593,12 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
         file_t *f = current->files->fd[fd];
         if (!f->node) { syscall_result = -ESPIPE; break; }
 
+        bool lock_pos = (f->type == FD_VFS);
+        if (lock_pos) {
+            file_get(f);
+            mutex_lock(&f->pos_lock);
+        }
+
         int64_t new_offset;
         switch (whence) {
         case SEEK_SET:
@@ -608,8 +614,19 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
             new_offset = -1;
             break;
         }
-        if (new_offset < 0) { syscall_result = -EINVAL; break; }
+        if (new_offset < 0) {
+            if (lock_pos) {
+                mutex_unlock(&f->pos_lock);
+                file_put(f);
+            }
+            syscall_result = -EINVAL;
+            break;
+        }
         f->offset = (uint64_t)new_offset;
+        if (lock_pos) {
+            mutex_unlock(&f->pos_lock);
+            file_put(f);
+        }
         syscall_result = new_offset;
         break;
     }
@@ -724,10 +741,21 @@ case SYS_ioctl: {
         if (cap > UACCESS_BOUNCE_SIZE) cap = UACCESS_BOUNCE_SIZE;
         uint8_t *kbuf = kmalloc(cap);
         if (!kbuf) { syscall_result = -ENOMEM; break; }
+
+        bool lock_pos = (f->type == FD_VFS);
+        if (lock_pos) {
+            file_get(f);
+            mutex_lock(&f->pos_lock);
+        }
+
         uint64_t next_offset = f->offset;
         int n = vfs_getdents(f->node, (struct linux_dirent64 *)kbuf,
                              (unsigned)cap, &next_offset);
         if (n < 0) {
+            if (lock_pos) {
+                mutex_unlock(&f->pos_lock);
+                file_put(f);
+            }
             kfree(kbuf);
             syscall_result = -EIO;
             break;
@@ -747,6 +775,10 @@ case SYS_ioctl: {
         } else {
             f->offset = next_offset; // commit only on success
             syscall_result = n;
+        }
+        if (lock_pos) {
+            mutex_unlock(&f->pos_lock);
+            file_put(f);
         }
         break;
     }

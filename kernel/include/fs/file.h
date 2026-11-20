@@ -5,6 +5,7 @@
 #include <arch/spinlock.h>
 #include <list.h>
 #include <sync/wait.h>
+#include <sync/mutex.h>
 
 // ── Constants ──────────────────────────────────────────────
 
@@ -116,6 +117,7 @@ typedef struct file {
     // hook 可写入，仅 release_file hook 可释放。dup/fork 共享同一
     // file_t，因此也共享同一份快照。
     void           *fs_private;
+    mutex_t        pos_lock;    // serializes shared FD_VFS implicit file position
 } file_t;
 
 // ── Per-process file descriptor table ──────────────────────

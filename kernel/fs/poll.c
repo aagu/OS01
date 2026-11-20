@@ -566,7 +566,8 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
         }
 
         // ── Signal pending before sleep: disarm + EINTR ─────
-        if (current->signal & ~current->blocked) {
+        if (__atomic_load_n(&current->signal, __ATOMIC_ACQUIRE) &
+            ~current->blocked) {
             poll_core_release(pt, true, timed);
             return -EINTR;
         }
@@ -609,7 +610,8 @@ int64_t do_poll_core(struct pollfd *kfds, uint64_t nfds, int64_t timeout_val, po
         // ready data takes priority over -EINTR (POSIX — a wake from
         // the fd and a signal delivery can land in the same window,
         // and the data must not be lost to a spurious EINTR).
-        if (current->signal & ~current->blocked) {
+        if (__atomic_load_n(&current->signal, __ATOMIC_ACQUIRE) &
+            ~current->blocked) {
             int rc = poll_scan(kfds, nfds, NULL);
             poll_core_release(pt, false, timed);
             if (rc > 0)
@@ -697,7 +699,8 @@ int64_t do_poll(struct pollfd *user_fds, uint64_t nfds, int timeout_val)
     }
 
     // ── Signal check: any unblocked pending signal → EINTR ─
-    if (current->signal & ~current->blocked) {
+    if (__atomic_load_n(&current->signal, __ATOMIC_ACQUIRE) &
+        ~current->blocked) {
         kfree(kfds);
         return -EINTR;
     }

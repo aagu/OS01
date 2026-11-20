@@ -50,6 +50,7 @@ file_t *file_alloc(void)
     file_t *f = (file_t *)calloc(1, sizeof(file_t));
     if (!f) return NULL;
     f->refcount = 1;
+    mutex_init(&f->pos_lock);
     return f;
 }
 
@@ -877,6 +878,10 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
         void *kbuf = kmalloc(UACCESS_BOUNCE_SIZE);
         if (!kbuf) return -1;
 
+        bool lock_pos = (f->type == FD_VFS);
+        if (lock_pos)
+            mutex_lock(&f->pos_lock);
+
         uint64_t committed = 0;
         int64_t last_err = 0;
         for (;;) {
@@ -899,6 +904,8 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
                 // User buffer fault: stop here.  If we already
                 // committed bytes, return the short count; else -EFAULT.
                 if (committed == 0) {
+                    if (lock_pos)
+                        mutex_unlock(&f->pos_lock);
                     kfree(kbuf);
                     return rc;
                 }
@@ -908,6 +915,8 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
             committed += (uint64_t)n;
             if ((uint64_t)n < chunk) break;   // short read (EOF)
         }
+        if (lock_pos)
+            mutex_unlock(&f->pos_lock);
         kfree(kbuf);
         /* Task 2: when no bytes were committed and vfs_read returned a
          * negative errno, propagate that errno verbatim so userspace
@@ -1201,7 +1210,9 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
             ssize_t arc = copy_from_user_ft(abuf, buf, (size_t)chunk);
             if (arc < 0) { kfree(abuf); return arc; }
 
+            mutex_lock(&f->pos_lock);
             int64_t n = vfs_append(f, chunk, abuf);
+            mutex_unlock(&f->pos_lock);
             kfree(abuf);
             if (n < 0) return n;
             if (n == 0) return -1;      /* nothing was committed */
@@ -1215,6 +1226,10 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
         void *kbuf = kmalloc(UACCESS_BOUNCE_SIZE);
         if (!kbuf) return -1;
 
+        bool lock_pos = (f->type == FD_VFS);
+        if (lock_pos)
+            mutex_lock(&f->pos_lock);
+
         uint64_t committed = 0;
         for (;;) {
             uint64_t remaining = size - committed;
@@ -1226,6 +1241,8 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
                 kbuf, (const uint8_t *)buf + committed, (size_t)chunk);
             if (rc < 0) {
                 if (committed == 0) {
+                    if (lock_pos)
+                        mutex_unlock(&f->pos_lock);
                     kfree(kbuf);
                     return rc;
                 }
@@ -1235,6 +1252,8 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
             int64_t n = vfs_write(f->node, f->offset, chunk, kbuf);
             if (n <= 0) {
                 if (committed == 0) {
+                    if (lock_pos)
+                        mutex_unlock(&f->pos_lock);
                     kfree(kbuf);
                     return (n < 0) ? n : -1;   // propagate error
                 }
@@ -1244,6 +1263,8 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
             committed += (uint64_t)n;
             if ((uint64_t)n < chunk) break;    // short write
         }
+        if (lock_pos)
+            mutex_unlock(&f->pos_lock);
         kfree(kbuf);
         if (committed == 0) return -1;
         return (int64_t)committed;

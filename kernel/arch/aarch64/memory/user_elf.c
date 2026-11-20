@@ -79,8 +79,9 @@ void aarch64_elf_clean_code_page(const unsigned char *page)
 
 void aarch64_elf_sync_icache(void)
 {
-    /* The executable mapping uses a different VA from the kernel copy. */
-    __asm__ volatile("dsb ish\n\tic iallu\n\tdsb ish\n\tisb" ::: "memory");
+    /* Inner-shareable I-cache invalidation: ensures APs see newly
+     * populated or newly executable pages cleaned to PoU. */
+    __asm__ volatile("dsb ish\n\tic ialluis\n\tdsb ish\n\tisb" ::: "memory");
 }
 
 int aarch64_elf_view_parse(const void *bytes, size_t size, bool reject_tls,

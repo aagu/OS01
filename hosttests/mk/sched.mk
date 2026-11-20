@@ -471,17 +471,36 @@ $(TEST_BLD)/switch_complete_production.o: $(TESTS_DIR)/kernel/sched/kthread.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(SWITCH_TAIL_PROD_CFLAGS) -c $< -o $@
 
+$(TEST_BLD)/switch_complete_tail_production.o: $(TESTS_DIR)/kernel/sched/kthread.c \
+		$(TEST_MOCK)/switch_complete_test_runtime.h \
+		$(TESTS_DIR)/kernel/include/sched/internal.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SWITCH_TAIL_PROD_CFLAGS) -DSWITCH_COMPLETE_WITH_PROD_CORE -c $< -o $@
+
+$(TEST_BLD)/switch_complete_core_production.o: $(TESTS_DIR)/kernel/sched/core.c \
+		$(TEST_MOCK)/switch_complete_test_runtime.h \
+		$(TESTS_DIR)/kernel/include/sched/internal.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SWITCH_TAIL_PROD_CFLAGS) -DSWITCH_COMPLETE_WITH_PROD_CORE -Dschedule=prod_core_schedule -c $< -o $@
+
+$(TEST_BLD)/switch_complete_boot_production.o: $(TESTS_DIR)/kernel/sched/boot.c \
+		$(TEST_MOCK)/switch_complete_test_runtime.h \
+		$(TESTS_DIR)/kernel/include/sched/boot.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SWITCH_TAIL_PROD_CFLAGS) -DSWITCH_COMPLETE_WITH_PROD_CORE -c $< -o $@
+
 $(TEST_BLD)/test_switch_complete.o: $(TEST_CASES)/test_switch_complete.c \
 		$(TEST_MOCK)/switch_complete_test_runtime.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(FRAMEWORK_INC) $(SWITCH_TAIL_HOST_CFLAGS) -c $< -o $@
+	$(HOST_CC) $(FRAMEWORK_INC) $(SWITCH_TAIL_HOST_CFLAGS) -DSWITCH_COMPLETE_WITH_PROD_CORE -c $< -o $@
 
 # Phase 2: the production kthread.o now also carries the constructor,
 # which references the boot window — boot.o rides along (its window
 # simply stays closed through the tail cases).
 $(TEST_BLD)/test_switch_complete.elf: $(TEST_BLD)/test_switch_complete.o \
-		$(TEST_BLD)/switch_complete_production.o \
-		$(TEST_BLD)/sched_boot_production.o \
+		$(TEST_BLD)/switch_complete_tail_production.o \
+		$(TEST_BLD)/switch_complete_core_production.o \
+		$(TEST_BLD)/switch_complete_boot_production.o \
 		$(TEST_BLD)/sched_resource_production.o
 	$(HOST_CC) -o $@ $^
 

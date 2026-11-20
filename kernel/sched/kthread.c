@@ -509,20 +509,17 @@ uint64_t sched_self_reap_stack_count(void)
     return __atomic_load_n(&g_self_reap_stacks, __ATOMIC_ACQUIRE);
 }
 
-/* Runs on the *next* task's stack. Captures the self-reap decision and
- * the objects to release BEFORE task_finish_switch() clears on_cpu:
- * after that a waiter may free prev, and reading prev afterwards is a
- * use-after-free. */
+/* Runs on the *next* task's stack. Captures the objects to release BEFORE
+ * task_finish_switch() clears on_cpu and determines self-reap
+ * responsibility under lock: after that a waiter may free prev, and
+ * reading prev afterwards is a use-after-free. */
 void task_switch_complete(task_t *actual_prev)
 {
     if (actual_prev == current) return; /* never finish/free our own stack */
-    bool self_reap = (actual_prev->flags & PF_SELF_REAP) != 0;
 
     /* Everything prev-owned is captured BEFORE task_finish_switch()
      * clears on_cpu: after that a waiter may free prev and reading it
-     * is a use-after-free.  The observer release tokens are captured
-     * here too (P1 Task 2) — free_complete() after the real kfree
-     * uses only the token, never the (freed) object. */
+     * is a use-after-free. */
     thread_t *thd  = actual_prev->thread;
     void      *fpu  = actual_prev->fpu_save;
     void      *stk  = actual_prev->stack_alloc_base;
@@ -533,17 +530,16 @@ void task_switch_complete(task_t *actual_prev)
     bool next_stack = live_sp < (uintptr_t)actual_prev ||
                       live_sp >= (uintptr_t)actual_prev + STACK_SIZE;
     aarch64_sched_observe_reap(actual_prev, next_stack);
-    uint64_t thd_tok = (self_reap && thd)
-        ? aarch64_sched_observe_free_begin(thd, 2) : 0;
-    uint64_t fpu_tok = (self_reap && fpu)
-        ? aarch64_sched_observe_free_begin(fpu, 3) : 0;
-    uint64_t stk_tok = (self_reap && stk)
-        ? aarch64_sched_observe_free_begin(stk, 1) : 0;
 #endif
 
-    task_finish_switch(actual_prev);
+    bool self_reap = task_finish_switch(actual_prev);
 
     if (self_reap) {
+#if defined(OS01_SELFTEST) && defined(__aarch64__)
+        uint64_t thd_tok = thd ? aarch64_sched_observe_free_begin(thd, 2) : 0;
+        uint64_t fpu_tok = fpu ? aarch64_sched_observe_free_begin(fpu, 3) : 0;
+        uint64_t stk_tok = stk ? aarch64_sched_observe_free_begin(stk, 1) : 0;
+#endif
         if (thd) {
             kfree(thd);
 #if defined(OS01_SELFTEST) && defined(__aarch64__)

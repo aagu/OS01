@@ -61,13 +61,31 @@ void kthread_yield(void);
 /* Same values as sched/task.h. */
 #define PF_SELF_REAP  (1 << 5)
 #define PF_KTHREAD    (1 << 0)
-#define TASK_RUNNING  (1 << 0)
-#define TASK_ZOMBIE   (1 << 3)
+#define PF_PROCESS    (1 << 2)
+#define TASK_RUNNING       (1 << 0)
+#define TASK_INTERRUPTIBLE (1 << 1)
+#define TASK_UNINTERRUPTIBLE (1 << 2)
+#define TASK_ZOMBIE        (1 << 3)
 #define BLOCKER_NONE  0
+#define BLOCKER_WAITPID 1
 #define NSIG          32
 
 /* Same value as sched/internal.h. */
 #define EEVDF_MIN_SLICE 10
+#define EEVDF_LATENCY   40
+#define HANG_THRESHOLD  50
+
+#ifdef SWITCH_COMPLETE_WITH_PROD_CORE
+typedef int pid_t;
+#define KERNEL_SCHED_DIAG_H
+#define _ARCH_CPU_H
+#define _KERNEL_DEBUG_H
+#define _KERNEL_PANIC_H
+#define _KERNEL_HANG_H
+#define _KERNEL_LOG_H
+#define _KERNEL_H
+#define _KERNEL_ASSERT_H
+#endif
 
 /* ── Fixture list (mirrors libc/include/list.h semantics) ─────── */
 typedef struct mock_list {
@@ -104,11 +122,15 @@ typedef struct thread_struct {
     uint64_t fs;
     uint64_t gs;
     uint64_t cr3;
+    uint64_t sched_flags;
 } thread_t;
+
+struct task_struct;
+typedef bool (*blocker_check_t)(struct task_struct *);
 
 typedef struct {
     int type;
-    void *check;              /* blocker_check_t stand-in */
+    blocker_check_t check;
     bool signal_can_wake;
 } blocker_t;
 
@@ -179,7 +201,11 @@ typedef struct { unsigned long lock; } spinlock_T;
  * from test_platform.h under this same include guard. */
 void mock_record_lock_op(spinlock_T *l, int is_lock);
 static inline void spin_init(spinlock_T *l) { l->lock = 1; }
+static inline void spin_lock(spinlock_T *l) { mock_record_lock_op(l, 1); }
+static inline void spin_unlock(spinlock_T *l) { mock_record_lock_op(l, 0); }
+#ifndef SWITCH_COMPLETE_WITH_PROD_CORE
 static inline uint64_t spin_lock_irqsave(spinlock_T *l) { mock_record_lock_op(l, 1); return 0; }
+#endif
 static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t f) { (void)f; mock_record_lock_op(l, 0); }
 #endif /* OS01_HOST_SPINLOCK_T_PROVIDED */
 
@@ -193,6 +219,8 @@ typedef struct mock_percpu {
     uint64_t min_vruntime;
     spinlock_T rq_lock;
     task_t *idle;
+    uint64_t schedule_count;
+    uint64_t watchdog_counter;
 } mock_percpu_t;
 
 /* Both TUs must name this type `percpu_t` with the SAME layout. */
@@ -238,10 +266,77 @@ extern task_t *switch_tail_current;
 /* Spy declarations — DEFINED in the test-TU section below, called by
  * the production objects.  kfree keeps the production <memory/slab.h>
  * signature. */
-void task_finish_switch(task_t *prev);
+#ifdef SWITCH_COMPLETE_WITH_PROD_CORE
+typedef struct { spinlock_T lock; } mm_t;
+extern mm_t init_mm;
+extern task_t *init_task[NR_CPUS];
+extern task_t *user_init_task;
+extern int64_t user_init_pid;
+extern percpu_t *mock_sched_this_cpu;
+static inline percpu_t *mock_sched_this_cpu_ptr(void) { return mock_sched_this_cpu ? mock_sched_this_cpu : &percpu_data[0]; }
+static inline uint32_t mock_sched_cpu_id(void) { return mock_sched_this_cpu ? mock_sched_this_cpu->cpu_id : 0; }
+#define this_cpu() mock_sched_this_cpu_ptr()
+#define cpu_id() mock_sched_cpu_id()
+void schedule(void);
+bool task_finish_switch(task_t *prev);
+void task_publish_process_exit(task_t *self, task_t *reparent_to,
+                               uint64_t status, list_t *reap_head);
+void task_wake(task_t *t);
+void task_wake_parent(task_t *child);
+void task_exit_zombie(void);
+void sched_free_reaped_task(task_t *child);
+static inline void sched_balance(percpu_t *rq) { (void)rq; }
+static inline void hang_dump_all(void) { }
+void dequeue_task(task_t *task, percpu_t *rq);
+task_t *pick_eevdf(percpu_t *rq);
+void update_curr(task_t *task);
+void arch_task_prepare_first_switch(task_t *t, void (*idle_entry)(void));
+void arch_task_check_prev(task_t *t);
+void mock_arch_task_switch(task_t *prev, task_t *next);
+#define switch_to(prev, next) mock_arch_task_switch((prev), (next))
+bool arch_sched_scan_blockers(void);
+void arch_sched_notify_remote(unsigned cpu);
+void arch_local_irq_enable(void);
+#define log_err(...)   ((void)0)
+#define log_warn(...)  ((void)0)
+#define log_info(...)  ((void)0)
+#define log_debug(...) ((void)0)
+#define debug_task(...) ((void)0)
+#define panic(...)     ((void)0)
+#define assert(x)      ((void)(x))
+#define container_of(ptr, type, member) \
+    ((type *)((char *)(ptr) - __builtin_offsetof(type, member)))
+#define list_is_empty(l) ((l)->next == (l))
+#define INIT_TASK(tsk) { .list = { &(tsk).list, &(tsk).list }, .state = TASK_RUNNING }
+list_t *task_list_next(list_t *pos);
+#ifndef TEST_PLATFORM_H
+static inline void mock_before_lock_op(spinlock_T *l)
+{
+    extern void (*mock_on_before_task_list_lock)(void);
+    if (l == &task_list_lock && mock_on_before_task_list_lock) {
+        void (*fn)(void) = mock_on_before_task_list_lock;
+        mock_on_before_task_list_lock = NULL;
+        fn();
+    }
+}
+#undef spin_lock_irqsave
+static inline uint64_t spin_lock_irqsave(spinlock_T *l)
+{
+    mock_before_lock_op(l);
+    mock_record_lock_op(l, 1);
+    return 0;
+}
+#endif
+#else
+bool task_finish_switch(task_t *prev);
+#endif
 void *kmalloc(size_t size);
 size_t kfree(void *address);
+#ifndef SWITCH_COMPLETE_WITH_PROD_CORE
 int64_t alloc_pid(void);
+#else
+pid_t alloc_pid(void);
+#endif
 void task_identity_init(task_t *tsk, const char *name);
 void task_comm_set(task_t *tsk, const char *name);
 void task_comm_inherit(task_t *child, const task_t *parent);
@@ -292,8 +387,14 @@ size_t mock_kmalloc_live_size[16];
 /* percpu / globals the production objects reference. */
 mock_percpu_t percpu_data[NR_CPUS];
 uint32_t num_cpus = 1;
+#ifndef SWITCH_COMPLETE_WITH_PROD_CORE
 spinlock_T task_list_lock;
 union task_union init_task_union;
+#else
+percpu_t *mock_sched_this_cpu;
+task_t *mock_poison_prev_on_rq_unlock;
+void (*mock_on_before_task_list_lock)(void);
+#endif
 
 /* Window bookkeeping through the REAL sched/boot.c state machine is
  * driven by calling sched_boot_creation_begin()/sched_boot_start(). */
@@ -352,13 +453,33 @@ void mock_record_lock_op(spinlock_T *l, int is_lock)
         mock_poison_task_after_publish = 0;
         mock_arch_prepared_task->cpu = 0xfe;
     }
+#ifdef SWITCH_COMPLETE_WITH_PROD_CORE
+    if (!is_lock && mock_poison_prev_on_rq_unlock) {
+        for (uint32_t i = 0; i < NR_CPUS; i++) {
+            if (l == &percpu_data[i].rq_lock) {
+                task_t *p = mock_poison_prev_on_rq_unlock;
+                mock_poison_prev_on_rq_unlock = NULL;
+                spy_finish_calls++;
+                spy_finish_last = p;
+                spy_seq_finish = ++op_counter;
+                p->flags = 0;
+                p->thread = SWITCH_TAIL_POISON_THREAD;
+                p->fpu_save = SWITCH_TAIL_POISON_FPU;
+                p->stack_alloc_base = SWITCH_TAIL_POISON_STACK;
+                break;
+            }
+        }
+    }
+#endif
 }
 
 /* Creator fixture: `current` while the constructor runs. */
 static task_t creator_task;
 
-void task_finish_switch(task_t *prev)
+#ifndef SWITCH_COMPLETE_WITH_PROD_CORE
+bool task_finish_switch(task_t *prev)
 {
+    bool self_reap = (prev->flags & PF_SELF_REAP) != 0;
     spy_finish_calls++;
     spy_finish_last = prev;
     spy_seq_finish = ++op_counter;
@@ -370,7 +491,9 @@ void task_finish_switch(task_t *prev)
     prev->thread = SWITCH_TAIL_POISON_THREAD;
     prev->fpu_save = SWITCH_TAIL_POISON_FPU;
     prev->stack_alloc_base = SWITCH_TAIL_POISON_STACK;
+    return self_reap;
 }
+#endif
 
 void *kmalloc(size_t size)
 {
@@ -417,10 +540,25 @@ size_t kfree(void *address)
     return 0;
 }
 
+#ifndef SWITCH_COMPLETE_WITH_PROD_CORE
 int64_t alloc_pid(void)
 {
     return mock_alloc_pid_next++;
 }
+#else
+void blocker_wake_locked(task_t *task) { (void)task; }
+int64_t blocker_state_snapshot(task_t *task) { return task ? task->state : 0; }
+void dequeue_task(task_t *task, percpu_t *rq) { (void)task; (void)rq; }
+task_t *pick_eevdf(percpu_t *rq) { return rq->idle; }
+void update_curr(task_t *task) { (void)task; }
+void arch_task_prepare_first_switch(task_t *t, void (*idle_entry)(void)) { (void)t; (void)idle_entry; }
+void arch_task_check_prev(task_t *t) { (void)t; }
+void mock_arch_task_switch(task_t *prev, task_t *next) { (void)prev; (void)next; }
+bool arch_sched_scan_blockers(void) { return false; }
+void arch_sched_notify_remote(unsigned cpu) { (void)cpu; }
+void arch_local_irq_enable(void) { }
+uint64_t arch_kthread_default_mask(void);
+#endif
 
 void task_comm_set(task_t *tsk, const char *name)
 {
@@ -628,6 +766,10 @@ void switch_tail_reset(void)
     mock_lock_log_count = 0;
     memset(mock_lock_log_addr, 0, sizeof(mock_lock_log_addr));
     memset(mock_lock_log_is_lock, 0, sizeof(mock_lock_log_is_lock));
+#ifdef SWITCH_COMPLETE_WITH_PROD_CORE
+    mock_poison_prev_on_rq_unlock = NULL;
+    mock_on_before_task_list_lock = NULL;
+#endif
 
     /* creator fixture: a plain running task on CPU0. */
     memset(&creator_task, 0, sizeof(creator_task));
