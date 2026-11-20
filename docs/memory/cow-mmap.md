@@ -376,6 +376,7 @@ static inline uint64_t x86_vma_pte_flags(uint64_t vm_flags)
 | 用户堆 | VMA 为 `R\|W\|ANON\|HEAP`，**无 EXEC** ⇒ 叶子 RW/NX | `kernel/arch/x86_64/memory/brk.c:61` |
 | `mmap` / `mprotect` | `prot_to_vma_flags()` 把 `PROT_*` 映射成逻辑位（`PROT_EXEC` 隐含 READ），叶子按 VMA 换算 | `kernel/arch/x86_64/memory/mmap.c:73-97`、`:772` |
 | 设备映射 | 设备驱动不授予 EXEC ⇒ 叶子带 NX | `kernel/arch/x86_64/memory/mmap.c:422-426` |
+| ELF 分段叶子（2026-11-20 起） | W 段（`.data`/`.bss`）RW+NX；RO 非 X 段（`.rodata`）RO+NX；仅 `PF_X` 段（`.text`）可执行；显式 `PF_W\|PF_X` 段保留 RWX（与 VMA 的 RWX 放宽对齐） | `kernel/arch/x86_64/fs/elf.c`（`elf_pte_flags()` / `pte_flags_compatible()`） |
 | 硬件 | 启动期打开 `EFER.NXE` | `kernel/arch/x86_64/platform/boot.c:115-117` |
 
 **故障期强制**：首次触碰就按 VMA 校验——未授权写、PROT_NONE 访问、未授权**取指**
@@ -387,8 +388,41 @@ static inline uint64_t x86_vma_pte_flags(uint64_t vm_flags)
 RX/RWX 段可执行；文件映射 RX 首写 → SIGSEGV；RW 段取指 → SIGSEGV；真实 2 MiB 栈叶不可执行）。
 宿主断言见 `hosttests/cases/test_process_image_lifecycle.c`（堆叶 `PAGE_USER|PAGE_WRITE|PAGE_VALID|PAGE_NO_EXEC`）。
 
-**剩余**：**ELF 分段 NX 细化**——装载器显式不细化分段 NX，`.data`/`.bss`/`.rodata` 叶子仍是 RWX
-（`kernel/arch/x86_64/fs/elf.c:63-69`）。该子项留在 [roadmap.md](../roadmap.md) P1。
+### ELF 分段叶子 NX 细化（2026-11-20）
+
+VMA 策略落地时 ELF 装载器仍按 Task 2 简报「不细化分段 NX」直接写叶（`.data`/`.bss` 为 RWX、
+`.rodata` 为 ROX）。装载器不建 VMA（预映射整像、无按需缺页），故上表策略覆盖不到 ELF 叶，
+只能装载器自身按 `p_flags` 换算（`kernel/arch/x86_64/fs/elf.c`）：
+
+```c
+static inline uint64_t elf_pte_flags(uint32_t p_flags)
+{
+    uint64_t f = (p_flags & PF_W) ? PAGE_USER_PTE : PAGE_USER_PTE_RO;
+    if (!(p_flags & PF_X)) f |= PAGE_NO_EXEC;   /* ← 与 x86_vma_pte_flags 对齐 */
+    return f;
+}
+```
+
+- **段级**：W 段 RW+NX（`.data`/`.bss` 不再 RWX）；R 无 X 段 RO+NX（`.rodata` 不再 ROX）；
+  仅 `PF_X` 段可执行（`.text`）；显式 `PF_W|PF_X` 段保留 RWX——与 VMA 路线对 RWX 的放宽一致。
+- **共享页合并**（两 PT_LOAD 字节不相交但同处一个 4 KiB 叶）：`pte_flags_compatible()` 从
+  只查 W 位扩为 **W/X 双轴超集检查**（X = 无 `PAGE_NO_EXEC`）。先映射者定型，永不改写叶标志；
+  可写段与可执行段共享同页时两请求必然冲突 → `-ENOEXEC`（共享页要么保持 W^X 干净，要么 exec
+  前置失败，绝不静默变 RWX）。读回既有 PTE 标志时须把 `PAGE_NO_EXEC`（bit 63）与低 12 位一起
+  掩出。
+- **NX 的全生命周期保持**：fork 的 COW 降级整字复制 PTE（清 W、置 COW，NX 不动）；
+  fork 后写私有化走 trap.c **无 VMA COW 分支**（`x86_pte_4k_flags(*upte) | PAGE_WRITE`，
+  NX 随原叶保留）；mm 销毁按 PTE 存在性回收，与 NX 无关。
+- **入口约束**：`elf_layout_validate` 要求 entry 落在可执行 PT_LOAD 内，与「仅 .text 可执行」自洽。
+
+**验收**：`hosttests/cases/test_elf_load_4k.c`（24 用例）：W 叶=RW+NX、BSS 叶=RW+NX、
+`.rodata` 叶=RO+NX、`.text` 叶=R+X、显式 RWX 段保留可执行、NX 共享页 + 可执行请求 →
+`-ENOEXEC`（回滚恰好一次）、RO 共享页并入 RX 页保留 X、RO 并入 RW 页保留 W+NX；
+宿主桩 `elf_load_stubs.c` 的 PTE 存储字同步补 `PAGE_NO_EXEC` 保留（镜像
+`x86_pte_4k_make`，否则装载器读不回共享页 NX）。`make test-host` EXIT=0
+（239 binaries）；`make test-static` PASS；`make test-qemu SUITE=phase-0`
+（产品镜像 boot → ash 提示符）与 `make OS01_SYSTEST=1 test-syscall`
+（123 项 syscall E2E，含既有 `mmap_exec_protection` NX 用例）全部 PASS。
 
 ---
 

@@ -7,6 +7,18 @@
 
 ## 2026-11-20
 
+- feat(mm): **ELF 分段 NX 细化（roadmap P1 安全加固）**——x86_64 ELF 装载器按 `p_flags` 落 W^X 叶策略，补齐 2026-11-13 VMA 级 NX 策略覆盖不到的 ELF 段叶子（`kernel/arch/x86_64/fs/elf.c`，`1613cdb7`；闭环记录 `docs/memory/cow-mmap.md` §ELF 分段叶子 NX 细化）：
+
+  **做了什么**
+  - `elf_pte_flags()` 与 `x86_vma_pte_flags()` 对齐（NX ⟺ 未授予 EXEC）：W 段（`.data`/`.bss`）RW+NX、R 无 X 段（`.rodata`）RO+NX、仅 `PF_X` 段（`.text`）R+X；显式 `PF_W|PF_X` 段保留 RWX，与 VMA 路线对 `PROT_READ|PROT_WRITE|PROT_EXEC` 的放宽一致。
+  - 共享 4 KiB 叶合并（字节不相交 PT_LOAD 同页）：`pte_flags_compatible()` 从只查 W 位扩为 **W/X 双轴超集检查**，先映射者定型、永不改写叶标志；可写段与可执行段同页必然冲突 → `-ENOEXEC`（共享页要么保持 W^X 干净，要么 exec 前置失败，绝不静默 RWX）。读回既有标志补掩 bit 63。
+  - NX 全生命周期保持：fork COW 降级整字复制 PTE；fork 后写私有化走 trap.c **无 VMA COW 分支**（保留原叶 NX）；入口约束（entry 须落在可执行 PT_LOAD）与「仅 .text 可执行」自洽。
+  - 宿主桩 `elf_load_stubs.c` PTE 存储字补 `PAGE_NO_EXEC` 保留（镜像 `x86_pte_4k_make`）；`test_elf_load_4k.c` 扩到 24 用例并按新语义更新共享页合并/拒绝用例。
+
+  **验收**
+  - `make test-host` EXIT=0（239 binaries，`test_elf_load_4k` 24/24：W/BSS 叶 RW+NX、`.rodata` RO+NX、`.text` R+X、显式 RWX 保留、NX 共享页 + X 请求 `-ENOEXEC` 且回滚恰好一次、RO 并入 RX 页保留 X、RO 并入 RW 页保留 W+NX）；`make test-static` PASS。
+  - `make test-qemu SUITE=phase-0`（产品镜像 boot → ash 提示符）与 `make OS01_SYSTEST=1 test-syscall`（**123 项 syscall E2E 全过**，含既有 `mmap_exec_protection` NX 用例）PASS。
+
 - feat(aarch64,sched): **中断/异常 dispatch 统一（剩余项）与 SMP 用户调度/抢占闭环（roadmap P2）**——正式 EL0 IRQ 返回抢占、8-bit ASID 与固定单核亲和 SMP 用户调度（spec `docs/superpowers/specs/2026-11-20-intr-dispatch-remaining-design.md`、plan `docs/superpowers/plans/2026-11-20-intr-dispatch-remaining.md`；`a100a7f2` / `862c75bc` / `fab576c5` / `7f0dd1a5` / `9a187a83` / `23f989df` / `9d1b6561`）：
 
   **做了什么**
