@@ -1,6 +1,6 @@
 # OS01 优化路线图
 
-> **基准**：`0cc1fae3`（2026-11-20）　**日期**：2026-11-20
+> **基准**：`1e4b0d21`（2026-11-20）　**日期**：2026-11-20
 
 本文件**只列未完成 / 进行中**的规划项。已完成工作见 [`changelog.md`](changelog.md)；**最近 3 天的闭环快速索引见文末「近期闭环索引」**；闭环细节见各专题文档：
 [`arch.md`](arch.md) · [`memory/memory.md`](memory/memory.md) · [`memory/cow-mmap.md`](memory/cow-mmap.md) ·
@@ -11,7 +11,7 @@
 
 | 优先级 | 主题 | 未完成项 | 备注 |
 |-------|------|---------|------|
-| **P0** | 工程与测试基础设施 | 1 | flake 账本入库 |
+| **P0** | 工程与测试基础设施 | 2 | flake 账本入库 · 测试框架重构（已设计待实施） |
 | **P1** | 安全加固 | 3 | ASLR-A / ASLR-B / UBSan+KASan |
 | **P2** | aarch64 适配 | 11 | 内存与执行体 3 · 架构统一 2 · 真机阻断 6 |
 | **P2** | 架构治理 / 扩展性 | 0 | 新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填该节 |
@@ -27,7 +27,8 @@
 
 | 项 | 内容 / 完成条件 | 依赖 | 备注 |
 |----|-----------------|------|------|
-| flake 账本入库 | `make test-flake-report` 报告器已就位（连续失败 ≥3 轮标记 quarantine 候选，`QUARANTINE_STREAK_THRESHOLD=3`，`qemutests/flake_report.py:19`），但**账本本身没有入库文件**：报告只能现算——本地走 `build/*/logs/tests/**/result.json`，CI 走 artifacts（`flake_report.py` 只读、不写回），本地无历史账本可审计。**且 CI workflow 从不调用报告器**（`.github/workflows/ci.yml` 只在 warning 文案里提及 `make test-flake-report`），`--from-ci` 路径目前只能人工触发 | 报告器 ✅ | `qemutests/flake_report.py`、`mk/components/run.mk:771-772`（帮助文本 `:1885`） |
+| flake 账本入库 | `make test-flake-report` 报告器已就位（连续失败 ≥3 轮标记 quarantine 候选，`QUARANTINE_STREAK_THRESHOLD=3`，`qemutests/flake_report.py:19`），但**账本本身没有入库文件**：报告只能现算——本地走 `build/*/logs/tests/**/result.json`，CI 走 artifacts（`flake_report.py` 只读、不写回），本地无历史账本可审计。**且 CI workflow 从不调用报告器**（`.github/workflows/ci.yml` 只在 warning 文案里提及 `make test-flake-report`），`--from-ci` 路径目前只能人工触发 | 报告器 ✅ | `qemutests/flake_report.py`、`mk/components/run.mk:771-772`（帮助文本 `:1885`）；已知开放 flake 家族：terminal-present / gui / gui-desktop / sched-ap + SMP 时序类（nightly terminal/gfx timing family，non-blocking） |
+| 测试框架重构（已设计待实施） | 三工程方案：① `@os01-test` 文件内元数据 + `tools/tests/scan_tests.py` 单一事实源与自动发现脊柱（六处平行清单归一，含 scenario-catalog 契约）② mock 归档库 + fixture v2 + qemutests 去重 ③ 断言分层 + strict/tolerant 时序分级。spec/plan 已入库（`docs/superpowers/specs/2026-11-14-test-framework-design.md`、`docs/superpowers/plans/2026-11-14-test-framework-redesign.md`，22 任务三阶段，提交 `f223a289`，8 轮评审 APPROVE）；用户裁决（2026-11-14）**暂不实施**，启动时按 plan 执行（建议 subagent-driven + worktree `feature/test-framework-redesign`）；D7 试点范围、D8 strict 零重试已定，D8 tolerant 白名单解释留待用户确认 | 设计/计划 ✅ | D2 已推翻「禁止 auto-discovery」Ruling 3（opt-in 元数据驱动发现） |
 
 ## 🔒 P1 安全加固
 
@@ -155,7 +156,7 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 | /proc 完善 | **全局 `/proc/stat`** ✅ 已就绪（自有 key-value 格式，非 Linux 定长列 ABI，`kernel/fs/procfs_fmt.c:112-146`）；**`/proc/<pid>/stat` 不存在**（pid 目录 lookup 只解析 `status`/`maps`/`fd`，`kernel/fs/procfs.c:596-608`）；`status` 已有 Version/Name/Pid/PPid/State/CPU/Priority/BirthId/StartNs/SampleNs/RuntimeTicks（`kernel/fs/procfs_fmt.c:73-106`），**仍缺 signal mask 与 utime/stime**；**`cmdline` 完全缺失**（`kernel/fs/` 全目录零命中） | 独立 | |
 | HTTPS/TLS | mbedTLS 集成 BusyBox wget —— **HTTPS 能力本身已具备**：`CONFIG_TLS=y`（`config/busybox.config.in:975`）启用 BusyBox 1.36 **自带**的 TLS 客户端（`networking/tls.c` + `tls_{aes,rsa,fe,pstm}*.c`，非 OpenSSL/mbedTLS 后端），`CONFIG_FEATURE_WGET_HTTPS=y`（`:989`）时 `wget` 直接走 `tls_handshake()`；`libmbedtls.a` 已入库到 sysroot 但 **wget 并不链接它**（BusyBox 由原生 Makefile 构建、仅覆盖 `CC`/`LD`，全树无 `-lmbedtls`）。**剩余**：二选一 —— 把 mbedTLS 真正接进 BusyBox，或明确改用 BusyBox 内建 TLS 并放弃 mbedTLS 路线；并补 HTTPS 端到端验证（**当前无 guest 端 `wget https://` 实测证据**：guest 网络测试走的是 `http://`，`user/nettest.c:224`；`qemutests/build_contract.sh` 的 HTTPS 分支是宿主侧假 wget 夹具，只断言下载 URL 前缀，不构成 guest 端到端证据） | mbedTLS ✅ 已入库为 `libmbedtls.a` | |
 | AF_UNIX/socketpair | 本地 socket IPC | socket ✅；**现状**：`socketpair()` 是 `ENOSYS` 桩（`libc/unistd/net_stubs.c:45-48`）；内核 `socket_alloc()` **不校验 `domain`**（`kernel/net/socket.c:64` 的 `socket_alloc(domain, type, protocol)`，`:67-71` 的 switch 只按 `SOCK_STREAM`/`SOCK_DGRAM` 映射 TCP/UDP，`domain` 仅在 `:81` 被原样存入 `s->domain`），请求 `AF_UNIX` 会拿到 TCP/UDP socket 而不是报错——这是正确性缺口，不只是缺功能 | |
-| BusyBox applet 悬空软链 | ⚠️ **`config/busybox.config.in` 在 grep/sed/awk/xargs/tar/dmesg 这六个中只启用了 find**（`CONFIG_FIND=y`，`:446`；其余六个均为 `# CONFIG_* is not set`：`:478`/`:421`/`:412`/`:482`/`:181`/`:604`）——生成的 `applet_tables.h` 里也没有这些 applet。**连带缺陷**：`config/rootfs.mk:9` 仍创建 `/bin/grep`、`/bin/sed`、`/bin/awk`、`/bin/xargs`、`/bin/tar`、`/bin/dmesg` 等软链，执行时得到 "applet not found"（悬空软链）→ **待决：启用这些 applet 还是撤掉对应软链**。libc 侧 POSIX 正则引擎未实现（`libc/include/regex.h` 为桩头，`regcomp`/`regexec` 全空转），`glob` 为返回 `GLOB_NOMATCH` 的桩（`libc/stdlib/glob.c:5-12`）；`fnmatch` 已实现（`*`/`?`/`[]`），**仅 `FNM_NOESCAPE` 被消费，其余 flags 全忽略**（`libc/string/fnmatch.c:12` `(void)flags;`） | libc | |
+| BusyBox applet 悬空软链 | ⚠️ **`config/busybox.config.in` 在 grep/sed/awk/xargs/tar/dmesg 这六个中只启用了 find**（`CONFIG_FIND=y`，`:446`；其余六个均为 `# CONFIG_* is not set`：`:478`/`:421`/`:412`/`:482`/`:181`/`:604`）——生成的 `applet_tables.h` 里也没有这些 applet。**连带缺陷**：`config/rootfs.mk:9` 仍创建 `/bin/grep`、`/bin/sed`、`/bin/awk`、`/bin/xargs`、`/bin/tar`、`/bin/dmesg` 等软链，执行时得到 "applet not found"（悬空软链）→ **待决：启用这些 applet 还是撤掉对应软链**。libc 侧 POSIX 正则引擎未实现（`libc/include/regex.h` 为桩头，`regcomp`/`regexec` 全空转），`glob` 为返回 `GLOB_NOMATCH` 的桩（`libc/stdlib/glob.c:5-12`；libc-completion T16 正则/glob：2026-11-09 用户决定推迟到后续周期）；`fnmatch` 已实现（`*`/`?`/`[]`），**仅 `FNM_NOESCAPE` 被消费，其余 flags 全忽略**（`libc/string/fnmatch.c:12` `(void)flags;`） | libc | |
 | Alpine apk/musl | musl 二进制包兼容路线 | 动态链接器 | cavOS |
 
 ## Parked（未闭环 follow-on，随时可拾起）
@@ -177,6 +178,20 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
   - **正确性防护**：② `file_free` 仅在 `f->node` 非空时调 `vfs_file_release`，`fs_private` 有值而无 node 的理论状态会泄漏快照（open 契约保证不可达）。
   - **验证强度缺口**：⑥ monitor QEMU 双核绑核验证弱（亚 0.2s 迁移漏检可被 epoch 探测错过；需补受限内核 spin 自测）。
   - **语义/契约选择备案**：⑪ `monitor_collect` 在 `opendir("/proc")` 失败时返回 0 + 空进程列表，与"无进程"不可区分；⑫ thermal `stale` 标记与进程 `stale` 字段等待独立 thermal 计划激活。
+
+- **统一 SMP 启动评审 deferred minors（2026-11-20，待用户决定是否拾起）**：
+  - `arch_smp_last_status()` 校验失败路径的 requested/online/online_mask 快照为零值（纯诊断面，无读取方）；x86 `kernel/arch/x86_64/smp/boot.c:67` 与 aarch64 `kernel/arch/aarch64/main.c` 共三处退役名陈旧注释。
+
+- **x86 PTE 权限评审 deferred minors（2026-11-13，4 项，均 Minor）**：
+  - ① `kernel/selftest/{test_uaccess,test_deep_copy_argv}.c` 中间表 PA 仍用 `PAGE_4K_MASK`；② `pte.h` 遗留含糊 `PAGE_PAT` 别名（零用户）；③ `trap.c:711,715` 无 VMA COW resolve 未走 `x86_pte_4k_make`；④ `test_x86_vmm_backend.c` 缺文件尾换行。
+
+- **内存管理架构边界评审 deferred minors（2026-11-14，M-1..M-5）**：
+  - ① `memory/user_vm.h` 首行 guard 外 include ARM `vmm_backend.h`（消费者全 aarch64-only，搬 `arch/aarch64/` 是机械后续）；② ~9 个夹具 + `printk_fb.c` 注释级旧路径；③ syscall 审计豁免是仓库级非按文件；④ `mm_header_boundary.py` flag 传递依赖全 dash 前缀；⑤ ARM fixture shadow mmu.h 用 bool 无 stdbool.h。
+  - **中立目录归位第二轮**：`driver/serial.c`、`keyboard.c` 等不引用架构头的 x86-only 文件仍在原目录，整体迁移可另开一轮。
+
+- **Craton 改名暂缓（2026-11-17 用户决定）**：
+  - README + boot logo 已改（`13c379be`）并验收；**GitHub repo 名与其余 OS01 字符串（2026-11-17 实测 5159 处 / 926 文件：docs 317、kernel 207、hosttests 154、qemutests 99、user 42、libc 23）明确暂缓**，含 `OS01_*` 构建标识符族（`OS01_PROFILE_FILE` / `OS01_SYSTEST` / `OS01_SELFTEST` 等）、include 路径 `<os01/compiler_rt.h>`、LICENSE/README/AGENTS.md 标题行。机械但广面的替换，宜与 repo 重命名同批做。
+  - aarch64 boot logo 字标区缝隙透出灰色 (152,152,152) 底层小字（2026-11-08 起既有，疑为固件/早期控制台文字残留，logo 不做整带清除）：可作日后清理项（画字标前清带）。
 
 ---
 
