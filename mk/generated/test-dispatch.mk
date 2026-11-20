@@ -64,7 +64,7 @@ aarch64-sched-tick	aarch64-clang	uefi	sched-tick	1,2,4,8	512	120	isolated	shared
 aarch64-sched-wake	aarch64-clang	uefi	sched-wake	1,2,4,8	512	120	isolated	shared	nightly	test-aarch64 MODE=sched-wake	-	-	strict
 aarch64-smp	aarch64-clang	uefi	selftest	1,2,4	512	90	isolated	shared	pr	test-aarch64 MODE=smp	-	-	strict
 aarch64-sync-fault	aarch64-clang	uefi	sync-fault	2	512	90	isolated	shared	nightly	test-aarch64 MODE=sync-fault	-	-	strict
-arch10-capacity	x86_64-clang	rootfs	arch10-capacity	1,2	512	120	isolated	shared	nightly	make ARCH10_CAPACITY_TEST=1 test-qemu SUITE=arch10-capacity	_test-suite-prepare	_test-suite-run	strict
+arch10-capacity	x86_64-clang	rootfs	arch10-capacity	1,2	512	120	isolated	shared	nightly	make CAPACITY_TEST=1 test-qemu SUITE=arch10-capacity	_test-suite-prepare	_test-suite-run	strict
 arch6-fsstress	x86_64-clang	rootfs	arch6-fsstress	4	512	180	isolated	shared	nightly	make ARCH6_FSSTRESS_TEST=1 SMP=4 test-qemu SUITE=arch6-fsstress	-	-	strict
 boot-contract	x86_64-clang	rootfs	boot-contract	1,2,4	512	120	isolated	exclusive	nightly	test-qemu SUITE=boot-contract	_test-suite-prepare	_test-suite-run	strict
 boot-failure	x86_64-clang	rootfs	boot-failure	1,2,4	512	90	isolated	exclusive	nightly	test-qemu SUITE=boot-failure	_test-suite-prepare	_test-suite-run	strict

@@ -3820,7 +3820,7 @@
       "timeout_s": 120,
       "image_policy": "isolated",
       "resource": "shared",
-      "entrypoint": "make ARCH10_CAPACITY_TEST=1 test-qemu SUITE=arch10-capacity",
+      "entrypoint": "make CAPACITY_TEST=1 test-qemu SUITE=arch10-capacity",
       "prepare_target": "_test-suite-prepare",
       "run_target": "_test-suite-run",
       "source": "mk/tests/catalog.mk",
