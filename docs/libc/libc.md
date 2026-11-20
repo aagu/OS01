@@ -75,6 +75,8 @@ make PROFILE=x86_64-clang test-libc-dir-red
 
 ## 3. 语义要点（容易踩的地方）
 
+**堆加固（2026-11-18）**：`libc/stdlib/malloc.c` 引入 32 字节 block header（`magic` + `req_size` + `canary`）、16 字节尾 redzone（`0xFD`）与 free 后毒化（`0xDE`），在 `free`/`realloc` 实时校验 double-free、头损坏/下溢、尾溢出与越界/未对齐指针，命中时向 `stderr` 报错并 `raise(SIGABRT)` 终止（`test_libc_alloc` + `test-syscall` 123 项通过）。
+
 **流的条数上限 32。** `OPEN_FILES_MAX = 32`（`libc/stdio/stdio_file.c`）：同一时刻最多
 32 个普通流。超出的 `fopen` 失败。
 

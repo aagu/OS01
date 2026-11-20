@@ -71,6 +71,23 @@
   **已知边界**
   - aarch64 用户任务单核 v1；EL0 无 FP/SIMD；sh 的 pwd 内建在 aarch64 上暂无输出（getcwd 路径待查，属缺陷）；busybox 未移植；MAP_SHARED 一致性仅限 fork 后代（跨进程 inode 级共享待 shmem 注册表）。
 
+- feat(smp): **统一 SMP 启动（roadmap P2）**——单入口 `arch_smp_boot_aps()`、公共编排与双架构 Fail-Closed（spec [2026-11-19-unified-smp-boot-design.md](superpowers/specs/2026-11-19-unified-smp-boot-design.md)、plan [2026-11-19-unified-smp-boot.md](superpowers/plans/2026-11-19-unified-smp-boot.md)）：
+
+  **做了什么**
+  - 新增 `kernel/include/arch/smp.h` 单入口 `arch_smp_boot_aps(cpu_count, entry, per_cpu_data)` 与 `arch_smp_last_status()`。
+  - 公共编排与 AP 状态机 `kernel/core/smp.c`：`arch_boot_aps()` 收敛为唯一公共定义，`smp_ap_common_entry()` 强制执行 `cpu_init → online=1 → post_online → irq_enable → ipi_ready → idle` 五步序。
+  - 双架构统一 Fail-Closed：`[boot-1] FATAL cpu=N stage=<stage>` + `boot_failure_stop("smp", ...)`，废弃 aarch64 DEGRADED 路径；aarch64 启动槽 offset 40 `reserved→entry` 复用（48 字节 ABI 不变），`secondary_entry.S` 经 callee-saved `x20` 调用共享入口。
+
+- feat(aarch64): **早期 MMIO Device 窗口与控制台 handoff 运行时化（真机适配审计第 ② 层与 PL011 第 4 处）**：
+
+  **做了什么**
+  - `boot_context` 追加 flag 门控 `struct BOOT_EARLY_MMIO`（`console_base`/`device_base`/`device_blocks`，v3 追加不 bump version）；UEFI loader `fdt_early.c` 从固件 FDT 推导 PL011 + GICv2 全部 `reg` 对 → 2 MiB 块覆盖（上限 1024 块）。
+  - `head.S` 停靠 handoff 并 fail-closed（窗口超出 `[0, 2 GiB)` 或撞启动块 → `W!`）；`head.S`/`boot_vectors.S` 的早期打印改读停靠槽（`early_mmio.console_base`，flag 缺失回退 `0x09000000`），至此 PL011 基址 4/4 硬编码全部清零。
+  - `boot/early_mmu.c` 按窗口参数填 Device 块；`device_window.c` 提供内核侧运行时窗口，供 `early_arena.c` preflight、`runtime_tree.c`、PT selftest 与 M0 selftest 消费（`boot_layout.h` 常量仅作 flag 缺失时的回退）；`hosttests` `test_early_arena` 增加自定义窗口用例。
+
+  **已知边界**
+  - 早期 identity map `[0, 2 GiB)` 上限不变：窗口或控制台超过 2 GiB 仍需早期映射扩展任务；单窗口表示亦不适配远距设备对（loader 不置 flag）。
+
 ## 2026-11-18
 
 - feat(aarch64): **打开 VFS 门（M4 剩余·产品用户态接入第一步）**——arch-neutral 文件系统栈接入 aarch64 产品内核，devfs / tmpfs / FAT32 / ext2 全部在 aarch64 侧工作：
@@ -133,6 +150,15 @@
   - **GICv3（`arm,gic-v3`）仍完全不支持**——全树无该 compatible 的处理路径，命中即拒。
   - **`head.S:144` 的早期打印基址**仍固化 0x09000000，属真机适配审计第 ③ 层剩余的唯一一处。
   - **`boot/uefi/arch/aarch64/boot.c:467-471` 的注释仍写 "aarch64 (RNDR not yet wired)"**——该说法是错的：RNDR/RNDRRS 早在 2026-09-25 已接线（`kernel/arch/aarch64/cpu/random.c:30-60,110-122`，经 `ID_AA64ISAR0_EL1.RNDR` 探测，输出 STRONG/WEAK/NONE）。2026-11-17 的真机适配审计稿把"无 RNDR 接线"写进了路线图平台能力上限段，本条目一并更正。
+
+- feat(libc): **堆加固 —— malloc double-free / 溢出检测（roadmap P1）**：
+
+  **做了什么**
+  - `libc/stdlib/malloc.c` 引入 32 字节 block header（`magic` + `req_size` + `canary`）、16 字节尾 redzone（`0xFD`）、free 后毒化（`0xDE`）。
+  - `free`/`realloc` 实时校验：double-free、头损坏/下溢、尾溢出、越界/未对齐指针均向 `stderr` 报错并 `raise(SIGABRT)` 终止。
+
+  **验收**
+  - 宿主单测 `hosttests/cases/test_libc_alloc.c` 与 `make OS01_SYSTEST=1 test-syscall`（123 项）通过。
 
 ## 2026-11-17
 

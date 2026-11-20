@@ -122,7 +122,7 @@ x86_64 原生适配在 `kernel/arch/x86_64/intr/irq_entry.c`，先校验 frame/v
 ~4–8 周（一个人全职），3 个独立 spec/plan 增量推进：
 
 1. **Spec A — 中断/异常 dispatch 收尾 + 上下文切换 arch 抽象**：`arch_irq_dispatch` 已落地；第一期已在 `kernel/intr/dispatch.c` 落地 arch-neutral 无状态事件分派，aarch64 EL1h sync/IRQ 与 x86 #DE/#UD/#GP/#PF 六条入口已接入（证据见 [验证报告](superpowers/reports/2026-10-24-intr-dispatch-phase1-validation.md)）。第二期已将当前安装的全部 48 条 x86 入口接入：异常 `0..14,16..20` 与 IRQ `0x20..0x37,0x38,0x40,0x41,0xff`；syscall `0x80` 及未安装 ISA 异常不在范围。gate 类型/DPL/IST 与返回语义保留，设备 ACK 和 timer/IPI EOI 仍归原业务，`0xff` 不 EOI 且不执行 `ret_from_intr` 工作。MADT type-4 按 processor UID/LINT/flags 配置 NMI，AP 在 GDT/IDT/TSS/TR 就绪后才启用路由。第二期证据见 [验证报告](superpowers/reports/2026-10-25-intr-dispatch-phase2-x86-validation.md)。**2026-11-20 闭环**：EL0/SVC、uaccess、用户页表/8-bit ASID/COW、正式 EL0 IRQ 返回抢占（`aarch64_user_irq_return()`）与固定单核亲和 SMP 用户调度均已落地；**剩余**：用户态进入/返回纳入 `arch/context.h` 门面、运行期跨核任务迁移与 EL0 FP/SIMD。
-2. **Spec B — 统一 SMP 启动 + 定时器 + CPU 特性**：`arch_smp_boot_aps` + `clockevent` 双 arch 注册 + `arch_cpu_features()`（三者仓库内均尚未落地；当前只有跨架构钩子 `arch_boot_aps()` 与 per-arch 各自的启动实现）。预计 2–3 周。
+2. **Spec B — 统一 SMP 启动 + 定时器 + CPU 特性**：`arch_smp_boot_aps` **已于 2026-11-19 闭环**（见上文 Facade 矩阵与 `docs/changelog.md`）；**剩余**：`clockevent` 双 arch 注册与 `arch_cpu_features()`。
 3. **Spec C — 统一 kernel_main（✅ 2026-11-07 闭环）**：在 A、B 之上定义 `arch_early_init`/`arch_late_init`，单 `kernel_main` 按固定 init 顺序调（pmm_init → arch_early_init → scheduler → arch_late_init → ...）。设计 init 顺序契约。**实际落地为 `kernel/include/arch/boot.h` 的 9 个强覆盖启动钩子 + `kernel/include/arch/features.h` 的 `OS01_HAS_VFS` / `OS01_HAS_USERSPACE` 编译期特性门**；x86_64 拆为 `x86_64_boot_early/memory/subsystems/device_nodes/percpu/aps`，aarch64 由原 `aarch64_main()` 改写为同名 facade 实现；入口唯一性由 `test-aarch64-audit` 的 readelf 符号审计门禁强制。
 
 **永远无法统一的（ISA/HW 差异）**：`head.S`/`entry.S` 指令集差异；MMU 页表格式（PTE bit-position）；中断控制器驱动；SoC 外设（UART/timer/GPIO 等）。这些靠 arch 抽象层封装，统一接口、不统一实现。
@@ -178,10 +178,10 @@ net / proc / resource / time / misc 组仍隐藏。详见
 
 ---
 
-## aarch64 平台值解绑（2026-11-18）
+## aarch64 平台值解绑（2026-11-18 ~ 2026-11-19）
 
 真机适配审计（路线图 P2 §真机适配审计）把 aarch64 的 QEMU virt 固化分三层。
-**2026-11-18 落地了其中两层**：加载地址层与 DTB 地址层。
+**2026-11-18 落地了加载地址层与 DTB 地址层，2026-11-19 落地了早期 MMIO Device 窗口与控制台 handoff 运行时化**。
 
 ### 启动块平台配置化（加载地址层）
 
@@ -210,23 +210,26 @@ AArch64 `head.S` 负责 BSP 从固件交接到 `kernel_main`：建立 EL1、栈�
 **验收**：`make PROFILE=aarch64-clang test-aarch64 MODE=lma-layout`——默认布局 → 改址布局
 → 再回默认的配对启动，外加「默认 loader 搭替代 ELF」的混搭拒绝。
 
-**已知边界**：**真机启动未验证**（只验证改址构建与 QEMU virt）；**D 设备窗口
-`[0x08000000, 0x0a000000)` 仍是固化常量**（`boot_layout.h:36-37`，无 `#ifndef` 护栏，
-编译期不可换址），因此 M0 的 Device 块（`boot/early_mmu.c`）与 early_arena 的 D 侧
-拒绝（`early_arena.c:147`）仍在；handoff 窗口仍是固定 128 KiB 固定址申请
+**已知边界**：**真机启动未验证**（只验证改址构建与 QEMU virt）；handoff 窗口仍是固定 128 KiB 固定址申请
 （`boot.c:246-248,460-461`），真机大 DTB 仍有 `EFI_BUFFER_TOO_SMALL` 风险。
+
+### 早期 MMIO Device 窗口与控制台 handoff（2026-11-19）
+
+- **handoff ABI**：`boot_context` 追加 flag 门控 `struct BOOT_EARLY_MMIO`（`console_base`/`device_base`/`device_blocks`，v3 追加不 bump version）。UEFI loader `fdt_early.c` 从固件 FDT 推导 PL011 + GICv2 全部 `reg` 对并转为 2 MiB 块覆盖（上限 1024 块）。
+- **内核侧消费**：`head.S` 停靠 handoff 并 fail-closed（窗口出 `[0, 2 GiB)` 或撞启动块 → `W!`）；`head.S`/`boot_vectors.S` 的早期打印改读停靠槽（`early_mmio.console_base`，flag 缺失回退 `0x09000000`）；`boot/early_mmu.c` 按窗口参数填 Device 块；`device_window.c` 提供运行时窗口供 `early_arena.c` preflight、`runtime_tree.c` 与 PT/M0 selftest 消费（`boot_layout.h` 常量仅作 flag 缺失时的回退）。
+- **已知边界**：早期 identity map `[0, 2 GiB)` 上限不变，窗口/控制台超过 2 GiB 仍需早期映射扩展；单窗口表示不适配远距设备对（loader 不置 flag）。
 
 ### DTB 地址层解绑
 
 DTB 解析器此前实为「QEMU virt 形状校验器」——解析出的基址先和 QEMU 常量对账、相等才通过。
 现在改成解析出就用：
 
-- **PL011 MMIO 基址**（4 处硬编码清掉 3 处）：运行期消费 `dtb_pl011_base()`
+- **PL011 MMIO 基址（4/4 已清零）**：运行期消费 `dtb_pl011_base()`
   （`kernel/arch/aarch64/platform/pl011.c:30-36`，DTB 尚不可用时回退
   `PL011_EARLY_FALLBACK_PA`）；解析器接受任意基址（`dtb_parse.c:144-158`）；
   **UEFI loader 侧已完全不含 PL011 硬编码**，改优先走 EFI Serial IO Protocol
-  （`boot/uefi/arch/aarch64/boot.c:52-69,93-118`）。**剩余 1 处**：`boot/early_vectors.S` 的
-  MMU 前 fault 打印仍 `mov x2, #0x09000000`。
+  （`boot/uefi/arch/aarch64/boot.c:52-69,93-118`）；`head.S`/`boot_vectors.S`
+  的 MMU 前 fault 打印已于 2026-11-19 改读 `early_mmio.console_base` 停靠槽。
 - **PL011 波特率**：改由 DTB `clock-frequency` / `clocks` 推导
   （`pl011_calc_divisors()` `pl011.c:63-77`，调用点 `pl011.c:93`，DTB 侧
   `dtb_parse.c:111-119,159-171`）。**DTB 无时钟时回退 16 MHz**；残留的 IBRD=8/FBRD=44
