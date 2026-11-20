@@ -179,11 +179,19 @@ install-headers:
 	mkdir -p $(INSTALL_ROOT)/usr/include
 	cp -R --preserve=timestamps include/. $(INSTALL_ROOT)/usr/include/.
 
-install-libs: $(LIBC_ARCHIVE) $(LIBK_ARCHIVE)
+# C runtime startup object (libc/arch/$(HOSTARCH)/crt0.S): installed into
+# the sysroot as a STANDALONE object, never an archive member — nothing
+# references _start, so an archive member would never be pulled; consumers
+# (user/Makefile, the busybox adapter) link $(SYSROOT)/usr/lib/crt0.o
+# explicitly, like glibc/musl ship crt1.o.
+CRT0_OBJECT := $(BUILD_DIR)/arch/$(HOSTARCH)/crt0.o
+
+install-libs: $(LIBC_ARCHIVE) $(LIBK_ARCHIVE) $(CRT0_OBJECT)
 	@test -n "$(INSTALL_ROOT)" || { echo "ERROR: install (profile mode) requires INSTALL_ROOT (staging tree)"; exit 1; }
 	mkdir -p $(INSTALL_ROOT)/usr/lib
 	cp $(LIBC_ARCHIVE) $(INSTALL_ROOT)/usr/lib/libc.a
 	cp $(LIBK_ARCHIVE) $(INSTALL_ROOT)/usr/lib/libk.a
+	cp $(CRT0_OBJECT) $(INSTALL_ROOT)/usr/lib/crt0.o
 
 # ── Clean ──────────────────────────────────────────────────
 clean:

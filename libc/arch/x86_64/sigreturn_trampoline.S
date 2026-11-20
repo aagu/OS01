@@ -1,4 +1,4 @@
-# user/sigreturn_trampoline.S — signal handler return trampoline
+# libc/arch/x86_64/sigreturn_trampoline.S — signal handler return trampoline
 # Placed on the user stack as the handler's return address.
 # When the handler executes 'ret', it lands here.
 # Executes SYS_sigreturn (43) to restore the saved register frame.

@@ -1,7 +1,7 @@
 /*
- * user/linker_aarch64.ld — AArch64 user program layout.
+ * libc/arch/aarch64/user.ld — AArch64 user program layout.
  *
- * Structural rules mirror user/linker.ld (x86) and must satisfy the
+ * Structural rules mirror libc/arch/x86_64/user.ld (x86) and must satisfy the
  * kernel's aarch64 image validator (kernel/arch/aarch64/memory/user_elf.c):
  *   - PT_LOAD segment vaddrs are 4 KiB aligned,
  *   - every PT_LOAD carries PF_R, and no segment is W+X,

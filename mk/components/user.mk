@@ -99,28 +99,30 @@ $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)&: $(SYSROOT_STAMP) $(USER_RUNTIME_PREREQ
 # path and expected revision; the input digest covers the ACTUAL worktree
 # (so local uncommitted modifications invalidate the adapter even though the
 # git revision is unchanged), config/busybox.config.in, the manifest, all
-# tracked overlay files, user/crt0.S + user/sigreturn_trampoline.S +
-# user/linker.ld (the link consumes the linker script), the toolchain
-# identity and the CURRENT generation id (its .config embeds the generation
-# paths). The digest is written to $(BUILD_DIR)/receipts/busybox.input.digest
+# tracked overlay files, libc/arch/x86_64/crt0.S (the startup object comes
+# from the sysroot, so a source-only crt0 change must force a relink) +
+# libc/arch/x86_64/user.ld (the link consumes the linker script), the
+# toolchain identity and the CURRENT generation id (its .config embeds the
+# generation paths). The digest is written to $(BUILD_DIR)/receipts/busybox.input.digest
 # and compared with $(BUILD_DIR)/receipts/busybox.stamp.receipt; only a
 # difference (or a missing private binary) triggers a re-copy + rebuild. The
 # private copy lives in $(BUILD_DIR)/thirdparty/busybox; the tracked overlay
-# is applied there (applets/Kbuild.src + crt0.S + sigreturn_trampoline.S) and
-# .config is generated from config/busybox.config.in with the generation
-# paths. The relative -I../../libc/include -I../../kernel/include flags in
-# the config template are dropped (the generation usr/include is a superset
-# of both, and the relative paths would point at nothing at this build depth)
-# and the linker script path is made absolute against $(OS01_ROOT). The
-# native busybox Make is invoked under the controlled environment (env -i
+# is applied there (applets/Kbuild.src only — crt0.o comes from the sysroot
+# and the sigreturn trampoline is a libc.a member) and .config is generated
+# from config/busybox.config.in with the generation paths. The relative
+# -I../../libc/include -I../../kernel/include flags in the config template
+# are dropped (the generation usr/include is a superset of both, and the
+# relative paths would point at nothing at this build depth) and the linker
+# script placeholder is made absolute against $(OS01_ROOT). The native
+# busybox Make is invoked under the controlled environment (env -i
 # with the whitelisted MAKEFLAGS), same as every other sub-make, so ambient
 # CFLAGS/LDFLAGS/CPPFLAGS cannot contaminate the third-party build. Depends
 # on $(SYSROOT_STAMP), which transitively includes the compat-libs stamp:
 # BusyBox never creates libm.a / librt.a itself.
 
-# The BusyBox adapter is x86-only (2026-11-18): the overlay's crt0/linker
-# plumbing and the applet set are built against the x86_64 sysroot; the
-# aarch64 userland ships its own user programs without BusyBox.
+# The BusyBox adapter is x86-only (2026-11-18): the linker plumbing (crt0.o
+# from the x86_64 sysroot) and the applet set are built against the x86_64
+# sysroot; the aarch64 userland ships its own user programs without BusyBox.
 ifeq ($(RUNTIME_TARGET_user),x86_64-unknown-none)
 
 BUSYBOX_MANIFEST  := $(OS01_ROOT)/thirdpart/busybox.manifest
@@ -169,7 +171,7 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	      find thirdpart/busybox-1.36.1 -type f -exec sha256sum {} + 2>/dev/null | sort; \
 	      sha256sum config/busybox.config.in thirdpart/busybox.manifest; \
 	      find config/busybox.overlay -type f -exec sha256sum {} + 2>/dev/null | sort; \
-	      sha256sum user/crt0.S user/sigreturn_trampoline.S user/linker.ld; \
+	      sha256sum libc/arch/x86_64/crt0.S libc/arch/x86_64/user.ld; \
 	      printf "toolchain: %s\n" "$$($(CLANG) --version 2>/dev/null | head -1)"; \
 	    } | sha256sum | cut -d" " -f1 ); \
 	    old=""; \
@@ -184,20 +186,16 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	        -C "$(BUSYBOX_PRIVATE)" CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)"; \
 	    else \
 	      echo "  [busybox] config changed or unbuilt, rebuilding in $(BUSYBOX_PRIVATE)"; \
-	      cmp -s "$(OS01_ROOT)/user/crt0.S" "$(BUSYBOX_OVERLAY)/applets/crt0.S" || { echo "ERROR: $(BUSYBOX_OVERLAY)/applets/crt0.S has drifted from user/crt0.S — the overlay is the file actually compiled; regenerate the overlay copy"; exit 1; }; \
-	      cmp -s "$(OS01_ROOT)/user/sigreturn_trampoline.S" "$(BUSYBOX_OVERLAY)/applets/sigreturn_trampoline.S" || { echo "ERROR: $(BUSYBOX_OVERLAY)/applets/sigreturn_trampoline.S has drifted from user/sigreturn_trampoline.S — regenerate the overlay copy"; exit 1; }; \
 	      printf "%s\n" "$$digest" > "$(BUSYBOX_INPUT_DG)"; \
 	      rm -rf "$(BUSYBOX_PRIVATE)"; \
 	      cp -a "$(OS01_ROOT)/thirdpart/busybox-1.36.1" "$(BUSYBOX_PRIVATE)"; \
 	      [ -f "$(BUSYBOX_PRIVATE)/Makefile" ] || { echo "ERROR: private busybox copy incomplete"; exit 1; }; \
-	      cp "$(BUSYBOX_OVERLAY)/applets/crt0.S" "$(BUSYBOX_PRIVATE)/applets/crt0.S"; \
-	      cp "$(BUSYBOX_OVERLAY)/applets/sigreturn_trampoline.S" "$(BUSYBOX_PRIVATE)/applets/sigreturn_trampoline.S"; \
 	      cp "$(BUSYBOX_OVERLAY)/applets/Kbuild.src" "$(BUSYBOX_PRIVATE)/applets/Kbuild.src"; \
 	      sed -e "s|@TARGET_INCLUDEDIR@|$(SYSROOT)/usr/include|g" \
 	          -e "s|@TARGET_LIBDIR@|$(SYSROOT)/usr/lib|g" \
+	          -e "s|@TARGET_LINKERSCRIPT@|$(OS01_ROOT)/libc/arch/x86_64/user.ld|g" \
 	          -e "s|@CLANG_RESOURCE_DIR@|$(CLANG_RESOURCE_DIR)|g" \
 	          -e "s|-I../../libc/include -I../../kernel/include ||" \
-	          -e "s|-Wl,-T,../../user/linker.ld|-Wl,-T,$(OS01_ROOT)/user/linker.ld|" \
 	          "$(OS01_ROOT)/config/busybox.config.in" > "$(BUSYBOX_PRIVATE)/.config"; \
 	      env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
 	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" SKIP_STRIP=y $(MAKE) MAKEOVERRIDES= \

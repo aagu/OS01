@@ -55,5 +55,3 @@ include/NUM_APPLETS.h: applets/applet_tables
 #
 include/applet_tables.h: include/NUM_APPLETS.h applets/applet_tables
 	$(call cmd,gen_applet_tables)
-obj-y += crt0.o
-obj-y += sigreturn_trampoline.o

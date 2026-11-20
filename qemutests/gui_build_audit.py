@@ -858,42 +858,18 @@ def _consumer_flags(repo_root: Path, cflags: list[str]) -> list[str]:
     return out
 
 
-def _build_startup_objects(
-    repo_root: Path,
-    profile_vars: dict[str, str],
-    obj_dir: Path,
-    errors: list[str],
-    label: str,
-) -> dict[str, Path] | None:
-    """Build crt0.o and sigreturn_trampoline.o the way user/Makefile does.
+def _sysroot_crt0(gen_dir: Path, label: str, errors: list[str]) -> Path | None:
+    """The published sysroot startup object.
 
-    The startup objects are part of the TARGET link, so a consumer probe
-    must link against the same ones — they are built here with the target
-    toolchain and the same flags, from the same sources.
+    libc's install-libs ships crt0.o as a standalone object (built from
+    libc/arch/<arch>/crt0.S); consumer links take it from there — the
+    sigreturn trampoline is a libc.a member pulled by -lc.
     """
-    user_dir = repo_root / "user"
-    cc = profile_vars.get("cc", "").split()
-    cflags = profile_vars.get("cflags", "").split()
-    startup_srcs = {
-        "crt0.o": user_dir / "crt0.S",
-        "sigreturn_trampoline.o": user_dir / "sigreturn_trampoline.S",
-    }
-    built: dict[str, Path] = {}
-    for obj_name, src in startup_srcs.items():
-        if not src.is_file():
-            errors.append(f"{label}: startup source missing: {src}")
-            return None
-        res = run_cmd(
-            [*cc, *cflags, "-c", str(src), "-o", str(obj_dir / obj_name)],
-            cwd=user_dir,
-        )
-        if res.returncode != 0:
-            errors.append(
-                f"{label}: building {obj_name} from {src.name} failed:\n{res.stderr.strip()}"
-            )
-            return None
-        built[obj_name] = obj_dir / obj_name
-    return built
+    crt0_o = gen_dir / "usr" / "lib" / "crt0.o"
+    if not crt0_o.is_file():
+        errors.append(f"{label}: the published sysroot has no crt0.o: {crt0_o}")
+        return None
+    return crt0_o
 
 
 def audit_link_probe(
@@ -907,10 +883,10 @@ def audit_link_probe(
 
     This is a LINK validation, not a syntax check: the consumer is compiled
     with the target toolchain and linked with the target linker, the real
-    crt0/sigreturn startup objects and the real linker script, in the exact
+    crt0 startup object and the real linker script, in the exact
     library order user/Makefile uses::
 
-        crt0.o sigreturn_trampoline.o consumer.o -lgui -lgfx -lc
+        crt0.o consumer.o -lgui -lgfx -lc
     """
     user_dir = repo_root / "user"
     cc = profile_vars.get("cc", "").split()
@@ -937,14 +913,9 @@ def audit_link_probe(
     obj_dir = work_dir / "linkprobe"
     obj_dir.mkdir(parents=True, exist_ok=True)
 
-    # 1. The startup objects, built with the target toolchain and the same
-    #    flags user/Makefile uses (cwd = user/, like the user sub-make).
-    startup_srcs = {
-        "crt0.o": user_dir / "crt0.S",
-        "sigreturn_trampoline.o": user_dir / "sigreturn_trampoline.S",
-    }
-    startup = _build_startup_objects(repo_root, profile_vars, obj_dir, errors, "link probe")
-    if startup is None:
+    # 1. The startup object, straight from the published sysroot.
+    crt0_o = _sysroot_crt0(gen_dir, "link probe", errors)
+    if crt0_o is None:
         return
 
     # 2. The consumer: only <gui/gui.h>, no private include path.
@@ -970,8 +941,7 @@ def audit_link_probe(
         *raw_ldflags,
         "-o",
         str(elf),
-        str(obj_dir / "crt0.o"),
-        str(obj_dir / "sigreturn_trampoline.o"),
+        str(crt0_o),
         str(consumer_o),
         "-lgui",
         "-lgfx",
@@ -1030,8 +1000,7 @@ def audit_link_probe(
         *raw_ldflags,
         "-o",
         str(obj_dir / "negative.elf"),
-        str(obj_dir / "crt0.o"),
-        str(obj_dir / "sigreturn_trampoline.o"),
+        str(crt0_o),
         str(neg_o),
         "-lgui",
         "-lgfx",
@@ -1368,7 +1337,7 @@ def audit_ps2_decoder_link_map(
     against the PUBLISHED generation only, and linked in the exact order
     user/Makefile uses::
 
-        crt0.o sigreturn_trampoline.o probe.o -lgui -lgfx -lc
+        crt0.o probe.o -lgui -lgfx -lc
 
     The link map then answers the question the contract asks: what did
     this consumer really drag in?  Only the decoder and libc may answer.
@@ -1399,8 +1368,8 @@ def audit_ps2_decoder_link_map(
     obj_dir = work_dir / "ps2probe"
     obj_dir.mkdir(parents=True, exist_ok=True)
 
-    startup = _build_startup_objects(repo_root, profile_vars, obj_dir, errors, "decoder_only_link_map")
-    if startup is None:
+    crt0_o = _sysroot_crt0(gen_dir, "decoder_only_link_map", errors)
+    if crt0_o is None:
         return False
 
     probe_src = repo_root / PS2_PROBE_SOURCE
@@ -1449,8 +1418,7 @@ def audit_ps2_decoder_link_map(
         f"-Map={map_file}",
         "-o",
         str(elf),
-        str(startup["crt0.o"]),
-        str(startup["sigreturn_trampoline.o"]),
+        str(crt0_o),
         str(probe_o),
         "-lgui",
         "-lgfx",

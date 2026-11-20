@@ -1,5 +1,5 @@
-# user/crt0_aarch64.S — AArch64 user program entry
-# Same contract as user/crt0.S (x86): zero BSS, then
+# libc/arch/aarch64/crt0.S — AArch64 user program entry
+# Same contract as libc/arch/x86_64/crt0.S (x86): zero BSS, then
 # __libc_start_main(main, argc, argv, init=0, fini=0, rtld_fini=0, stack_end)
 # with the AAPCS64 register window (x0..x6); the kernel's initial stack
 # frame places argc at [sp] and argv at [sp+8] (aarch64_user_image_setup_stack).

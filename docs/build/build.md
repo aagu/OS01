@@ -716,7 +716,7 @@ Bucket 目标是规范名。**2026-09-26 cleanup 删除了所有转发别名**�
 - `test-runtime` — runtime audit 子集（5 个 python 调用 + validate-kernel）
 - `test-kernel-layout` — kernel.elf 在 `_end` 之后的保留布局审计
 - `test-kernel-canary-contract` — kernel canary 编译旗标契约
-- `test-user-canary` — 7 步 SSP/crt0 用户栈 canary 审计
+- `test-user-canary` — 6 步 SSP / 用户栈 canary 审计
 - `test-pmm-boot-reservation` — PMM 启动期内存保留守卫
 - `test-resolution-host` — 分辨率切换器宿主聚焦测试分发入口
 
@@ -906,7 +906,8 @@ APP_LDLIBS := -lgfx
 | `APP_EXTRA_OBJS` | 资源生成规则提供的额外对象 |
 
 共享辅助代码放在 `user/common/`；此目录不放 `app.mk`。
-`crt0.S`、信号返回 trampoline 和链接脚本仍由公共规则处理。
+启动对象 `crt0.o` 由 libc 安装进 sysroot，信号返回 trampoline 是 libc.a
+成员，链接脚本在 `libc/arch/<arch>/user.ld`；均由公共规则处理。
 对象与 `.d` 依赖文件保留在 profile/variant 的构建目录内，修改头文件
 或 `app.mk` 会触发相应重建。
 

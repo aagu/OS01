@@ -100,7 +100,7 @@ The trampoline is `sa_restorer` (set by libc's `sigaction()` to `sigreturn_tramp
 
 ## Signal handler return
 
-The assembler trampoline in `user/sigreturn_trampoline.S`:
+The assembler trampoline in `libc/arch/<arch>/sigreturn_trampoline.S` (a libc.a member, pulled by `sigaction()`/`signal()`):
 
 ```asm
 sigreturn_trampoline:
@@ -141,5 +141,5 @@ This sets SIGINT pending on the foreground task. On the next return-to-userspace
 | `libc/signal/kill.c` | `kill()` — sends signal |
 | `libc/signal/sigprocmask.c` | `sigprocmask()` wrapper |
 | `libc/signal/raise.c` | `raise()` — kill(self, sig) |
-| `user/sigreturn_trampoline.S` | sigreturn trampoline |
+| `libc/arch/<arch>/sigreturn_trampoline.S` | sigreturn trampoline (libc.a member) |
 | `user/sigtest.c` | Signal handler self-test |

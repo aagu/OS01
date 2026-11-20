@@ -60,7 +60,9 @@ endif
 
 # ── Architecture dispatch (2026-11-18) ───────────────────────
 # The profile's RUNTIME_TARGET_user names the user target; the crt0
-# source, linker script, compile flags and link emulation follow it.
+# object (installed into the sysroot by libc's install-libs), the linker
+# script (libc/arch/<arch>/user.ld), the compile flags and link emulation
+# follow it.
 ifeq ($(RUNTIME_TARGET_user),aarch64-none-elf)
 USER_ARCH := aarch64
 else
@@ -72,17 +74,16 @@ CFLAGS := --sysroot=$(SYSROOT_DIR) \
           -fno-pic -fno-pie \
           -I$(TARGET_INCDIR) \
           -Icommon -Wall -Wextra -O2
+# Startup object ships with the sysroot; the sigreturn trampoline is a
+# libc.a member pulled by sigaction()/signal() (or explicit sa_restorer users).
+CRT0_OBJ := $(TARGET_LIBDIR_LOCAL)/crt0.o
 ifeq ($(USER_ARCH),aarch64)
-CRT0_SOURCE          := crt0_aarch64.S
-SIGRETURN_SOURCE     := sigreturn_trampoline_aarch64.S
-LINKER_SCRIPT        := linker_aarch64.ld
-USER_RAW_LDFLAGS := -static -T linker_aarch64.ld -L$(TARGET_LIBDIR_LOCAL)
+LINKER_SCRIPT  := $(OS01_ROOT)/libc/arch/aarch64/user.ld
+USER_RAW_LDFLAGS := -static -T $(LINKER_SCRIPT) -L$(TARGET_LIBDIR_LOCAL)
 else
-CRT0_SOURCE          := crt0.S
-SIGRETURN_SOURCE     := sigreturn_trampoline.S
-LINKER_SCRIPT        := linker.ld
+LINKER_SCRIPT  := $(OS01_ROOT)/libc/arch/x86_64/user.ld
 override CFLAGS += -mno-red-zone
-USER_RAW_LDFLAGS := -m elf_x86_64 -static -no-pie -T linker.ld -L$(TARGET_LIBDIR_LOCAL)
+USER_RAW_LDFLAGS := -m elf_x86_64 -static -no-pie -T $(LINKER_SCRIPT) -L$(TARGET_LIBDIR_LOCAL)
 endif
 
 # ── Compile & link keys ──────────────────────────────────────
@@ -111,9 +112,7 @@ USER_BUILD_CONTEXT := 1
 include $(OS01_ROOT)/user/doom/engine.mk
 include $(OS01_ROOT)/user/apps.mk
 PROGRAMS := $(addprefix $(BUILD_DIR)/,$(addsuffix .elf,$(USER_PROGRAMS)))
-CRT0_OBJ := $(OBJ_DIR)/$(CRT0_SOURCE:.S=.o)
-SIGRETURN_OBJ := $(OBJ_DIR)/$(SIGRETURN_SOURCE:.S=.o)
-COMMON_LINK_DEPS := $(CRT0_OBJ) $(SIGRETURN_OBJ) $(LINKER_SCRIPT) Makefile apps.mk $(USER_LINK_KEY)
+COMMON_LINK_DEPS := $(CRT0_OBJ) $(LINKER_SCRIPT) Makefile apps.mk $(USER_LINK_KEY)
 
 # ── User runtime consumer link probe (monitor plan Task 5) ────
 # The root user component passes the consumer=user builtins archive as
@@ -133,10 +132,10 @@ $(RUNTIME_PROBE_OBJ): $(OS01_ROOT)/runtime/selftest/$(RUNTIME_PROBE_NAME).c \
 	$(EFFECTIVE_CC) $(CFLAGS) -I$(OS01_ROOT)/runtime/selftest \
 		-MD -MP -c $< -o $@
 
-$(RUNTIME_PROBE_ELF): $(RUNTIME_PROBE_OBJ) $(CRT0_OBJ) $(SIGRETURN_OBJ) $(LINKER_SCRIPT) \
+$(RUNTIME_PROBE_ELF): $(RUNTIME_PROBE_OBJ) $(CRT0_OBJ) $(LINKER_SCRIPT) \
                       $(USER_RUNTIME_ARCHIVE) $(TARGET_LIBC)
 	@mkdir -p $(dir $@)
-	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) $(SIGRETURN_OBJ) \
+	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) \
 		$(RUNTIME_PROBE_OBJ) $(USER_RUNTIME_ARCHIVE) -lc
 	$(OBJ_CPY) --strip-debug $@
 
@@ -155,12 +154,12 @@ $(OBJ_DIR)/%.o: %.S $(USER_COMPILE_KEY)
 
 # Compile shared sources once with global flags. App flags affect local sources.
 user_objects = $(addprefix $(OBJ_DIR)/,$(addsuffix .o,$(basename $(1))))
-USER_OBJECTS := $(call user_objects,$(USER_FLAT_SOURCES)) $(CRT0_OBJ) $(SIGRETURN_OBJ)
+USER_OBJECTS := $(call user_objects,$(USER_FLAT_SOURCES))
 
 define flat_program
 $(BUILD_DIR)/$(1).elf: $(OBJ_DIR)/$(1).o $(COMMON_LINK_DEPS) $(TARGET_LIBC)
 	@mkdir -p $$(dir $$@)
-	$$(TARGET_LD) $$(USER_RAW_LDFLAGS) -o $$@ $$(CRT0_OBJ) $$(SIGRETURN_OBJ) $(OBJ_DIR)/$(1).o -lc
+	$$(TARGET_LD) $$(USER_RAW_LDFLAGS) -o $$@ $$(CRT0_OBJ) $(OBJ_DIR)/$(1).o -lc
 	$$(OBJ_CPY) --strip-debug $$@
 endef
 $(foreach app,$(USER_FLAT_PROGRAMS),$(eval $(call flat_program,$(app))))
@@ -176,7 +175,7 @@ $(call user_objects,$(filter $(1)/%,$(USER_APP_$(1)_SOURCES))): override CFLAGS 
 $(call user_objects,$(USER_APP_$(1)_SOURCES)): $(1)/app.mk $$(OBJ_DIR)/$(1)/.app_key
 $(BUILD_DIR)/$(1).elf: $$(USER_APP_$(1)_OBJECTS) $(COMMON_LINK_DEPS) $(1)/app.mk $$(call user_lib_dep,$$(USER_APP_$(1)_LDLIBS)) $$(OBJ_DIR)/$(1)/.app_key $(TARGET_LIBC)
 	@mkdir -p $$(dir $$@)
-	$$(TARGET_LD) $$(USER_RAW_LDFLAGS) $(USER_APP_$(1)_LDFLAGS) -o $$@ $$(CRT0_OBJ) $$(SIGRETURN_OBJ) $$(USER_APP_$(1)_OBJECTS) $(USER_APP_$(1)_LDLIBS) -lc
+	$$(TARGET_LD) $$(USER_RAW_LDFLAGS) $(USER_APP_$(1)_LDFLAGS) -o $$@ $$(CRT0_OBJ) $$(USER_APP_$(1)_OBJECTS) $(USER_APP_$(1)_LDLIBS) -lc
 	$$(OBJ_CPY) --strip-debug $$@
 endef
 $(foreach app,$(USER_DIRECTORY_PROGRAMS),$(eval $(call directory_program,$(app))))

@@ -623,7 +623,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 // An over-cap argv/envp is rejected up front by startup_args_count()
 // + setup_user_stack_check_capacity() with -E2BIG. The child's _start
 // reads argc from (rsp) and argv from 8(rsp) — that contract lives in
-// user/crt0.S.
+// libc/arch/<arch>/crt0.S.
 //
 // Task 3 lifecycle (spec §5.1): keep the old image live until the
 // new image is fully prepared.  Every fallible step runs against

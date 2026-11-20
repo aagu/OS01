@@ -41,7 +41,10 @@ NORMAL_ASM_SOURCES = [
     "kernel/arch/x86_64/cpu/thread_entry.S",
     "kernel/arch/x86_64/trampoline.S",
     "kernel/arch/aarch64/head.S",
-    "user/crt0.S",
+    "libc/arch/x86_64/crt0.S",
+    "libc/arch/aarch64/crt0.S",
+    "libc/arch/x86_64/sigreturn_trampoline.S",
+    "libc/arch/aarch64/sigreturn_trampoline.S",
 ]
 
 # Generated assembly files that MUST be ignored by git

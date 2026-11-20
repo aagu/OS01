@@ -43,17 +43,17 @@ $EFFECTIVE_CC --sysroot="$SYSROOT" -ffreestanding -fno-pic -fno-pie \
   || fail "probe compile"
 
 echo "--- CONTROL: link the probe against the PRISTINE archive:"
-"$TARGET_LD" -m elf_x86_64 -static -no-pie -T user/linker.ld \
+"$TARGET_LD" -m elf_x86_64 -static -no-pie -T "$OS01_ROOT/libc/arch/x86_64/user.ld" \
   -L"$SYSROOT/usr/lib" -o "$tmp/probe_ctrl.elf" \
-  "$USER_BUILD_DIR/obj/crt0.o" "$USER_BUILD_DIR/obj/sigreturn_trampoline.o" \
+  "$SYSROOT/usr/lib/crt0.o" \
   "$tmp/probe.o" -lc
 rc_ctrl=$?
 echo "CONTROL exit code: $rc_ctrl"
 
 echo "--- RED-2: link the probe against the archive WITHOUT the task members:"
-"$TARGET_LD" -m elf_x86_64 -static -no-pie -T user/linker.ld \
+"$TARGET_LD" -m elf_x86_64 -static -no-pie -T "$OS01_ROOT/libc/arch/x86_64/user.ld" \
   -L"$tmp" -o "$tmp/probe_red.elf" \
-  "$USER_BUILD_DIR/obj/crt0.o" "$USER_BUILD_DIR/obj/sigreturn_trampoline.o" \
+  "$SYSROOT/usr/lib/crt0.o" \
   "$tmp/probe.o" -lc
 rc_link=$?
 echo "RED-2 exit code: $rc_link"

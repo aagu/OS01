@@ -1888,7 +1888,7 @@ HELP_SEC_FRAMEWORK := \
 HELP_SEC_STANDALONE := \
 	'test-syscall' '(rootfs)' 'RETAINED ALIAS — see docs/build/build.md section 4 (AGENTS.md exact-target requirement; use OS01_SYSTEST=1 test-qemu SUITE=systest in new code)' \
 	'test-syscall-repeat' '(rootfs)' 'QEMU exec/exit stability through normal terminal (x86_64_systest_repeat.py)' \
-	'test-user-canary' '(rootfs)' '7-step SSP / crt0 user-stack canary audit (spec 2026-09-17)' \
+	'test-user-canary' '(rootfs)' '6-step SSP / user-stack canary audit (spec 2026-09-17)' \
 	'test-pmm-boot-reservation' '(rootfs)' 'PMM boot-time memory reservation guard (host-only)'
 HELP_SEC_FOCUSED := \
 	'test-kernel-layout' '(rootfs)' 'x86_64 kernel.elf layout audit (post-_end reserved)' \
