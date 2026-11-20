@@ -170,9 +170,9 @@ net / proc / resource / time / misc 组仍隐藏。详见
 - **正式 EL0 IRQ 返回与抢占（2026-11-20）**：`aarch64_el0_irq()` 计入 per-CPU IRQ 深度，在设备分派与 EOI 后由正式分支调用 `aarch64_user_irq_return()`（检查拥有帧与 `need_resched` 后调 `schedule()`，并在返回 EL0 前投递挂起信号）。VM 授权/edit 状态按任务持有（`aarch64_vm_task_editing()`），copy window 按 CPU 持有，`switch_to()` 原子完成保存 prev TLS → 切换用户根 → 恢复 next TLS。旧 `aarch64_el0_preempt` 探针仍限单核（`kernel/selftest/test_aarch64_el0.c:414-416`）。
 - **8-bit ASID 与失效边界（2026-11-20）**：`user_asid.c` 维护 1..255 非零标签池（0 为退化回退），`TCR_EL1.A1=0, AS=0`，ASID 编码于 `TTBR0[55:48]`（CnP=0），用户叶带 `nG` 位。BSP 与 AP 在接入调度前均安装共享空 TTBR0 根（内核与设备地址走 TTBR1）；活跃低 VA 使用 `tlbi vaae1is`，标签回收先完成 `tlbi aside1is` 再归还池位。
 - **固定单核亲和 SMP 用户调度（2026-11-20）**：PID 1 固定 BSP（boot-5 特例），运行期 fork/spawn 通过 `aarch64_user_pick_cpu()` 在已就绪 CPU 上轮转放核（`sched_alloc_and_publish_task`），任务终身固定单核亲和（**不做运行期跨核迁移**）。配套完成两阶段孤儿退出交接（`task_finish_switch` / `task_publish_process_exit`）、COW 末引用释放顺序、原子信号 pending、共享 `FD_VFS` `file_t` pos 锁与 `ic ialluis` 跨核同步；产品镜像已通过 1/2/4/8 核启动与 2 核串口交互验收（`MODE=user-runtime USER_RUNTIME_CASE=irq|asid|smp|product`）。
-- **仍保留的边界**：无 EL0 FP/SIMD 上下文（userland soft-float）；用户态进入/返回**尚未纳入 `arch/context.h` 门面**（x86 走 `iretq`、aarch64 走 `eret`）；`arch_cpu_features()` 仓库内仍无此接口；`arch_smp_boot_aps()` 已于 2026-11-19 随统一 SMP 启动闭环落地。
+- **仍保留的边界**：EL0 浮点指令仍会陷入（FPEN 已放行、per-task FP 保存恢复机制已就位，但 EL0 任务 PSTATE 的 F 位仍掩码 `0x340`，且无 EC 0x2C/0x2D 陷入处理路径；signal 帧也无 FP 区）；用户态进入/返回**尚未纳入 `arch/context.h` 门面**（x86 走 `iretq`、aarch64 走 `eret`）；`arch_cpu_features()` 仓库内仍无此接口；`arch_smp_boot_aps()` 已于 2026-11-19 随统一 SMP 启动闭环落地。
 
-**剩余差距**：`arch/context.h` 用户态进入/返回门面、运行期跨核任务迁移、EL0 FP/SIMD、userland libc 完整度（floatscan/strtod/setjmp 等）与跨进程 inode 级 `MAP_SHARED`。规划项见 [roadmap.md](roadmap.md) P2。
+**剩余差距**：`arch/context.h` 用户态进入/返回门面、运行期跨核任务迁移、EL0 FP/SIMD 剩余项（PSTATE F 位与 signal 帧 FP 保存恢复）与跨进程 inode 级 `MAP_SHARED`。规划项见 [roadmap.md](roadmap.md) P2。
 闭环记录见 `docs/changelog.md` 2026-11-11 ~ 2026-11-20 各条目；COW/VM 细节见
 [cow-mmap.md](memory/cow-mmap.md#aarch64-cow--匿名-vma2026-11-11--2026-11-13-闭环)。
 

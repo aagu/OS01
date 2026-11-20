@@ -7,6 +7,32 @@
 
 ## 2026-11-20
 
+- docs: **roadmap 全量瘦身 —— 只留未完成项，闭环历史归 changelog**：
+
+  **做了什么**
+  - `docs/roadmap.md` 按其自身声明的原则（只列未完成/进行中项）重写：删除顶部「当前状态」复盘、各节「已完成前置项 / 已完成基座」长段落、P2 架构治理（无剩余项）的闭环清单；「近期闭环索引」由 46 行全量精简为**最近 3 天**（2026-11-18 ~ 11-20，13 条）；新增「待办总览」表与按 P0~P5 的开放项清单。文档从 320 行降到 245 行，闭环历史统一由 `docs/changelog.md` 承载。
+  - 逐条按 master（`0cc1fae3`）源码核对开放项，删除/改写已过期结论：P1「ELF 分段 NX 细化」已由 `211dc290` 闭环 → 删行；P2「EL0 FP/SIMD」由 `734f67bc` 落地 FPEN + per-task 保存恢复 → 收窄为 PSTATE F 位掩码 / signal 帧 FP 区 / 缺运行时证据三项剩余；P3「libc / 可选 LVGL 能力」的 `fseek/ftell` 已随 T8/T9 落地 → 改写剩余为 `lseek` 归位、libm 归档、pthread 后端；P3「测试与 showcase 分离」的帧缓冲像素验收探针（`user/fb_pixel_test/` + `qemutests/fb_pixel_verify.py`，强制几何门槛 + 非零退出）已在位 → 删行。
+  - 补记三笔此前未入 changelog 的当日闭环：`734f67bc`（aarch64 硬件 FP/SIMD 放行）、`590b8dc5`（libc aarch64/x86_64 齐平，`libc_arch` facade + per-arch override）、`0cc1fae3`（libk.a 内核子集统一与审计基线）。
+  - 修正 12 处漂移行号：`mk/components/run.mk`（flake 报告 724→771-772、USB 默认值 1175→1228、六组循环 1270-1273→1324-1326）、`user/Makefile:79→85`、`mk/profiles/x86_64-clang.mk:177→180`、`kernel/arch/x86_64/fs/elf.c:357→376`、`kernel/arch/x86_64/intr/trap.c:1158-1163→1163-1171` 与 `1278-1283→1288-1296`、`kernel/arch/aarch64/intr/entry.S:63,91,107→61,89,105`、`kernel/arch/aarch64/intr/gic_driver.c:100-102→103-105`（`:73→76`、`:131-132→135`）、`kernel/arch/aarch64/head.S:191-215→52-53,63,70`、`boot/uefi/arch/aarch64/boot.c:460-461→462-463`。
+  - 连带修正：`docs/arch.md` §aarch64 用户态现状的「仍保留的边界 / 剩余差距」两行（原文「无 EL0 FP/SIMD 上下文、userland libc 完整度」已被后续提交覆盖）。`docs/superpowers/` 是只读归档区，本次**未做任何改动**：归档 spec 引用的 `#剩余架构治理任务` 锚点，通过在 roadmap 保留同名小节标题保住；归档报告引用的 `#启动编排治理五个-spec2026-11-07` 在清理前就不存在（旧 roadmap 中该文字是列表条目而非标题），属既有坏链，不在本次处理范围。
+
+  **验收**
+  - 三个只读核对 agent 逐条比对 master 源码：P1/P5 17 条断言 0 条已闭环（4 处行号漂移、2 处措辞不严谨）；P2 10 项中 1 项部分过期（EL0 FP/SIMD）；P0/P3/P4 12 项中 1 项已闭环（帧缓冲像素探针）、1 项子句过期（fseek/ftell）。
+  - 文档链接：`roadmap.md` 内全部相对链接与被引锚点（`#架构统一推进链迈向单一-kernel_main`、`#真机适配审计…`、`#-p3-gui`、`#剩余架构治理任务`、3 天索引内的 `#elf-分段叶子-nx-细化2026-11-20` 等）保持可达；`docs/superpowers/` 归档区零改动。
+- feat(libc): **统一 libk.a 内核子集与审计基线（x86_64 / aarch64 同一份）**（`0cc1fae3`）：
+
+  **做了什么**
+  - 移除 `libc/Makefile` 中 x86_64 / aarch64 的 `LIBK_C_SOURCES` 分裂：两架构构建**完全相同**的 32 对象 / 77 符号 freestanding 内核子集——新增 `stdlib/strtol.c`（x86_64 内核需要），且不含用户 syscall 包装或违反 aarch64 `-mgeneral-regs-only` 的浮点对象。
+  - `arch/x86_64/setjmp.o` 从 `ARCH_FREEOBJS` 移到 `ARCH_HOSTEDOBJS` → setjmp / longjmp 在两架构均为 userland-only。
+  - `scripts/audit_libc_api.py` 中按 profile 的 `LIBK_SUPPORTED` 收敛为单一架构中立基线，并同步 `docs/libc/libc.md`。
+
+- feat(libc): **aarch64 / x86_64 libc 齐平——arch facade + per-arch override 机制**（`590b8dc5`）：
+
+  **做了什么**
+  - 新增 `libc/include/libc_arch/{,x86_64,aarch64}/` facade + per-arch override 头（syscall、atomic、div、setjmp、float_abi），与内核 sysroot 的 `usr/include/arch/` 目录不重叠。
+  - 用 per-arch 汇编 override（`libc/arch/{x86_64,aarch64}/setjmp.S`，经 `arch/<arch>/make.config` 接线）替换 x86-only 的 `stdlib/setjmp.c`；aarch64 `jmp_buf` 扩到 22 槽（x19..x30、sp、d8..d15）。
+  - 经 float_abi facade 移植 floatscan / strtod / vsscanf：x86_64 保留硬件 x87 80-bit long double，aarch64 走硬件 binary64 + 纯整数 binary64→binary128 编码（消除对 soft-quad compiler-rt 的依赖）；移除全部 aarch64 `LIBC_C_SOURCES` 排除项，并修掉悬空的 sscanf → vsscanf 引用。
+
 - feat(mm): **ELF 分段 NX 细化（roadmap P1 安全加固）**——x86_64 ELF 装载器按 `p_flags` 落 W^X 叶策略，补齐 2026-11-13 VMA 级 NX 策略覆盖不到的 ELF 段叶子（`kernel/arch/x86_64/fs/elf.c`，`1613cdb7`；闭环记录 `docs/memory/cow-mmap.md` §ELF 分段叶子 NX 细化）：
 
   **做了什么**
@@ -33,7 +59,17 @@
   - `make test-host` EXIT=0；`make PROFILE=aarch64-clang test-aarch64-audit`（含 `intr-dispatch-audit` 与 `stack-frame-audit`）`PASS`。
 
   **已知边界**
-  - 任务终身固定单核亲和（不做运行期跨核迁移）；EL0 无 FP/SIMD 上下文；用户态进入/返回尚未纳入 `arch/context.h` 门面。
+  - 任务终身固定单核亲和（不做运行期跨核迁移）；EL0 FP/SIMD 已于本日更早的 `734f67bc` 放行（FPEN + per-task 保存恢复），但 PSTATE F 位仍掩码、signal 帧无 FP 区（见本日「开放 aarch64 硬件 FP/SIMD」条目）；用户态进入/返回尚未纳入 `arch/context.h` 门面。
+
+- feat(aarch64,libc): **开放 aarch64 硬件 FP/SIMD（用户态与 libc）**（`734f67bc`）：
+
+  **做了什么**
+  - 放行 EL0/EL1 的 FP/SIMD：EL1 侧 CPACR_EL1.FPEN=0b11（BSP `kernel/arch/aarch64/cpu/user_task.c`、AP `kernel/arch/aarch64/cpu/ap_sched.c`），EL2 侧 CPTR_EL2.TFP=0（`kernel/arch/aarch64/head.S`、`kernel/arch/aarch64/boot/secondary_entry.S`）。
+  - 新增 per-task FP 保存区与 `switch_to()` 保存 / 恢复（`kernel/arch/aarch64/cpu/fp_state.S`、新头 `kernel/include/arch/aarch64/fp.h`）。
+  - userland 不再 `-mgeneral-regs-only`（`user/Makefile`、`libc/arch/aarch64/make.config`、`mk/profiles/aarch64-clang.mk`），aarch64 侧 libc 浮点路径得以编译；新增 `user/test_fp.c` 冒烟。
+
+  **已知边界**
+  - EL0 任务 PSTATE 的 F 位仍掩码（`AARCH64_USER_TASK_PSTATE = 0x340`，bit4=0），且无 EC 0x2C/0x2D 陷入处理路径 → EL0 浮点指令仍会陷入；signal 帧（`struct aarch64_sigframe`，280 B）无 FP 保存区；`user/test_fp.c` 未接入构建与测试目录，无运行时证据。剩余项见 roadmap P2。
 
 - feat(gfx,gui,terminal): **损伤区域与批量 present（roadmap P3「脏矩形与批量提交」）**——通用 `GFX_PRESENT_RECTS` 批量 ABI + terminal/LVGL 双消费端迁移（spec `docs/superpowers/specs/2026-11-19-gfx-damage-batch-present-design.md`；8515a766..b98a0578）：
 
