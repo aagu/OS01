@@ -27,11 +27,19 @@ class UserBuildTest(unittest.TestCase):
         # fixture profile does not declare.
         (self.user / 'doom').mkdir(exist_ok=True)
         shutil.copy(ROOT / 'user' / 'doom' / 'engine.mk', self.user / 'doom' / 'engine.mk')
-        (self.user / 'crt0.S').write_text('.global _start\n_start: jmp _start\n')
-        (self.user / 'sigreturn_trampoline.S').write_text('.text\n')
-        (self.user / 'linker.ld').write_text('ENTRY(_start)\nSECTIONS { . = 0x400000; .text : { *(.text*) } .data : { *(.data*) } .bss : { *(.bss*) } }\n')
+        # 41f9cfcf moved the startup objects into the libc tree: user/Makefile
+        # links $(sysroot)/usr/lib/crt0.o and -T libc/arch/<arch>/user.ld, so
+        # the fixture mirrors that contract instead of the retired in-user
+        # crt0.S / linker.ld layout.  The link never executes here — a stub
+        # crt0 object and the real linker script satisfy the prerequisites.
         self.lib = self.root / 'sysroot/usr/lib'
         self.lib.mkdir(parents=True)
+        crt0_s = self.root / 'sysroot/crt0.S'
+        crt0_s.write_text('.text\n.global _start\n_start:\n  jmp _start\n')
+        subprocess.run(['clang', '-c', str(crt0_s), '-o', str(self.lib / 'crt0.o')], check=True)
+        libc_arch = self.root / 'libc/arch/x86_64'
+        libc_arch.mkdir(parents=True)
+        shutil.copy(ROOT / 'libc' / 'arch' / 'x86_64' / 'user.ld', libc_arch / 'user.ld')
         subprocess.run(['ar', 'rcs', str(self.lib / 'libc.a')], check=True)
         # user/Makefile also links the runtime link probe from
         # $(OS01_ROOT)/runtime/selftest/ and expects the root build to hand it

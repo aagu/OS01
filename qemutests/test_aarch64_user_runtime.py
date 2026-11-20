@@ -66,15 +66,18 @@ def _good_smp_trace():
 
 
 def _good_product_trace():
+    # Busybox ash shape (2026-11-21): banner once per interactive process
+    # with a build timestamp, "# " root prompt (FEATURE_EDITING_FANCY_PROMPT
+    # off + geteuid()==0), prompt+echoed-input merged into one line.
     return (
         "[INFO] [boot-5] init-created pid=1\n"
         "[INFO] init: inittab loaded\n"
-        "OS01 Shell\n"
-        "$ echo hi\n"
+        "BusyBox v1.36.1 (2026-11-21 00:00:00 CST) built-in shell (ash)\n"
+        "# echo hi\n"
         "hi\n"
-        "$ exit\n"
-        "OS01 Shell\n"
-        "$ "
+        "# exit\n"
+        "BusyBox v1.36.1 (2026-11-21 00:00:00 CST) built-in shell (ash)\n"
+        "# "
     )
 
 

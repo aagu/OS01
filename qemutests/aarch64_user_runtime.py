@@ -243,20 +243,25 @@ def parse_product_boot_evidence(text, check_shell_io=False):
         errors.append("missing PID 1 creation marker (init-created pid=1)")
     if not any("init: phase SYSINIT" in line or "inittab" in line for line in lines):
         errors.append("missing inittab marker (init: phase SYSINIT)")
-    banner_count = sum(1 for line in lines if "OS01 Shell" in line)
-    if banner_count < 1:
-        errors.append("missing OS01 Shell banner")
-    prompt_count = sum(1 for line in lines if "$ " in line)
+    # BusyBox ash (2026-11-21: /bin/sh became the busybox multicall copy)
+    # prints its banner once per interactive process: "BusyBox v1.36.1
+    # (<build timestamp>) built-in shell (ash)" — match the timestamp-free
+    # suffix.  The prompt is "# " because OS01 userland runs as uid 0 and
+    # FEATURE_EDITING_FANCY_PROMPT is off (ash.c: geteuid()==0 → PS1="# ").
+    ash_banner_count = sum(1 for line in lines if "built-in shell (ash)" in line)
+    if ash_banner_count < 1:
+        errors.append("missing busybox ash banner")
+    prompt_count = sum(1 for line in lines if "# " in line)
     if prompt_count < 1:
-        errors.append("missing initial '$ ' prompt")
+        errors.append("missing initial '# ' prompt")
 
     if check_shell_io:
         if not any(line.strip() == "hi" for line in lines):
             errors.append("missing standalone 'hi' output line from echo hi")
-        if banner_count < 2:
-            errors.append(f"expected respawned OS01 Shell banner after exit, got {banner_count}")
+        if ash_banner_count < 2:
+            errors.append(f"expected respawned busybox ash banner after exit, got {ash_banner_count}")
         if prompt_count < 2:
-            errors.append(f"expected second '$ ' prompt after exit, got {prompt_count}")
+            errors.append(f"expected second '# ' prompt after exit, got {prompt_count}")
 
     return len(errors) == 0, errors
 
@@ -368,8 +373,14 @@ def _run_product_cpu(args, cpus, archive, run_dir, budget, drain, dtb_factory):
                 lambda text: any(l.strip() == "hi" for l in text.splitlines())
             )
             session.send(b"exit\n")
+            # Respawn evidence: init's RESPAWN loop restarts terminal, which
+            # execs a fresh busybox ash printing the banner again.  wait_for
+            # predicates see only the post-cursor text slice (the first
+            # banner is already behind the cursor), so one more banner in
+            # the slice is the respawn; the final parse still requires two
+            # banners plus two prompts over the whole transcript.
             session.wait_for(
-                lambda text: "OS01 Shell" in text and "$ " in text
+                lambda text: text.count("built-in shell (ash)") >= 1
             )
         session.observe(drain)
         child_exited_before_runner_stop = session.returncode is not None
