@@ -754,8 +754,12 @@ make regen-test-catalog    # 重新生成并写回
 make check-test-catalog    # 漂移门禁：生成物与源不一致即失败
 ```
 
-> **缺口（如实记录）**：`check-test-catalog` **尚未挂进 `.github/workflows/ci.yml`**——
-> CI 目前只跑 `make check-ci-schedule` 与 `make test-harness`。见 `docs/roadmap.md` P0。
+CI 的 `harness` job 独立运行 `make check-test-catalog`；日程漂移检查由
+`make test-harness` 的 `check-ci-schedule` 先决目标执行。
+
+栈帧框架单测使用固定样本，不读取工作区里已有的内核 ELF。实际栈帧上限由
+x86_64 的 `make test-static` 和 AArch64 的
+`make PROFILE=aarch64-clang test-aarch64-audit` 构建并审计对应产物。
 
 **六处并行维护已收敛为单一源**：SUITE 白名单原先同时维护在 `run.mk` 的 `case` 语句、
 `TEST_QEMU_FLAVOR` 表、`TEST_QEMU_IMG` 表、`catalog.mk` TSV、`ci.yml`、

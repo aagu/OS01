@@ -169,7 +169,7 @@ OS01 实行多层防护策略，每一层有明确的证明目标与局限性，
 改动目录应使漂移检查失败）。
 
 > **已闭环（2026-11-17）**：`check-test-catalog` 已挂进 `.github/workflows/ci.yml` 的
-> `harness` job（与 `make check-ci-schedule` 并列），目录漂移在 PR 阶段即暴露，不再依赖本地
+> `harness` job，目录漂移在 PR 阶段即暴露，不再依赖本地
 > `make regen-test-catalog` 自觉。接线由 `tools/tests/check_ci_schedule.py` 规则 2b 反向守护：
 > harness job 缺 `make check-test-catalog` 即判定漂移。
 >
@@ -216,4 +216,4 @@ parse-time 校验，缺失生成片段即硬错误。
 - 严格 suite 失败即快速失败；宽容集合被精确圈定并指向 flake 账本
   （CI 以 `::warning::` 提示记录到 `make test-flake-report`）。
 - 计时分类默认严格，宽容白名单是**封闭**的。
-- `make check-ci-schedule` 取代了原先文本钉死的 `ci.yml` 契约检查。
+- `make test-harness` 通过先决目标 `check-ci-schedule` 验证 `ci.yml`；CI 不再单独重复执行。

@@ -3,11 +3,13 @@
 
 from __future__ import annotations
 
+import contextlib
 import io
 from pathlib import Path
 import sys
 import tempfile
 import unittest
+from unittest import mock
 
 TEST_MANIFEST = {
     "id": "test_stack_frame_audit",
@@ -130,26 +132,56 @@ ffff000040080060: d65f03c0     	ret
         self.assertGreaterEqual(sfa.BASELINE_EXCEPTIONS["pmm_init"], 1760)
         self.assertGreaterEqual(sfa.BASELINE_EXCEPTIONS["aarch64_early_arena_preflight"], 1568)
 
-    def test_real_elf_audit_when_available(self) -> None:
-        arm_elf = ROOT / "build" / "aarch64-clang" / "kernel" / "kernel.elf"
-        if arm_elf.is_file():
-            sizes = sfa.parse_stack_sizes(arm_elf, "llvm-objdump")
-            self.assertGreater(len(sizes), 50)
-            self.assertEqual(sizes.get("pmm_init"), 1760)
-            self.assertEqual(sizes.get("aarch64_early_arena_preflight"), 1568)
-            for func, size in sizes.items():
-                if size > 512:
-                    self.assertIn(func, sfa.BASELINE_EXCEPTIONS)
-                    self.assertLessEqual(size, sfa.BASELINE_EXCEPTIONS[func])
 
-        x86_elf = ROOT / "build" / "x86_64-clang" / "kernel" / "kernel.elf"
-        if x86_elf.is_file():
-            sizes = sfa.parse_stack_sizes(x86_elf, "llvm-objdump")
-            self.assertGreater(len(sizes), 100)
-            for func, size in sizes.items():
-                if size > 512:
-                    self.assertIn(func, sfa.BASELINE_EXCEPTIONS)
-                    self.assertLessEqual(size, sfa.BASELINE_EXCEPTIONS[func])
+class StackFrameAuditPolicyTests(unittest.TestCase):
+    def test_audit_only_reads_the_explicit_elf(self) -> None:
+        with tempfile.TemporaryDirectory() as tmpdir:
+            elf = Path(tmpdir) / "missing.elf"
+            args = ["stack_frame_audit.py", "--elf", str(elf)]
+            stderr = io.StringIO()
+            with (
+                mock.patch.object(sys, "argv", args),
+                mock.patch.object(sfa, "parse_stack_sizes") as parse_sizes,
+                contextlib.redirect_stderr(stderr),
+                self.assertRaises(SystemExit) as error,
+            ):
+                sfa.main()
+            self.assertEqual(error.exception.code, 1)
+            self.assertIn(f"ELF file not found: {elf}", stderr.getvalue())
+            parse_sizes.assert_not_called()
+
+    def test_audit_enforces_limit_and_baseline(self) -> None:
+        cases = (
+            ({"small": 512, "pmm_init": 1760}, False, None),
+            ({"oversized": 513}, False, "not in baseline"),
+            ({"pmm_init": 1761}, False, "regression in 'pmm_init'"),
+            ({"pmm_init": 513}, True, "exceeds 512B limit"),
+            ({}, False, "no function stack frames extracted"),
+        )
+        with tempfile.TemporaryDirectory() as tmpdir:
+            elf = Path(tmpdir) / "explicit.elf"
+            elf.touch()
+            for sizes, strict, failure in cases:
+                with self.subTest(sizes=sizes, strict=strict):
+                    args = ["stack_frame_audit.py", "--elf", str(elf)]
+                    if strict:
+                        args.append("--strict")
+                    stdout, stderr = io.StringIO(), io.StringIO()
+                    with (
+                        mock.patch.object(sys, "argv", args),
+                        mock.patch.object(sfa, "parse_stack_sizes", return_value=sizes) as parse_sizes,
+                        contextlib.redirect_stdout(stdout),
+                        contextlib.redirect_stderr(stderr),
+                    ):
+                        if failure is None:
+                            self.assertEqual(sfa.main(), 0)
+                            self.assertIn("1 baseline exceptions tracked, 0 new violations", stdout.getvalue())
+                        else:
+                            with self.assertRaises(SystemExit) as error:
+                                sfa.main()
+                            self.assertEqual(error.exception.code, 1)
+                            self.assertIn(failure, stderr.getvalue())
+                    parse_sizes.assert_called_once_with(elf, "llvm-objdump")
 
 
 if __name__ == "__main__":

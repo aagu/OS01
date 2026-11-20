@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -38,6 +39,26 @@ class CiScheduleCheckTests(unittest.TestCase):
         import check_ci_schedule
 
         self.assertEqual(check_ci_schedule.main(ROOT), 0)
+
+    def test_harness_runs_ci_schedule_gate_once(self):
+        import check_ci_schedule
+
+        ci_text = (ROOT / ".github" / "workflows" / "ci.yml").read_text(encoding="utf-8")
+        direct_checks = [
+            line
+            for step in check_ci_schedule._parse_ci_steps(ci_text)
+            if step["job"] == "harness"
+            for line in step["lines"]
+            if "check-ci-schedule" in line.split() and not line.lstrip().startswith("#")
+        ]
+        self.assertEqual(direct_checks, [])
+
+        result = subprocess.run(
+            ["make", "--no-print-directory", "-n", "PROFILE=x86_64-clang",
+             "MAKE=true", "test-harness"],
+            cwd=ROOT, capture_output=True, text=True, timeout=30, check=True,
+        )
+        self.assertEqual(result.stdout.count("python3 tools/tests/check_ci_schedule.py "), 1)
 
     def test_missing_nightly_suite_fails(self):
         import check_ci_schedule

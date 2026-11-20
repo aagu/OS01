@@ -84,9 +84,6 @@ jobs:
           git config --global --add safe.directory "$GITHUB_WORKSPACE"
           git submodule foreach --recursive --quiet 'git config --global --add safe.directory "$sm_path"'
 
-      - name: CI schedule drift check
-        run: make check-ci-schedule
-
       - name: Generated-catalog drift check
         # Byte-level guard on config/ and mk/generated/ (the harness modules
         # only compare semantics).  Keeps `make regen-test-catalog` from

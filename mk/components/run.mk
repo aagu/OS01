@@ -1588,7 +1588,7 @@ endef
 
 STATIC_AUDIT_ARG_syscall-boundary = python3 qemutests/syscall_boundary_audit.py
 STATIC_AUDIT_ARG_header-object-audit = python3 qemutests/header_object_audit.py --include-dir "kernel/include" --sysroot "$(SYSROOT)" --runtime-inc "runtime/include" --llvm-nm "$(LLVM_NM)" --clang "$(CLANG)"
-STATIC_AUDIT_ARG_stack-frame-audit = python3 qemutests/stack_frame_audit.py --elf "$(if $(wildcard $(BUILD_DIR)/artifacts/kernel.elf),$(BUILD_DIR)/artifacts/kernel.elf,$(KERNEL_BUILD_DIR)/kernel.elf)" --llvm-objdump "$(or $(LLVM_OBJDUMP),$(AARCH64_OBJDUMP),llvm-objdump)" --limit 512
+STATIC_AUDIT_ARG_stack-frame-audit = python3 qemutests/stack_frame_audit.py --elf "$(KERNEL_BUILD_DIR)/kernel.elf" --llvm-objdump "$(or $(LLVM_OBJDUMP),$(AARCH64_OBJDUMP),llvm-objdump)" --limit 512
 STATIC_AUDIT_ARG_driver-model-boundary = python3 qemutests/driver_model_boundary_audit.py
 STATIC_AUDIT_ARG_gui-build-audit = python3 qemutests/gui_build_audit.py --sysroot "$(SYSROOT)" --build-dir "$(BUILD_DIR)" --repo-root "$(OS01_ROOT)" --profile "$(PROFILE)"
 STATIC_AUDIT_ARG_intr-dispatch-audit = python3 qemutests/intr_dispatch_audit.py --profile "$(PROFILE)" --elf "$(KERNEL_BUILD_DIR)/kernel.elf" --llvm-nm "$(LLVM_NM)" --llvm-objdump "$(LLVM_OBJDUMP)" --repo-root "$(OS01_ROOT)"
