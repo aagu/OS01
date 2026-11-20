@@ -12,7 +12,9 @@
 #include <unistd.h>
 #include <test_framework.h>
 
+#include "fb_mode_fixture.h"
 #include "fb_resolution_runtime.h"
+#include <core/printk.h>
 #include <uapi/fb.h>
 #include <driver/fb_state.h>
 #include <driver/fb_cache.h>
@@ -428,37 +430,31 @@ TEST_FUNC(test_checked_map_success)
     CHECK_TRUE(g_mock_tlb_shootdown_count > 0 || g_mock_flush_tlb_count > 0);
 }
 
-/* ── Test 10: Test hook set_generation ── */
-TEST_FUNC(test_test_set_generation_hook)
+TEST_FUNC(test_mode_change_advances_generation)
 {
     fb_resolution_runtime_reset();
+    spin_init(&Pos.lock);
 
     struct fb_info info = make_default_info();
-    uint64_t gop_size = 1024 * 768 * 4;
-    fb_bootstrap_state(0xe0000000ULL, gop_size, &info);
-    fb_publish_initial_mapping((uint32_t *)0xffff80003f000000ULL, gop_size);
+    static uint32_t framebuffer[1024 * 768];
+    const struct fb_set_mode_req mode = { .width = 800, .height = 600, .bpp = 32 };
+    fb_bootstrap_state(0xe0000000ULL, sizeof(framebuffer), &info);
+    CHECK_EQ(0, fb_mode_fixture_install(framebuffer, sizeof(framebuffer), &mode, 1));
 
-    /* Initial generation is 1 */
-    fb_snapshot_t snap;
-    int rc = fb_snapshot_read(&snap);
-    CHECK_EQ(0, rc);
-    CHECK_EQ(1, snap.state.generation);
+    fb_snapshot_t before = {0}, after = {0};
+    CHECK_EQ(0, fb_snapshot_read(&before));
+    CHECK_EQ(1, before.state.generation);
+    CHECK_EQ(0, fb_set_mode(&mode));
+    CHECK_EQ(0, fb_snapshot_read(&after));
+    CHECK_EQ(mode.width, after.state.info.width);
+    CHECK_EQ(mode.height, after.state.info.height);
+    CHECK_EQ(before.state.generation + 1, after.state.generation);
 
-    /* Use test hook to advance generation to 42 */
-    fb_state__test_set_generation(42);
-
-    rc = fb_snapshot_read(&snap);
-    CHECK_EQ(0, rc);
-    CHECK_EQ(42, snap.state.generation);
-
-    /* Old generation 1 is now rejected with -ESTALE */
     fb_lease_t lease = {0};
-    rc = fb_writer_begin(&lease, 1);
-    CHECK_EQ(-ESTALE, rc);
-
-    /* Generation 42 is accepted */
-    rc = fb_writer_begin(&lease, 42);
-    CHECK_EQ(0, rc);
+    CHECK_EQ(-ESTALE, fb_writer_begin(&lease, before.state.generation));
+    CHECK_TRUE(!lease.held);
+    fb_writer_end(&lease);
+    CHECK_EQ(0, fb_writer_begin(&lease, after.state.generation));
     CHECK_TRUE(lease.held);
     fb_writer_end(&lease);
 }
@@ -725,7 +721,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_checked_map_allocation_failure_and_rollback),
     TEST_ENTRY(test_checked_map_corrupted_phys_and_rollback),
     TEST_ENTRY(test_checked_map_success),
-    TEST_ENTRY(test_test_set_generation_hook),
+    TEST_ENTRY(test_mode_change_advances_generation),
     TEST_ENTRY(test_fb_cache_policy_wb_leaf_bits),
     TEST_ENTRY(test_fb_cache_policy_uc_leaf_bits),
     TEST_ENTRY(test_fb_cache_policy_rollback_preserves_attributes),

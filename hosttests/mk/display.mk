@@ -303,6 +303,10 @@ $(TEST_BLD)/fb_resolution_runtime.o: $(TEST_MOCK)/fb_resolution_runtime.c $(TEST
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) -DOS01_HOST_TEST -I$(TEST_MOCK) $(KERNEL_INC) -I$(TEST_INC) -c $< -o $@
 
+$(TEST_BLD)/fb_mode_fixture.o: $(TEST_MOCK)/fb_mode_fixture.c
+	@mkdir -p $(dir $@)
+	$(HOST_CC) $(FB_STATE_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
 $(TEST_BLD)/fb_state.o: $(TESTS_DIR)/kernel/driver/fb_state.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FB_STATE_HOST_CFLAGS) -c $< -o $@
@@ -311,11 +315,11 @@ $(TEST_BLD)/fb_map.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/fb_map.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FB_STATE_HOST_CFLAGS) -c $< -o $@
 
-$(TEST_BLD)/test_fb_state.o: $(TEST_CASES)/test_fb_state.c
+$(TEST_BLD)/test_fb_state.o: $(TEST_CASES)/test_fb_state.c $(TEST_MOCK)/fb_mode_fixture.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FB_STATE_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
 
-$(TEST_BLD)/test_fb_state.elf: $(TEST_BLD)/test_fb_state.o $(TEST_BLD)/fb_state.o $(TEST_BLD)/fb_map.o $(TEST_BLD)/fb_resolution_runtime.o
+$(TEST_BLD)/test_fb_state.elf: $(TEST_BLD)/test_fb_state.o $(TEST_BLD)/fb_state.o $(TEST_BLD)/fb_map.o $(TEST_BLD)/fb_resolution_runtime.o $(TEST_BLD)/fb_mode_fixture.o
 	$(HOST_CC) -lpthread -o $@ $^
 
 test-fb-state: $(TEST_BLD)/test_fb_state.elf
@@ -367,11 +371,12 @@ $(TEST_BLD)/console_production.o: $(TESTS_DIR)/kernel/tty/console.c
 	$(HOST_CC) $(FB_WRITERS_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_fb_writers.o: $(TEST_CASES)/test_fb_writers.c \
+		$(TEST_MOCK)/fb_mode_fixture.h \
 		$(TESTS_DIR)/kernel/include/arch/fb_copy.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(FB_WRITERS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
 
-$(TEST_BLD)/test_fb_writers.elf: $(TEST_BLD)/test_fb_writers.o $(TEST_BLD)/fb_state.o $(TEST_BLD)/fb_map.o $(TEST_BLD)/fb_resolution_runtime.o $(TEST_BLD)/gfx_production.o $(TEST_BLD)/fb_production.o $(TEST_BLD)/fb_copy_production.o $(TEST_BLD)/console_production.o
+$(TEST_BLD)/test_fb_writers.elf: $(TEST_BLD)/test_fb_writers.o $(TEST_BLD)/fb_state.o $(TEST_BLD)/fb_map.o $(TEST_BLD)/fb_resolution_runtime.o $(TEST_BLD)/fb_mode_fixture.o $(TEST_BLD)/gfx_production.o $(TEST_BLD)/fb_production.o $(TEST_BLD)/fb_copy_production.o $(TEST_BLD)/console_production.o
 	$(HOST_CC) -lpthread -o $@ $^
 
 test-fb-writers: $(TEST_BLD)/test_fb_writers.elf

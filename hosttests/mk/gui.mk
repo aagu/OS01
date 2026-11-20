@@ -712,6 +712,7 @@ $(TEST_BLD)/test_gfx_input.o: $(TEST_CASES)/test_gfx_input.c \
 		$(TESTS_DIR)/kernel/include/driver/fb_state.h \
 		$(TESTS_DIR)/kernel/include/driver/input_route.h \
 		$(TESTS_DIR)/libgfx/gfx.h \
+		$(TEST_MOCK)/fb_mode_fixture.h \
 		$(TEST_MOCK)/fb_resolution_runtime.h \
 		$(TEST_INC)/test_framework.h
 	@mkdir -p $(TEST_BLD)
@@ -722,6 +723,7 @@ $(TEST_BLD)/test_gfx_input.elf: $(TEST_BLD)/test_gfx_input.o \
 		$(TEST_BLD)/fb_state.o \
 		$(TEST_BLD)/fb_map.o \
 		$(TEST_BLD)/fb_resolution_runtime.o \
+		$(TEST_BLD)/fb_mode_fixture.o \
 		$(TEST_BLD)/input_route_production.o \
 		$(TEST_BLD)/input_route_runtime.o \
 		$(TEST_BLD)/input_ps2_production.o \

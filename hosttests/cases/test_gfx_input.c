@@ -38,6 +38,7 @@
  */
 
 #include "test_framework.h"
+#include "fb_mode_fixture.h"
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
@@ -567,11 +568,11 @@ TEST_FUNC(test_bind_input_estale_on_an_old_view)
 {
     TEST_SUITE("gfx bind UAPI: ESTALE for an old view");
     setup_env();
+    const struct fb_set_mode_req mode = { .width = 800, .height = 600, .bpp = 32 };
+    assert_eq(0, fb_mode_fixture_install(g_fake_vram, sizeof(g_fake_vram), &mode, 1));
     acquire_ownership();
 
-    /* The display generation moved on: the view's mode sequence is
-     * stale, so the bind must be refused. */
-    fb_state__test_set_generation(99);
+    assert_eq(0, fb_set_mode(&mode));
 
     gfx_bind_input_t out;
     assert_eq(-ESTALE, do_bind(FD_KBD, FD_MOUSE, &out));

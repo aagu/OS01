@@ -732,15 +732,6 @@ int fb_set_mode(const struct fb_set_mode_req *req)
     }
 }
 
-#ifdef OS01_HOST_TEST
-void fb_state__test_set_generation(uint64_t generation)
-{
-    uint64_t flags = spin_lock_irqsave(&display_state_lock);
-    g_fb_state.generation = generation;
-    spin_unlock_irqrestore(&display_state_lock, flags);
-}
-#endif
-
 int fb_gfx_writer_begin(fb_lease_t *lease, uint64_t mode_seq, const void *cookie)
 {
     if (!lease) {

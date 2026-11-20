@@ -14,6 +14,7 @@
 #include <setjmp.h>
 #include <test_framework.h>
 
+#include "fb_mode_fixture.h"
 #include "fb_resolution_runtime.h"
 #include <uapi/fb.h>
 #include <uapi/gfx.h>
@@ -374,6 +375,11 @@ static void test_view_aba_stale(void)
 {
     printf("\n--- test_view_aba_stale ---\n");
     setup_test_environment();
+    const struct fb_set_mode_req modes[] = {
+        { .width = TEST_FB_WIDTH / 2, .height = TEST_FB_HEIGHT / 2, .bpp = 32 },
+        { .width = TEST_FB_WIDTH, .height = TEST_FB_HEIGHT, .bpp = 32 },
+    };
+    CHECK_EQ(0, fb_mode_fixture_install(g_test_vram, sizeof(g_test_vram), modes, 2));
     gfx_init();
 
     file_t *f = NULL;
@@ -392,12 +398,15 @@ static void test_view_aba_stale(void)
     rc = gfx_ops.ioctl_file(f, GFX_ACQUIRE, (void *)(uintptr_t)0);
     CHECK_EQ(0, rc);
 
-    /* View was created at generation 1 */
-    /* Now publish two mode changes: ABA back to same dimensions */
-    /* Change 1: generation becomes 2 */
-    fb_state__test_set_generation(2);
-    /* Change 2: generation becomes 3, dimensions identical */
-    fb_state__test_set_generation(3);
+    struct fb_state before = {0}, after = {0};
+    CHECK_EQ(0, fb_get_state(&before));
+    CHECK_EQ(0, fb_set_mode(&modes[0]));
+    CHECK_EQ(0, fb_set_mode(&modes[1]));
+    CHECK_EQ(0, fb_get_state(&after));
+    CHECK_EQ(before.generation + 2, after.generation);
+    CHECK_EQ(before.info.width, after.info.width);
+    CHECK_EQ(before.info.height, after.info.height);
+    memset(g_test_vram, 0x55, sizeof(g_test_vram));
 
     uint32_t pixel_val = 0x12345678;
     uint32_t fake_pixels[32 * 4];

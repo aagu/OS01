@@ -115,8 +115,4 @@ int  fb_input_bind(const void *view, uint64_t expected_mode,
                    uint64_t *generation, uint32_t *initial_modifiers);
 void fb_input_unbind(const void *view, uint64_t generation, int reason);
 
-#ifdef OS01_HOST_TEST
-void fb_state__test_set_generation(uint64_t generation);
-#endif
-
 #endif /* _DRIVER_FB_STATE_H */
