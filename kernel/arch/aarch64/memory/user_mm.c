@@ -222,13 +222,11 @@ int aarch64_user_mm_destroy(mm_t *mm)
     if (user_vm_has_metadata(mm))
         return -EBUSY;
 
-    /* Scan passed: invalidate translations first, then unpublish/unregister,
-     * reclaim page tables, and return the ASID tag. */
+    /* Scan passed: invalidate translations first (with no locks held),
+     * then unregister, reclaim page tables, and return the ASID tag
+     * last. */
     uint8_t asid = rec->asid;
-    if (asid != 0)
-        aarch64_asid_release(asid);
-    else
-        aarch64_asid_tlbi(0);
+    aarch64_asid_tlbi(asid);
 
     daif = spin_lock_irqsave(&user_mm_records_lock);
     user_mm_record_t **p = &user_mm_records;
@@ -243,6 +241,7 @@ int aarch64_user_mm_destroy(mm_t *mm)
     user_mm_free_tables(root, 0);
 
     kfree(mm);
+    aarch64_asid_release_quiesced(asid);
     return 0;
 }
 

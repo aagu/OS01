@@ -53,6 +53,9 @@ __attribute__((weak)) void aarch64_asid_tlbi(uint8_t asid)
 #else
     (void)asid;
 #endif
+#ifdef AARCH64_USER_RUNTIME_TEST
+    aarch64_user_runtime_test_note_asid_tlbi(asid);
+#endif
 }
 
 uint8_t aarch64_asid_alloc(void)
@@ -74,6 +77,19 @@ uint8_t aarch64_asid_alloc(void)
     return 0;
 }
 
+void aarch64_asid_release_quiesced(uint8_t asid)
+{
+    if (asid == 0)
+        return;
+
+    uint64_t daif = spin_lock_irqsave(&g_asid_lock);
+    asid_clear_locked(asid);
+    spin_unlock_irqrestore(&g_asid_lock, daif);
+#ifdef AARCH64_USER_RUNTIME_TEST
+    aarch64_user_runtime_test_note_asid_release(asid);
+#endif
+}
+
 void aarch64_asid_release(uint8_t asid)
 {
     if (asid == 0)
@@ -87,14 +103,5 @@ void aarch64_asid_release(uint8_t asid)
 
     /* Slot remains occupied in g_asid_bitmap until TLBI completes. */
     aarch64_asid_tlbi(asid);
-#ifdef AARCH64_USER_RUNTIME_TEST
-    aarch64_user_runtime_test_note_asid_tlbi(asid);
-#endif
-
-    daif = spin_lock_irqsave(&g_asid_lock);
-    asid_clear_locked(asid);
-    spin_unlock_irqrestore(&g_asid_lock, daif);
-#ifdef AARCH64_USER_RUNTIME_TEST
-    aarch64_user_runtime_test_note_asid_release(asid);
-#endif
+    aarch64_asid_release_quiesced(asid);
 }

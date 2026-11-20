@@ -19,6 +19,10 @@ uint8_t aarch64_asid_alloc(void);
  * ASID and return the tag to the pool.  Tag 0 is a no-op. */
 void aarch64_asid_release(uint8_t asid);
 
+/* Return a non-zero ASID tag to the pool after the caller has already
+ * completed aarch64_asid_tlbi(asid), unregistered, and reclaimed tables. */
+void aarch64_asid_release_quiesced(uint8_t asid);
+
 /* Perform inner-shareable ASID TLB invalidation for `asid` (or full
  * VMALL invalidation if `asid == 0`).  Weak symbol so host tests can
  * observe the pre-reclaim window. */
