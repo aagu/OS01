@@ -50,7 +50,12 @@ CONFIG_STATIC=y
 CONFIG_CROSS_COMPILER_PREFIX=""
 CONFIG_SYSROOT=""
 CONFIG_EXTRA_CFLAGS="-nostdinc -DHAVE_GETLINE=1 -I../../libc/include -I../../kernel/include -isystem@TARGET_INCLUDEDIR@ -isystem@CLANG_RESOURCE_DIR@/include -fstack-protector-strong"
-CONFIG_EXTRA_LDFLAGS="-static -nostartfiles -L@TARGET_LIBDIR@ @TARGET_LIBDIR@/crt0.o -lc -Wl,-T,@TARGET_LINKERSCRIPT@"
+# -Wl,crt0.o form is deliberate: busybox's scripts/Makefile.lib feeds
+# LDFLAGS/EXTRA_LDFLAGS (minus -Wl, items) to every intermediate `ld -r`
+# (built-in.o/lib.a), so a bare object path would be swallowed into each
+# relocatable and duplicate _start; -Wl, items are filtered out there and
+# reach only the final driver link.
+CONFIG_EXTRA_LDFLAGS="-static -nostartfiles -L@TARGET_LIBDIR@ -lc -Wl,@TARGET_LIBDIR@/crt0.o -Wl,-T,@TARGET_LINKERSCRIPT@"
 CONFIG_EXTRA_LDLIBS=""
 # CONFIG_USE_PORTABLE_CODE is not set
 # CONFIG_STACK_OPTIMIZATION_386 is not set
