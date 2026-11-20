@@ -225,9 +225,18 @@ static psf2_t g_test_font = {
 };
 psf2_t *font = &g_test_font;
 
+static struct {
+    unsigned count;
+    int col;
+    int row;
+} g_glyph;
+
 void putchar_at_snap(const struct fb_snapshot *snap, int col, int row, unsigned int FRcolor, unsigned int BKcolor, unsigned char c)
 {
-    (void)snap; (void)col; (void)row; (void)FRcolor; (void)BKcolor; (void)c;
+    (void)snap; (void)FRcolor; (void)BKcolor; (void)c;
+    g_glyph.count++;
+    g_glyph.col = col;
+    g_glyph.row = row;
 }
 
 void putchar_at(int col, int row, unsigned int FRcolor, unsigned int BKcolor, unsigned char c)
@@ -272,18 +281,13 @@ int color_printk(unsigned int FRcolor, unsigned int BKcolor, const char *fmt, ..
     return i;
 }
 
-/* ── Console cursors access helper ── */
-#ifdef OS01_HOST_TEST
-void console__test_get_cursors(int *row, int *col, int32_t *pos_x, int32_t *pos_y);
-void console__test_set_cursors(int row, int col, int32_t pos_x, int32_t pos_y);
-#endif
-
 static void setup_test_environment(void)
 {
     fb_resolution_runtime_reset();
     spin_init(&Pos.lock);
     spin_init(&serial_lock);
     reset_serial_capture();
+    g_glyph.count = 0;
 
     memset(g_test_vram, 0x55, sizeof(g_test_vram));
     g_installed_count = 0;
@@ -434,10 +438,13 @@ static void test_console_transition_serial_only(void)
 {
     printf("\n--- test_console_transition_serial_only ---\n");
     setup_test_environment();
+    Pos.XPosition = 2;
+    Pos.YPosition = 1;
     console_init();
-
-    /* Set cursor to known location */
-    console__test_set_cursors(5, 10, 10, 5);
+    console_putchar('A');
+    CHECK_EQ(1, g_glyph.count);
+    CHECK_EQ(0, g_glyph.col);
+    CHECK_EQ(2, g_glyph.row);
 
     /* Put system into transitioning state */
     int rc = fb_transition_begin(true);
@@ -449,6 +456,7 @@ static void test_console_transition_serial_only(void)
     /* Serial must still receive output */
     CHECK_EQ(1, g_serial_pos);
     CHECK_EQ('Z', g_serial_buf[0]);
+    CHECK_EQ(1, g_glyph.count);
 
     /* Also test color_printk fallback during transition */
     reset_serial_capture();
@@ -456,22 +464,20 @@ static void test_console_transition_serial_only(void)
     CHECK_TRUE(printed > 0);
     CHECK_TRUE(strstr(g_serial_buf, "TransMsg\n") != NULL);
 
-    /* Cursors and Pos positions must STILL remain untouched */
-    int row = -1, col = -1;
-    int32_t pos_x = -1, pos_y = -1;
-    console__test_get_cursors(&row, &col, &pos_x, &pos_y);
-    CHECK_EQ(5, row);
-    CHECK_EQ(10, col);
-    CHECK_EQ(10, pos_x);
-    CHECK_EQ(5, pos_y);
+    CHECK_EQ(2, Pos.XPosition);
+    CHECK_EQ(1, Pos.YPosition);
 
     fb_transition_end();
+    console_putchar('B');
+    CHECK_EQ(2, g_glyph.count);
+    CHECK_EQ(1, g_glyph.col);
+    CHECK_EQ(2, g_glyph.row);
 
     /* After transition ends, color_printk succeeds and advances YPosition */
     reset_serial_capture();
     printed = color_printk(0x00ffffff, 0x00000000, "NormMsg\n");
     CHECK_TRUE(printed > 0);
-    CHECK_EQ(6, Pos.YPosition);
+    CHECK_EQ(2, Pos.YPosition);
 }
 
 /* ── Step 1 Test 4: test_mmap_partial_failure ── */
@@ -665,19 +671,25 @@ static void test_write_row_leased_and_resize(void)
     rc = fb_write_row_leased(&lease, 0, 0, row_data, 16 * 4);
     CHECK_EQ(-EINVAL, rc);
 
-    /* console_notify_resize_locked resets cursors */
-    Pos.XPosition = 12;
-    Pos.YPosition = 8;
-    console__test_set_cursors(8, 12, 12, 8);
-    console_notify_resize_locked();
+    Pos.XPosition = 2;
+    Pos.YPosition = 1;
+    console_init();
+    console_putchar('A');
+    CHECK_EQ(1, g_glyph.count);
+    CHECK_EQ(0, g_glyph.col);
+    CHECK_EQ(2, g_glyph.row);
 
-    int row = -1, col = -1;
-    int32_t pos_x = -1, pos_y = -1;
-    console__test_get_cursors(&row, &col, &pos_x, &pos_y);
-    CHECK_EQ(0, row);
-    CHECK_EQ(0, col);
-    CHECK_EQ(0, pos_x);
-    CHECK_EQ(0, pos_y);
+    const struct fb_set_mode_req mode = {
+        .width = TEST_FB_WIDTH / 2, .height = TEST_FB_HEIGHT, .bpp = 32,
+    };
+    CHECK_EQ(0, fb_mode_fixture_install(g_test_vram, sizeof(g_test_vram), &mode, 1));
+    CHECK_EQ(0, fb_set_mode(&mode));
+    CHECK_EQ(0, Pos.XPosition);
+    CHECK_EQ(0, Pos.YPosition);
+    console_putchar('B');
+    CHECK_EQ(2, g_glyph.count);
+    CHECK_EQ(0, g_glyph.col);
+    CHECK_EQ(0, g_glyph.row);
 }
 
 /* ── Panic Simulation / Test Harness (matches kernel/core/panic.c) ── */
@@ -721,7 +733,8 @@ static void test_kpanic_trylock_no_deadlock(void)
 
     /* Subtest 1: Pos.lock is free -> kpanic forces console enable without hang */
     console_surrender_fb();
-    CHECK_EQ(false, console__test_is_active());
+    console_putchar('A');
+    CHECK_EQ(0, g_glyph.count);
 
     reset_serial_capture();
     g_panic_armed = true;
@@ -733,15 +746,19 @@ static void test_kpanic_trylock_no_deadlock(void)
 
     /* Assert serial output received panic string */
     CHECK_TRUE(strstr(g_serial_buf, "PANIC: unhandled exception\n") != NULL);
-    /* Assert console fb was re-enabled by console_force_enable_locked */
-    CHECK_EQ(true, console__test_is_active());
     /* Assert Pos.lock was released (not held) */
-    CHECK_EQ(1, spin_trylock(&Pos.lock));
+    bool unlocked = spin_trylock(&Pos.lock);
+    CHECK_TRUE(unlocked);
+    if (!unlocked)
+        return;
     spin_unlock(&Pos.lock);
+    console_putchar('B');
+    CHECK_EQ(1, g_glyph.count);
 
     /* Subtest 2: Pos.lock is ALREADY HELD -> kpanic trylock fails gracefully, NO DEADLOCK */
     console_surrender_fb();
-    CHECK_EQ(false, console__test_is_active());
+    console_putchar('C');
+    CHECK_EQ(1, g_glyph.count);
 
     /* Simulate another CPU or interrupted context holding Pos.lock */
     uint64_t flags = spin_lock_irqsave(&Pos.lock);
@@ -756,14 +773,16 @@ static void test_kpanic_trylock_no_deadlock(void)
 
     /* Serial output still emitted */
     CHECK_TRUE(strstr(g_serial_buf, "PANIC: recursive lock test\n") != NULL);
-    /* Console fb active is STILL false because trylock failed and skipped double lock */
-    CHECK_EQ(false, console__test_is_active());
-
     /* Release lock held before panic */
     spin_unlock_irqrestore(&Pos.lock, flags);
     /* Now lock is cleanly free */
-    CHECK_EQ(1, spin_trylock(&Pos.lock));
+    unlocked = spin_trylock(&Pos.lock);
+    CHECK_TRUE(unlocked);
+    if (!unlocked)
+        return;
     spin_unlock(&Pos.lock);
+    console_putchar('D');
+    CHECK_EQ(1, g_glyph.count);
 }
 
 /* ── Test: Raw mmap boundary and bidirectional ownership EBUSY ── */

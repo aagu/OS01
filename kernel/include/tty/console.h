@@ -30,10 +30,4 @@ void console_set_active_locked(bool active);
 // Resets term_cursor_row/col and Pos.XPosition/YPosition to 0.
 void console_notify_resize_locked(void);
 
-#ifdef OS01_HOST_TEST
-bool console__test_is_active(void);
-void console__test_get_cursors(int *row, int *col, int32_t *pos_x, int32_t *pos_y);
-void console__test_set_cursors(int row, int col, int32_t pos_x, int32_t pos_y);
-#endif
-
 #endif

@@ -155,26 +155,3 @@ void console_notify_resize_locked(void)
     Pos.YPosition = 0;
 }
 
-#ifdef OS01_HOST_TEST
-bool console__test_is_active(void)
-{
-    return console_fb_active;
-}
-
-void console__test_get_cursors(int *row, int *col, int32_t *pos_x, int32_t *pos_y)
-{
-    if (row) *row = term_cursor_row;
-    if (col) *col = term_cursor_col;
-    if (pos_x) *pos_x = Pos.XPosition;
-    if (pos_y) *pos_y = Pos.YPosition;
-}
-
-void console__test_set_cursors(int row, int col, int32_t pos_x, int32_t pos_y)
-{
-    term_cursor_row = row;
-    term_cursor_col = col;
-    Pos.XPosition = pos_x;
-    Pos.YPosition = pos_y;
-}
-#endif
-

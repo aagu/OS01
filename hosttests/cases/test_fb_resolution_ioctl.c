@@ -227,9 +227,18 @@ int x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt, uint64_t flags
 void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt) { (void)pgdir; (void)virt; }
 int arch_vmm_query_4k(uint64_t *pgdir, uint64_t virt, uint64_t *phys_out, uint32_t *vm_out) { (void)pgdir; (void)virt; (void)phys_out; (void)vm_out; return -ENOENT; }
 
+static struct {
+    unsigned count;
+    int col;
+    int row;
+} g_glyph;
+
 void putchar_at_snap(const struct fb_snapshot *snap, int col, int row, unsigned int FRcolor, unsigned int BKcolor, unsigned char c)
 {
-    (void)snap; (void)col; (void)row; (void)FRcolor; (void)BKcolor; (void)c;
+    (void)snap; (void)FRcolor; (void)BKcolor; (void)c;
+    g_glyph.count++;
+    g_glyph.col = col;
+    g_glyph.row = row;
 }
 
 static psf2_t g_test_font = {
@@ -249,6 +258,7 @@ static void setup_test_environment(void)
 {
     fb_resolution_runtime_reset();
     bga_reset_for_test();
+    g_glyph.count = 0;
 
     if (!g_test_vram) {
         g_test_vram = (uint32_t *)malloc(TEST_FB_BYTES);
@@ -509,8 +519,13 @@ static void test_set_noop(void)
     g_test_vram[0] = 0xDEADBEEFU;
     g_test_vram[100] = 0xCAFEBABEU;
 
-    /* Set non-zero cursor */
-    console__test_set_cursors(5, 10, 10, 5);
+    Pos.XPosition = 10;
+    Pos.YPosition = 5;
+    console_init();
+    console_putchar('A');
+    CHECK_EQ(1, g_glyph.count);
+    CHECK_EQ(0, g_glyph.col);
+    CHECK_EQ(6, g_glyph.row);
 
     /* Get initial state */
     struct fb_state init_st;
@@ -536,14 +551,12 @@ static void test_set_noop(void)
     CHECK_EQ(0xDEADBEEFU, g_test_vram[0]);
     CHECK_EQ(0xCAFEBABEU, g_test_vram[100]);
 
-    /* Assert cursors unchanged */
-    int row = -1, col = -1;
-    int32_t px = -1, py = -1;
-    console__test_get_cursors(&row, &col, &px, &py);
-    CHECK_EQ(5, row);
-    CHECK_EQ(10, col);
-    CHECK_EQ(10, px);
-    CHECK_EQ(5, py);
+    CHECK_EQ(10, Pos.XPosition);
+    CHECK_EQ(5, Pos.YPosition);
+    console_putchar('B');
+    CHECK_EQ(2, g_glyph.count);
+    CHECK_EQ(1, g_glyph.col);
+    CHECK_EQ(6, g_glyph.row);
 
     /* Call with bpp=0 (default 32) -> also no-op */
     req.bpp = 0;
@@ -562,8 +575,13 @@ static void test_set_rollback(void)
     /* Fill framebuffer */
     memset(g_test_vram, 0x55, 800 * 600 * 4);
 
-    /* Set non-zero cursor */
-    console__test_set_cursors(3, 7, 7, 3);
+    Pos.XPosition = 7;
+    Pos.YPosition = 3;
+    console_init();
+    console_putchar('A');
+    CHECK_EQ(1, g_glyph.count);
+    CHECK_EQ(0, g_glyph.col);
+    CHECK_EQ(4, g_glyph.row);
 
     struct fb_state init_st;
     fb_ops.ioctl(NULL, FBIOGET_STATE, &init_st);
@@ -586,18 +604,16 @@ static void test_set_rollback(void)
     /* Generation is incremented to invalidate views */
     CHECK_EQ(init_gen + 1, cur_st.generation);
 
-    /* Cursor is reset */
-    int row = -1, col = -1;
-    int32_t px = -1, py = -1;
-    console__test_get_cursors(&row, &col, &px, &py);
-    CHECK_EQ(0, row);
-    CHECK_EQ(0, col);
-    CHECK_EQ(0, px);
-    CHECK_EQ(0, py);
-
     /* Old active area was cleared */
     CHECK_EQ(0u, g_test_vram[0]);
     CHECK_EQ(0u, g_test_vram[800 * 300]);
+
+    CHECK_EQ(0, Pos.XPosition);
+    CHECK_EQ(0, Pos.YPosition);
+    console_putchar('B');
+    CHECK_EQ(2, g_glyph.count);
+    CHECK_EQ(0, g_glyph.col);
+    CHECK_EQ(0, g_glyph.row);
 
     s_inject_apply_readback_virt_w = false;
 }
