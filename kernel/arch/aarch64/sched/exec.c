@@ -144,6 +144,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
         rc = -ENOMEM;
         goto fail_image;
     }
+    memset(owner, 0, sizeof(*owner));
     owner->image = image;
     owner->catalog = NULL;      /* VFS-spawned: exec re-reads from VFS */
     owner->catalog_count = 0;

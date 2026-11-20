@@ -396,6 +396,46 @@ static uint64_t g_installed_root;
 static uint64_t g_tls_live[2];
 static int      g_tls_restores;
 
+#define USER_VM_MOCK_TASKS 4
+struct task_struct {
+    struct aarch64_user_task owner;
+};
+static struct task_struct g_mock_tasks[USER_VM_MOCK_TASKS];
+struct task_struct *current = &g_mock_tasks[0];
+
+struct task_struct *user_vm_test_task(int slot)
+{
+    if (slot < 0 || slot >= USER_VM_MOCK_TASKS)
+        return NULL;
+    return &g_mock_tasks[slot];
+}
+
+void user_vm_test_set_current_task(struct task_struct *tsk)
+{
+    current = tsk;
+}
+
+const struct task_struct *aarch64_user_current_task(void)
+{
+    return current;
+}
+
+struct aarch64_user_task *aarch64_user_task_owner(const struct task_struct *tsk)
+{
+    return tsk ? &((struct task_struct *)(uintptr_t)tsk)->owner : NULL;
+}
+
+uint32_t aarch64_user_vm_cpu_id(void)
+{
+    return 0;
+}
+
+void aarch64_user_clear_tls(void)
+{
+    g_tls_live[0] = 0;
+    g_tls_live[1] = 0;
+}
+
 void user_vm_test_set_current_mm(mm_t *mm)   { g_current_mm = mm; }
 void user_vm_test_set_frame_valid(int ok)    { g_frame_valid = ok; }
 void user_vm_test_set_ttbr0(uint64_t root_pa){ g_ttbr0 = root_pa; }
@@ -475,9 +515,6 @@ void aarch64_user_restore_kernel_root(void)
 
 void aarch64_user_install_root(uint64_t root_pa)
 {
-    /* Production clears both EL0 thread pointers on every install. */
-    g_tls_live[0] = 0;
-    g_tls_live[1] = 0;
     g_root_installs++;
     g_installed_root = root_pa;
     g_ttbr0 = root_pa;
@@ -535,6 +572,8 @@ void user_vm_test_reset(void)
     g_tls_live[0]  = 0;
     g_tls_live[1]  = 0;
     g_tls_restores = 0;
+    memset(g_mock_tasks, 0, sizeof(g_mock_tasks));
+    current = &g_mock_tasks[0];
 }
 
 int g_log_level = 3;   /* LOG_ERR */
@@ -548,8 +587,6 @@ static struct files_struct g_test_files;
 static file_t g_test_file_slot;
 static struct vfs_node_test g_test_file_node;
 
-struct task_struct;
-static struct { void *_pad; } g_fake_task;
 static struct files_struct *g_files = NULL;
 
 files_t *user_vm_policy_files(void)

@@ -146,6 +146,26 @@ bool aarch64_user_task_is_user(const struct task_struct *tsk)
     return tsk && tsk->thread && tsk->thread->user_task != NULL;
 }
 
+const struct task_struct *aarch64_user_current_task(void)
+{
+    return arch_current_task();
+}
+
+struct aarch64_user_task *aarch64_user_task_owner(const struct task_struct *tsk)
+{
+    if (!aarch64_user_task_is_user(tsk))
+        return NULL;
+    return tsk->thread->user_task;
+}
+
+uint32_t aarch64_user_vm_cpu_id(void)
+{
+    percpu_t *cpu = this_cpu();
+    if (!cpu || cpu->cpu_id >= NR_CPUS)
+        return NR_CPUS;
+    return cpu->cpu_id;
+}
+
 uint64_t aarch64_user_task_frame(const struct task_struct *tsk){
     if (!tsk || !tsk->thread)
         return 0;
@@ -292,7 +312,6 @@ void aarch64_user_install_root(uint64_t root_pa)
 
     g_live_root_pa = root_pa;
     g_live_root_is_user = true;
-    aarch64_user_clear_tls();
 }
 
 void aarch64_user_restore_kernel_root(void)
@@ -311,27 +330,42 @@ void aarch64_user_restore_kernel_root(void)
     g_live_root_is_user = false;
 }
 
-void aarch64_user_switch_mm(const struct task_struct *next)
+void aarch64_user_switch_mm(struct task_struct *prev,
+                            const struct task_struct *next)
 {
-    uint64_t next_root = g_kernel_root_pa;
-    bool next_is_user = false;
+    /* 1. Save prev's EL0 TLS unless prev is in a paused edit (whose
+     *    entry TLS is already preserved in its edit snapshot). */
+    if (aarch64_user_task_is_user(prev) && !aarch64_vm_task_editing(prev)) {
+        struct aarch64_user_task *prev_owner = prev->thread->user_task;
+        aarch64_user_vm_save_tls(&prev_owner->tpidr_el0,
+                                 &prev_owner->tpidrro_el0);
+    }
 
-    if (aarch64_user_task_is_user(next)) {
+    /* 2. Switch TTBR0 root.  Paused-edit tasks run on the kernel root
+     *    until their original edit_end restores their user root. */
+    uint64_t next_root = g_kernel_root_pa;
+    bool next_user_active = aarch64_user_task_is_user(next) &&
+                            !aarch64_vm_task_editing(next);
+    if (next_user_active) {
         const struct aarch64_user_task *owner = next->thread->user_task;
         next_root = aarch64_user_image_root_pa(owner->image);
-        next_is_user = true;
     }
 
-    /* Same root: nothing to install. */
-    if (next_root == g_live_root_pa)
-        return;
-
-    if (next_is_user) {
-        aarch64_user_install_root(next_root);
-        return;
+    if (next_root != g_live_root_pa) {
+        if (next_user_active)
+            aarch64_user_install_root(next_root);
+        else
+            aarch64_user_restore_kernel_root();
     }
-    /* A kernel task or the idle task gets the kernel root back. */
-    aarch64_user_restore_kernel_root();
+
+    /* 3. Restore next's EL0 TLS (or zero for kernel / paused-edit
+     *    tasks while the original edit TLS remains in the snapshot). */
+    if (next_user_active) {
+        const struct aarch64_user_task *owner = next->thread->user_task;
+        aarch64_user_vm_restore_tls(owner->tpidr_el0, owner->tpidrro_el0);
+    } else {
+        aarch64_user_clear_tls();
+    }
 }
 
 /* ── First entry ────────────────────────────────────────────────
@@ -542,6 +576,9 @@ static void aarch64_user_task_exec(pt_regs_t *regs)
 
     owner->image = image;
     owner->catalog_index = index;
+    owner->tpidr_el0 = 0;
+    owner->tpidrro_el0 = 0;
+    memset(&owner->vm, 0, sizeof(owner->vm));
     t->mm = aarch64_user_image_mm(image);
     memset(t->sighand, 0, sizeof(t->sighand));
 
@@ -677,6 +714,9 @@ int64_t arch_syscall_exec(void *arch_frame, const char *path,
 
     owner->image = image;
     owner->catalog_index = index;
+    owner->tpidr_el0 = 0;
+    owner->tpidrro_el0 = 0;
+    memset(&owner->vm, 0, sizeof(owner->vm));
     t->mm = aarch64_user_image_mm(image);
     memset(t->sighand, 0, sizeof(t->sighand));
 
@@ -720,10 +760,14 @@ static void aarch64_user_task_exit(uint64_t status)
     aarch64_user_restore_kernel_root();
 
     if (owner) {
+        memset(&owner->vm, 0, sizeof(owner->vm));
+        owner->tpidr_el0 = 0;
+        owner->tpidrro_el0 = 0;
         owner->image = NULL;
         t->mm = NULL;
         t->thread->user_task = NULL;
     }
+    aarch64_user_clear_tls();
 
     /* The image and the private state are released with interrupts
      * enabled. */
@@ -976,6 +1020,24 @@ int user_task_prepare(task_t *tsk, void *arg)
     }
     ctx_thread->sp = frame;
 
+    memset(&owner->vm, 0, sizeof(owner->vm));
+    if (ctx->parent && aarch64_user_task_is_user(ctx->parent)) {
+        const struct aarch64_user_task *parent_owner =
+            ctx->parent->thread->user_task;
+        if (aarch64_vm_task_editing(ctx->parent)) {
+            owner->tpidr_el0 = parent_owner->vm.edit_tpidr_el0;
+            owner->tpidrro_el0 = parent_owner->vm.edit_tpidrro_el0;
+        } else if (ctx->parent == arch_current_task()) {
+            aarch64_user_vm_save_tls(&owner->tpidr_el0, &owner->tpidrro_el0);
+        } else {
+            owner->tpidr_el0 = parent_owner->tpidr_el0;
+            owner->tpidrro_el0 = parent_owner->tpidrro_el0;
+        }
+    } else {
+        owner->tpidr_el0 = 0;
+        owner->tpidrro_el0 = 0;
+    }
+
     ctx_thread->user_task = owner;
     return 0;
 }
@@ -1073,6 +1135,7 @@ int64_t arch_syscall_fork(void *arch_frame)
         aarch64_user_image_destroy(child_image);
         return -ENOMEM;
     }
+    memset(child_owner, 0, sizeof(*child_owner));
     child_owner->image         = child_image;
     child_owner->catalog       = parent_owner->catalog;
     child_owner->catalog_count = parent_owner->catalog_count;
@@ -1161,6 +1224,7 @@ int aarch64_user_task_spawn(const struct aarch64_user_elf_source *catalog,
         aarch64_user_image_destroy(image);
         return -ENOMEM;
     }
+    memset(owner, 0, sizeof(*owner));
     owner->image = image;
     owner->catalog = catalog;
     owner->catalog_count = count;

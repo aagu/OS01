@@ -210,6 +210,8 @@ uint32_t user_vm_test_leaf_vm_in(uint64_t *root, uint64_t va);
 int      user_vm_test_replace_cow_calls(void);
 
 /* ── Transaction-layer boundary controls (M4 Task 3) ──────── */
+struct task_struct *user_vm_test_task(int slot);
+void user_vm_test_set_current_task(struct task_struct *tsk);
 void user_vm_test_set_current_mm(mm_t *mm);
 void user_vm_test_set_frame_valid(int ok);
 void user_vm_test_set_ttbr0(uint64_t root_pa);

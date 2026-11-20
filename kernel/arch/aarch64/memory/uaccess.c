@@ -27,10 +27,12 @@
 #include <arch/aarch64/page_table.h>
 #include <arch/mmu.h>
 #include <arch/irq.h>
+#include <config/limits.h>
 #include <limits.h>
 #include <memory/memory.h>
 #include <memory/pmm.h>
 #include <memory/uaccess.h>
+#include <percpu/percpu.h>
 #include <sched/task.h>
 #include <errno.h>
 #include <limits.h>
@@ -43,11 +45,20 @@
 extern const char aarch64_uaccess_load[], aarch64_uaccess_store[];
 extern const char aarch64_uaccess_fault[];
 
-/* The formal copy window that is currently open, or a zeroed
- * `present == false` record.  Single-core BSP only: the window is
- * opened and cleared with local IRQs masked and never across a
- * scheduling point, so one static record is the whole state. */
-static struct aarch64_uaccess_window g_window;
+/* Per-CPU formal copy windows, accessed via the installed per-CPU
+ * identity.  When TPIDR_EL1 is unset (early boot) or out of range,
+ * uaccess_cpu_window() returns NULL so aborts safely fall back to
+ * fatal. */
+static struct aarch64_uaccess_window g_windows[NR_CPUS];
+
+__attribute__((no_stack_protector))
+static struct aarch64_uaccess_window *uaccess_cpu_window(void)
+{
+    percpu_t *cpu = this_cpu();
+    if (!cpu || cpu->cpu_id >= NR_CPUS)
+        return NULL;
+    return &g_windows[cpu->cpu_id];
+}
 
 /* ── Formal range precheck ───────────────────────────────────────
  *
@@ -144,9 +155,10 @@ static ssize_t copy_user_common(uint64_t user_addr, const void *kern, size_t n,
 
     arch_irq_state_t state = arch_local_irq_save();
 
-    /* A nested copy is refused before any other check; the outer
-     * window is preserved. */
-    if (g_window.present)
+    /* A nested copy or missing per-CPU identity is refused before any
+     * other check; an outer window is preserved. */
+    struct aarch64_uaccess_window *win = uaccess_cpu_window();
+    if (!win || win->present)
         goto fault;
 
     struct mm_struct *mm = NULL;
@@ -181,7 +193,7 @@ static ssize_t copy_user_common(uint64_t user_addr, const void *kern, size_t n,
             goto fault;
     }
 
-    g_window = (struct aarch64_uaccess_window){
+    *win = (struct aarch64_uaccess_window){
         .present = true,
         .write   = write,
         .lo      = user_addr,
@@ -195,7 +207,7 @@ static ssize_t copy_user_common(uint64_t user_addr, const void *kern, size_t n,
         ? aarch64_copy_to_user_raw(user_addr, kern, n)
         : aarch64_copy_from_user_raw((void *)kern, user_addr, n);
 
-    g_window = (struct aarch64_uaccess_window){0};
+    *win = (struct aarch64_uaccess_window){0};
     arch_local_irq_restore(state);
 
     if (rc < 0)
@@ -343,7 +355,8 @@ bool aarch64_uaccess_fixup(pt_regs_t *regs, uint64_t esr, uint64_t far)
      * formal copy abort.  On the early boot stack `current` is not a
      * task, so reading it before this gate could fault again and lose
      * the fatal diagnostic. */
-    if (!aarch64_uaccess_abort_shape_matches(&ab, &g_window,
+    const struct aarch64_uaccess_window *win = uaccess_cpu_window();
+    if (!aarch64_uaccess_abort_shape_matches(&ab, win,
                                              (uintptr_t)aarch64_uaccess_load,
                                              (uintptr_t)aarch64_uaccess_store))
         return false;
@@ -361,7 +374,7 @@ bool aarch64_uaccess_fixup(pt_regs_t *regs, uint64_t esr, uint64_t far)
         .ttbr0_pa = ttbr0 & AARCH64_TTBR_BASE_MASK,
     };
 
-    if (!aarch64_uaccess_window_holds(&g_window, &live))
+    if (!aarch64_uaccess_window_holds(win, &live))
         return false;
 
     regs->elr_el1 = (uintptr_t)aarch64_uaccess_fault;

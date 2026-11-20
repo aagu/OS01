@@ -32,6 +32,7 @@
 struct mm_struct;
 typedef struct mm_struct mm_t;
 struct intr_event;
+struct task_struct;
 
 /* Translation fault, level 0..3 (FSC 0x04..0x07).  The generic
  * AARCH64_FSC_ACCESS_* window also spans access-flag and permission
@@ -119,6 +120,7 @@ void aarch64_vm_irq_leave(void);
  * drive the state machine directly. */
 int  aarch64_vm_edit_begin(mm_t *mm);
 void aarch64_vm_edit_end(void);
+bool aarch64_vm_task_editing(const struct task_struct *task);
 
 /* ── Policy entry points under the transaction ─────────────────── */
 
@@ -135,6 +137,9 @@ int aarch64_user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len,
                                  bool write);
 
 /* ── Hardware boundary (cpu/user_task.c; host runtime in tests) ── */
+const struct task_struct *aarch64_user_current_task(void);
+struct aarch64_user_task *aarch64_user_task_owner(const struct task_struct *tsk);
+uint32_t aarch64_user_vm_cpu_id(void);
 uint64_t aarch64_user_vm_read_ttbr0(void);
 bool     aarch64_user_vm_root_published(uint64_t root_pa);
 void     aarch64_user_vm_save_tls(uint64_t *tpidr_el0,

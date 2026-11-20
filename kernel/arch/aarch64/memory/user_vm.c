@@ -14,6 +14,7 @@
 #include <arch/aarch64/user_vm.h>
 #include <arch/aarch64/user_vm_policy.h>  /* policy entry points */
 #include <arch/irq.h>
+#include <config/limits.h>
 #include <errno.h>
 #include <intr/dispatch.h>
 #include <sched/task.h>
@@ -24,45 +25,43 @@
 #include <uapi/syscall.h>
 
 /* ══════════════════════════════════════════════════════════════
- * Transaction layer (M4 Task 3)
+ * Transaction layer (M4 Task 3, per-task & per-CPU state)
  * ══════════════════════════════════════════════════════════════ */
 
-/* One authorization at a time, single-core BSP.  A native SVC holds
- * `native`; the short-lived fault path holds `fault`. */
-static bool              g_native_auth;
-static bool              g_fault_auth;
-static const pt_regs_t  *g_auth_frame;
-static mm_t             *g_auth_mm;
-
-/* BSP IRQ nesting depth.  A transaction requires zero. */
-static unsigned g_irq_depth;
-
-/* The detached transaction, non-nestable.  The saved values are the
- * caller's IRQ state and both EL0 thread pointers. */
-static bool g_edit_active;
-static struct {
-    arch_irq_state_t irq;
-    uint64_t         tpidr_el0;
-    uint64_t         tpidrro_el0;
-    uint64_t         root_pa;
-} g_edit;
+/* Per-CPU IRQ nesting depth.  A transaction requires depth zero. */
+static unsigned g_irq_depth[NR_CPUS];
 
 void aarch64_vm_irq_enter(void)
 {
-    g_irq_depth++;
+    uint32_t cpu = aarch64_user_vm_cpu_id();
+    if (cpu < NR_CPUS)
+        g_irq_depth[cpu]++;
 }
 
 void aarch64_vm_irq_leave(void)
 {
-    if (g_irq_depth)
-        g_irq_depth--;
+    uint32_t cpu = aarch64_user_vm_cpu_id();
+    if (cpu < NR_CPUS && g_irq_depth[cpu])
+        g_irq_depth[cpu]--;
+}
+
+bool aarch64_vm_task_editing(const struct task_struct *task)
+{
+    const struct aarch64_user_task *owner = aarch64_user_task_owner(task);
+    return owner ? owner->vm.edit_active : false;
 }
 
 void aarch64_vm_native_enter(pt_regs_t *regs, uint64_t nr)
 {
-    g_native_auth = false;
-    g_auth_frame = NULL;
-    g_auth_mm = NULL;
+    const struct task_struct *tsk = aarch64_user_current_task();
+    struct aarch64_user_task *owner = aarch64_user_task_owner(tsk);
+    if (!owner)
+        return;
+
+    owner->vm.native_auth = false;
+    owner->vm.auth_task = NULL;
+    owner->vm.auth_frame = NULL;
+    owner->vm.auth_mm = NULL;
 
     /* SYS_exit never returns to EL0 and an unknown number has no
      * dispatch: neither may hold an edit authorization. */
@@ -81,29 +80,46 @@ void aarch64_vm_native_enter(pt_regs_t *regs, uint64_t nr)
     if (!aarch64_user_vm_root_published(root_pa))
         return;
 
-    g_native_auth = true;
-    g_auth_frame = regs;
-    g_auth_mm = mm;
+    owner->vm.native_auth = true;
+    owner->vm.auth_task = tsk;
+    owner->vm.auth_frame = regs;
+    owner->vm.auth_mm = mm;
 }
 
 void aarch64_vm_native_leave(void)
 {
-    g_native_auth = false;
-    g_auth_frame = NULL;
-    g_auth_mm = NULL;
+    struct aarch64_user_task *owner =
+        aarch64_user_task_owner(aarch64_user_current_task());
+    if (!owner)
+        return;
+
+    owner->vm.native_auth = false;
+    owner->vm.auth_task = NULL;
+    owner->vm.auth_frame = NULL;
+    owner->vm.auth_mm = NULL;
 }
 
 int aarch64_vm_edit_begin(mm_t *mm)
 {
-    if (!g_native_auth && !g_fault_auth)
+    const struct task_struct *tsk = aarch64_user_current_task();
+    struct aarch64_user_task *owner = aarch64_user_task_owner(tsk);
+    if (!owner)
         return -EPERM;
-    if (g_edit_active)
+
+    if (!owner->vm.native_auth && !owner->vm.fault_auth)
+        return -EPERM;
+    if (owner->vm.edit_active)
         return -EBUSY;                    /* non-nestable */
-    if (g_irq_depth != 0)
+
+    uint32_t cpu = aarch64_user_vm_cpu_id();
+    if (cpu >= NR_CPUS || g_irq_depth[cpu] != 0)
         return -EBUSY;                    /* never from an IRQ path */
-    if (!mm || mm != g_auth_mm || mm != aarch64_user_current_mm())
+
+    if (!tsk || owner->vm.auth_task != tsk)
         return -EPERM;
-    if (!g_auth_frame || !aarch64_user_frame_is_valid(g_auth_frame))
+    if (!mm || mm != owner->vm.auth_mm || mm != aarch64_user_current_mm())
+        return -EPERM;
+    if (!owner->vm.auth_frame || !aarch64_user_frame_is_valid(owner->vm.auth_frame))
         return -EPERM;
     if (!mm->pgdir)
         return -EPERM;
@@ -116,28 +132,31 @@ int aarch64_vm_edit_begin(mm_t *mm)
     if (!aarch64_user_vm_root_published(live))
         return -EPERM;
 
-    g_edit.root_pa = live;
-    g_edit.irq = arch_local_irq_save();          /* save + mask */
-    aarch64_user_vm_save_tls(&g_edit.tpidr_el0, &g_edit.tpidrro_el0);
+    owner->vm.edit_root_pa = live;
+    owner->vm.edit_irq = (uint64_t)arch_local_irq_save(); /* save + mask */
+    aarch64_user_vm_save_tls(&owner->vm.edit_tpidr_el0,
+                             &owner->vm.edit_tpidrro_el0);
     aarch64_user_restore_kernel_root();
-    g_edit_active = true;                        /* mark before IRQs on */
-    arch_local_irq_enable();                     /* policy runs with IRQs */
+    aarch64_user_clear_tls();
+    owner->vm.edit_active = true;         /* mark before IRQs on */
+    arch_local_irq_enable();              /* policy runs with IRQs */
 
     return 0;
 }
 
 void aarch64_vm_edit_end(void)
 {
-    if (!g_edit_active)
+    struct aarch64_user_task *owner =
+        aarch64_user_task_owner(aarch64_user_current_task());
+    if (!owner || !owner->vm.edit_active)
         return;
 
     arch_local_irq_disable();
-    aarch64_user_install_root(g_edit.root_pa);   /* publish + install */
-    /* install_root() clears both thread pointers; the entry values are
-     * restored ON TOP of the new root. */
-    aarch64_user_vm_restore_tls(g_edit.tpidr_el0, g_edit.tpidrro_el0);
-    g_edit_active = false;
-    arch_local_irq_restore(g_edit.irq);
+    aarch64_user_install_root(owner->vm.edit_root_pa); /* publish + install */
+    aarch64_user_vm_restore_tls(owner->vm.edit_tpidr_el0,
+                                owner->vm.edit_tpidrro_el0);
+    owner->vm.edit_active = false;
+    arch_local_irq_restore((arch_irq_state_t)owner->vm.edit_irq);
 }
 
 int64_t arch_syscall_user_vm(uint64_t nr, const uint64_t args[6])
@@ -145,7 +164,9 @@ int64_t arch_syscall_user_vm(uint64_t nr, const uint64_t args[6])
     if (!args)
         return -EINVAL;
 
-    mm_t *mm = g_auth_mm;
+    struct aarch64_user_task *owner =
+        aarch64_user_task_owner(aarch64_user_current_task());
+    mm_t *mm = owner ? owner->vm.auth_mm : NULL;
     int rc = aarch64_vm_edit_begin(mm);
     if (rc)
         return rc;
@@ -197,20 +218,24 @@ int aarch64_user_vm_fault(pt_regs_t *regs, const struct intr_event *event)
                                         &write, &cow))
         return -EFAULT;
 
+    const struct task_struct *tsk = aarch64_user_current_task();
+    struct aarch64_user_task *owner = aarch64_user_task_owner(tsk);
     mm_t *mm = aarch64_user_current_mm();
-    if (!mm || !aarch64_user_frame_is_valid(regs))
+    if (!owner || !mm || !aarch64_user_frame_is_valid(regs))
         return -EFAULT;
 
     /* Save a native authorization that a retry will rebuild; a
      * lower-EL fault cannot occur inside the SVC dispatch, but the
      * state machine must stay correct if it ever does. */
-    bool saved_native = g_native_auth;
-    const pt_regs_t *saved_frame = g_auth_frame;
-    mm_t *saved_mm = g_auth_mm;
+    bool saved_native = owner->vm.native_auth;
+    const struct task_struct *saved_task = owner->vm.auth_task;
+    const pt_regs_t *saved_frame = owner->vm.auth_frame;
+    mm_t *saved_mm = owner->vm.auth_mm;
 
-    g_fault_auth = true;
-    g_auth_frame = regs;
-    g_auth_mm = mm;
+    owner->vm.fault_auth = true;
+    owner->vm.auth_task = tsk;
+    owner->vm.auth_frame = regs;
+    owner->vm.auth_mm = mm;
 
     int rc = aarch64_vm_edit_begin(mm);
     if (rc == 0) {
@@ -219,9 +244,10 @@ int aarch64_user_vm_fault(pt_regs_t *regs, const struct intr_event *event)
         aarch64_vm_edit_end();
     }
 
-    g_fault_auth = false;
-    g_native_auth = saved_native;
-    g_auth_frame = saved_frame;
-    g_auth_mm = saved_mm;
+    owner->vm.fault_auth = false;
+    owner->vm.native_auth = saved_native;
+    owner->vm.auth_task = saved_task;
+    owner->vm.auth_frame = saved_frame;
+    owner->vm.auth_mm = saved_mm;
     return rc;
 }

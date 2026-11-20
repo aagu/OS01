@@ -23,6 +23,7 @@
 #include <sys/mman.h>
 
 #include <arch/aarch64/user_image.h>
+#include <arch/aarch64/user_task.h>
 #include <arch/aarch64/user_vm.h>
 #include <intr/dispatch.h>
 #include <arch/aarch64/user_vm_leaf.h>
@@ -705,6 +706,83 @@ TEST_FUNC(test_transaction_policy_error_still_restores)
 
     aarch64_vm_native_leave();
     destroy_mm(mm);
+}
+
+TEST_FUNC(test_transaction_serial_interleaving_per_task)
+{
+    user_vm_test_reset();
+    mm_t *mm_a = new_mm(HEAP_BASE);
+    mm_t *mm_b = new_mm(HEAP_BASE);
+    mm_b->pgdir = (uint64_t *)(uintptr_t)0x9000;
+
+    struct task_struct *task_a = user_vm_test_task(0);
+    struct task_struct *task_b = user_vm_test_task(1);
+    assert_not_null(task_a);
+    assert_not_null(task_b);
+
+    pt_regs_t regs_a;
+    pt_regs_t regs_b;
+    memset(&regs_a, 0, sizeof(regs_a));
+    memset(&regs_b, 0, sizeof(regs_b));
+
+    /* Task A authorizes and detaches (edit_begin). */
+    user_vm_test_set_current_task(task_a);
+    tx_setup(mm_a);
+    user_vm_test_set_tls(0x1111, 0x2222);
+    user_vm_test_set_irq(0);
+    aarch64_vm_native_enter(&regs_a, SYS_brk);
+    assert_eq(0, aarch64_vm_edit_begin(mm_a));
+    assert_true(aarch64_vm_task_editing(task_a));
+    assert_false(aarch64_vm_task_editing(task_b));
+    assert_eq(0, user_vm_test_live_tls(0));
+    assert_eq(0, user_vm_test_live_tls(1));
+    assert_eq(0, user_vm_test_installed_root());
+
+    /* Switch mock current to Task B while Task A's edit is paused. */
+    user_vm_test_set_current_task(task_b);
+    tx_setup(mm_b);
+    user_vm_test_set_tls(0x3333, 0x4444);
+    user_vm_test_set_irq(1);
+    aarch64_vm_native_enter(&regs_b, SYS_brk);
+
+    /* Non-zero IRQ depth refuses edit_begin with -EBUSY. */
+    aarch64_vm_irq_enter();
+    assert_eq(-EBUSY, aarch64_vm_edit_begin(mm_b));
+    aarch64_vm_irq_leave();
+
+    assert_eq(0, aarch64_vm_edit_begin(mm_b));
+    assert_true(aarch64_vm_task_editing(task_a));
+    assert_true(aarch64_vm_task_editing(task_b));
+    aarch64_vm_edit_end();
+    assert_true(aarch64_vm_task_editing(task_a));
+    assert_false(aarch64_vm_task_editing(task_b));
+    assert_eq((uint64_t)(uintptr_t)mm_b->pgdir,
+              user_vm_test_installed_root());
+    assert_eq(0x3333, user_vm_test_live_tls(0));
+    assert_eq(0x4444, user_vm_test_live_tls(1));
+    assert_eq(1, user_vm_test_irq_masked());
+    aarch64_vm_native_leave();
+
+    /* Switch back to Task A (paused edit sees kernel root + zeroed TLS). */
+    user_vm_test_set_current_task(task_a);
+    user_vm_test_set_current_mm(mm_a);
+    aarch64_user_restore_kernel_root();
+    user_vm_test_set_tls(0, 0);
+    assert_true(aarch64_vm_task_editing(task_a));
+    assert_false(aarch64_vm_task_editing(task_b));
+
+    /* Task A's edit_end restores A's root, TLS, and entry IRQ state. */
+    aarch64_vm_edit_end();
+    assert_false(aarch64_vm_task_editing(task_a));
+    assert_eq((uint64_t)(uintptr_t)mm_a->pgdir,
+              user_vm_test_installed_root());
+    assert_eq(0x1111, user_vm_test_live_tls(0));
+    assert_eq(0x2222, user_vm_test_live_tls(1));
+    assert_eq(0, user_vm_test_irq_masked());
+    aarch64_vm_native_leave();
+
+    destroy_mm(mm_b);
+    destroy_mm(mm_a);
 }
 
 TEST_FUNC(test_fault_entry_fills_and_refuses)
@@ -2174,6 +2252,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_transaction_refuses_unverified_contexts),
     TEST_ENTRY(test_transaction_irq_depth_and_nesting_refused),
     TEST_ENTRY(test_transaction_policy_error_still_restores),
+    TEST_ENTRY(test_transaction_serial_interleaving_per_task),
     TEST_ENTRY(test_fault_entry_fills_and_refuses),
     TEST_ENTRY(test_map_image_page_records_source_and_ownership),
     TEST_ENTRY(test_map_image_page_failure_keeps_pa_with_caller),

@@ -22,8 +22,24 @@
 #include <arch/aarch64/sync_fault.h>
 
 struct task_struct;
+struct mm_struct;
 struct aarch64_user_image;
 struct intr_event;
+
+/* Per-task VM authorization and detached-edit snapshot. */
+struct aarch64_vm_tx_state {
+    bool                      native_auth;
+    bool                      fault_auth;
+    const struct task_struct *auth_task;
+    const pt_regs_t          *auth_frame;
+    struct mm_struct         *auth_mm;
+
+    bool                      edit_active;
+    uint64_t                  edit_irq;
+    uint64_t                  edit_tpidr_el0;
+    uint64_t                  edit_tpidrro_el0;
+    uint64_t                  edit_root_pa;
+};
 
 /* One entry of the kernel-provided, immutable image catalog.  The bytes
  * and the length stay valid for the whole life of the task; the
@@ -42,6 +58,9 @@ struct aarch64_user_task {
     const struct aarch64_user_elf_source *catalog;
     size_t catalog_count;
     size_t catalog_index;
+    uint64_t tpidr_el0;
+    uint64_t tpidrro_el0;
+    struct aarch64_vm_tx_state vm;
 };
 
 /* Creation context shared by the publish callbacks (sched_alloc_and_
@@ -75,11 +94,12 @@ int aarch64_user_task_spawn(const struct aarch64_user_elf_source *catalog,
  * BSP handoff before the scheduler publishes its readiness. */
 void aarch64_user_runtime_init(void);
 
-/* Install the address space of the task that is about to run.  Called
- * from the switch path with local interrupts masked, before the next
- * task's switch tail.  A kernel task or the idle task gets the saved
- * kernel root back. */
-void aarch64_user_switch_mm(const struct task_struct *next);
+/* Save prev's EL0 TLS, install next's address space (or kernel root
+ * for kernel/idle/paused-edit tasks), and restore next's EL0 TLS.
+ * Called from the switch path with local interrupts masked, before the
+ * next task's switch tail. */
+void aarch64_user_switch_mm(struct task_struct *prev,
+                            const struct task_struct *next);
 
 /* True iff `tsk` is a real EL0 user task owned by this runtime. */
 bool aarch64_user_task_is_user(const struct task_struct *tsk);

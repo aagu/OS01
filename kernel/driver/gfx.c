@@ -933,6 +933,11 @@ static int gfx_ioctl_present_rects(file_t *f, gfx_present_rects_req_t *ureq)
         return -ENOMEM;
     }
 
+    volatile uint64_t prefix_bytes_this_attempt = 0;
+    volatile uint32_t completed = 0;
+
+    int rc = 0;
+#if defined(__x86_64__) || defined(OS01_HOST_TEST)
     // Arm the fault context ONCE for the whole batch.  The volatile
     // counters survive the longjmp (see gfx_ioctl_present_rect).
     os01_jmp_buf jb;
@@ -943,11 +948,8 @@ static int gfx_ioctl_present_rects(file_t *f, gfx_present_rects_req_t *ureq)
     current->fault_cleanup = NULL;
     current->fault_cleanup_arg = NULL;
 
-    volatile uint64_t prefix_bytes_this_attempt = 0;
-    volatile uint32_t completed = 0;
-
-    int rc = 0;
     if (__builtin_setjmp((void **)jb) == 0) {
+#endif
         for (uint32_t i = 0; i < kreq.count; i++) {
             const gfx_rect_t *r = &krects[i];
             uint32_t row_bytes = r->w * 4u;
@@ -956,16 +958,16 @@ static int gfx_ioctl_present_rects(file_t *f, gfx_present_rects_req_t *ureq)
                                     ((uint64_t)r->y + (uint64_t)row) *
                                     (uint64_t)kreq.stride +
                                     (uint64_t)r->x * 4u;
-#ifdef OS01_HOST_TEST
+#if defined(__x86_64__) && !defined(OS01_HOST_TEST)
+                __builtin_memcpy(row_buf, (const void *)(uintptr_t)row_addr,
+                                 (size_t)row_bytes);
+#else
                 if (copy_from_user_ft(row_buf,
                                       (const void *)(uintptr_t)row_addr,
                                       (size_t)row_bytes) < 0) {
                     rc = -EFAULT;
                     break;
                 }
-#else
-                __builtin_memcpy(row_buf, (const void *)(uintptr_t)row_addr,
-                                 (size_t)row_bytes);
 #endif
                 int wrc = fb_write_row_leased(&lease,
                                               v_x + r->x,
@@ -977,6 +979,7 @@ static int gfx_ioctl_present_rects(file_t *f, gfx_present_rects_req_t *ureq)
             if (rc < 0) break;
             completed++;
         }
+#if defined(__x86_64__) || defined(OS01_HOST_TEST)
     } else {
         /* Longjmp from an inline-memcpy fault: the failing rect's
          * partial rows may be visible (counted in the prefix), rects
@@ -989,6 +992,7 @@ static int gfx_ioctl_present_rects(file_t *f, gfx_present_rects_req_t *ureq)
     current->fault_jmp = old_jmp;
     current->fault_cleanup = old_cb;
     current->fault_cleanup_arg = old_arg;
+#endif
 
     kfree(row_buf);
     kfree(krects);

@@ -366,7 +366,7 @@ void arch_task_switch(task_t *prev, task_t *next)
      * call happens BEFORE the switch: the next task's switch tail and
      * its first instruction must already see the right TTBR0_EL1.
      * Local interrupts are masked across the whole switch. */
-    aarch64_user_switch_mm(next);
+    aarch64_user_switch_mm(prev, next);
 #if AARCH64_EL0_TEST
     /* Observation point: the acceptance case records the real switches
      * and the root each user task ran on. */
