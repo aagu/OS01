@@ -29,16 +29,23 @@ else
 AARCH64_BOOT_BLOCK_BASE := 0x40000000
 endif
 
-# Value validation. Runs through exported-environment bash so the value
-# never expands inside a command string (no quoting/injection surface) and
-# 0x literals are evaluated without GNU-make arithmetic. Contract (§2):
+# Value validation. The probe runs in bash so 0x literals are evaluated
+# without GNU-make arithmetic. The value travels to bash as a
+# POSIX-quoted positional argument, NOT through `export`: GNU Make 4.3
+# (the version in the CI container) does not pass exported variables into
+# $(shell) — only 4.4 and newer do — so `export` + `$$VAR` silently
+# yields an empty value there and every base looks invalid. Quoting the
+# value keeps it out of the command string (no quoting/injection
+# surface) on every make version. Contract (§2):
 # single decimal or 0x hex integer, 2 MiB aligned, within the M0 map
 # [0, 0x80000000), disjoint from the boot device window
 # D = [0x08000000, 0x0a000000), and enough room below 0x80000000 for the
 # minimum 20 MiB early-arena window. The check must echo exactly "OK":
 # a missing bash / failed probe yields empty output and fails closed.
-export AARCH64_BOOT_BLOCK_BASE
-AARCH64_BOOT_BLOCK_BASE_CHECK := $(shell bash -c 'v="$$AARCH64_BOOT_BLOCK_BASE"; if ! [[ "$$v" =~ ^(0x[0-9a-fA-F]+|[0-9]+)$$ ]]; then echo "must be a single decimal or 0x hex integer"; exit 0; fi; n=$$(("$$v")); if (( n < 0 )); then echo "outside the M0 map [0..0x80000000]"; elif (( n % 0x200000 != 0 )); then echo "not 2 MiB aligned"; elif (( n < 0x0a000000 && n + 0x200000 > 0x08000000 )); then echo "overlaps the boot device window D [0x08000000..0x0a000000]"; elif (( n + 0x200000 > 0x80000000 )); then echo "outside the M0 map [0..0x80000000]"; elif (( 0x80000000 - n - 0x200000 < 0x01400000 )); then echo "no room for the minimum 20 MiB early-arena window"; else echo OK; fi' 2>/dev/null)
+# POSIX single-quote escaping: close the quote, emit an escaped quote,
+# reopen — so the value stays exactly one shell word.
+AARCH64_BOOT_BLOCK_BASE_SH := $(subst ','\'',$(AARCH64_BOOT_BLOCK_BASE))
+AARCH64_BOOT_BLOCK_BASE_CHECK := $(shell bash -c 'v="$$1"; if ! [[ "$$v" =~ ^(0x[0-9a-fA-F]+|[0-9]+)$$ ]]; then echo "must be a single decimal or 0x hex integer"; exit 0; fi; n=$$(("$$1")); if (( n < 0 )); then echo "outside the M0 map [0..0x80000000]"; elif (( n % 0x200000 != 0 )); then echo "not 2 MiB aligned"; elif (( n < 0x0a000000 && n + 0x200000 > 0x08000000 )); then echo "overlaps the boot device window D [0x08000000..0x0a000000]"; elif (( n + 0x200000 > 0x80000000 )); then echo "outside the M0 map [0..0x80000000]"; elif (( 0x80000000 - n - 0x200000 < 0x01400000 )); then echo "no room for the minimum 20 MiB early-arena window"; else echo OK; fi' _ '$(AARCH64_BOOT_BLOCK_BASE_SH)' 2>/dev/null)
 ifneq ($(strip $(AARCH64_BOOT_BLOCK_BASE_CHECK)),OK)
 $(error invalid AARCH64_BOOT_BLOCK_BASE='$(AARCH64_BOOT_BLOCK_BASE)': $(AARCH64_BOOT_BLOCK_BASE_CHECK))
 endif
