@@ -65,7 +65,14 @@ endif
 # compile classes, and upstream's recursive `$(MAKE)` for uefi/libuefi.a runs
 # with OUTDIR= so runtime archive objects land in the runtime dir while the
 # outer application invocation keeps OUTDIR=$(UEFI_BUILD_DIR)/.
-UEFI_RUNTIME_CFLAGS ?= -DUEFI_NO_UTF8
+# The default must mirror mk/components/uefi.mk exactly, otherwise the
+# "behaves identically" contract above is false: posix-uefi's own
+# -I/usr/include picks up glibc's stdint.h, which on Ubuntu's multiarch
+# layout needs bits/libc-header-start.h from
+# /usr/include/x86_64-linux-gnu/bits/ — a path clang does not search —
+# so the build dies with "bits/libc-header-start.h file not found" unless
+# OS01's freestanding headers are searched first.
+UEFI_RUNTIME_CFLAGS ?= -DUEFI_NO_UTF8 -D__need_wchar_t -I$(ROOT)/libc/include
 UEFI_RUNTIME_MAKE ?= $(MAKE) OUTDIR=
 
 # ── UEFI Clang/COFF contract (spec §6) ────────────────────────
