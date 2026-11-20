@@ -99,11 +99,11 @@ $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)&: $(SYSROOT_STAMP) $(USER_RUNTIME_PREREQ
 # path and expected revision; the input digest covers the ACTUAL worktree
 # (so local uncommitted modifications invalidate the adapter even though the
 # git revision is unchanged), config/busybox.config.in, the manifest, all
-# tracked overlay files, libc/arch/x86_64/crt0.S (the startup object comes
-# from the sysroot, so a source-only crt0 change must force a relink) +
-# libc/arch/x86_64/user.ld (the link consumes the linker script), the
-# toolchain identity and the CURRENT generation id (its .config embeds the
-# generation paths). The digest is written to $(BUILD_DIR)/receipts/busybox.input.digest
+# tracked overlay files, libc/arch/$(BUSYBOX_ARCH_DIR)/crt0.S (the startup
+# object comes from the sysroot, so a source-only crt0 change must force a
+# relink) + libc/arch/$(BUSYBOX_ARCH_DIR)/user.ld (the link consumes the
+# linker script), the toolchain identity and the CURRENT generation id (the
+# .config embeds the generation paths). The digest is written to $(BUILD_DIR)/receipts/busybox.input.digest
 # and compared with $(BUILD_DIR)/receipts/busybox.stamp.receipt; only a
 # difference (or a missing private binary) triggers a re-copy + rebuild. The
 # private copy lives in $(BUILD_DIR)/thirdparty/busybox; the tracked overlay
@@ -120,10 +120,36 @@ $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)&: $(SYSROOT_STAMP) $(USER_RUNTIME_PREREQ
 # on $(SYSROOT_STAMP), which transitively includes the compat-libs stamp:
 # BusyBox never creates libm.a / librt.a itself.
 
-# The BusyBox adapter is x86-only (2026-11-18): the linker plumbing (crt0.o
-# from the x86_64 sysroot) and the applet set are built against the x86_64
-# sysroot; the aarch64 userland ships its own user programs without BusyBox.
-ifeq ($(RUNTIME_TARGET_user),x86_64-unknown-none)
+# The BusyBox adapter covers every userland-capable profile (2026-11-21,
+# aarch64 enablement): the linker plumbing (crt0.o from the profile sysroot,
+# the sigreturn trampoline as a libc.a member) and the applet set follow
+# $(RUNTIME_TARGET_user). The per-arch startup source and linker script live
+# in libc/arch/<arch>/ (installed by libc install-libs); the overlay's
+# Kbuild.src is arch-neutral.
+#
+# aarch64 quirks (2026-11-21):
+# - busybox's native Makefile invokes $(LD) directly for the intermediate
+#   `ld -r` links and drives the final link through $(CC) (scripts/trylink).
+#   With clang targeting aarch64 both roles would fall back to the HOST GNU
+#   ld, which has no aarch64 emulation (the x86_64 build only works because
+#   the host ld accepts elf_x86_64) — pin the LLVM linker through the
+#   clang driver.
+# - the clang driver's default compiler-rt builtins path for
+#   aarch64-none-elf does not exist on the host; -nostdlib suppresses the
+#   implicit runtime injection (crt0.o and -lc stay explicit in the config
+#   template).
+# - busybox's libbb.h fixes the pagesize only for x86/32-bit-ARM and would
+#   otherwise call getpagesize(), which the OS01 libc does not provide;
+#   OS01 EL0 uses a fixed 4K granule, so pin BB_ARCH_FIXED_PAGESIZE=4096.
+BUSYBOX_ARCH_DIR := $(if $(filter aarch64-none-elf,$(RUNTIME_TARGET_user)),aarch64,x86_64)
+BUSYBOX_A64      := $(filter aarch64-none-elf,$(RUNTIME_TARGET_user))
+BUSYBOX_LINK     := $(TARGET_CCLD) $(if $(BUSYBOX_A64),-fuse-ld=lld)
+# Arch-conditional .config patches, resolved at parse time — a multi-line
+# $(if) inside the single-quoted recipe shell string collides with GNU
+# make's recipe backslash-newline handling (the expansion truncates the
+# recipe), so the recipe only references this pre-expanded variable.
+BUSYBOX_SED_A64  := $(if $(BUSYBOX_A64),-e "s|-fstack-protector-strong|-fstack-protector-strong -DBB_ARCH_FIXED_PAGESIZE=4096|" -e "s|-static -nostartfiles|-static -nostdlib -nostartfiles|")
+ifneq ($(strip $(RUNTIME_TARGET_user)),)
 
 BUSYBOX_MANIFEST  := $(OS01_ROOT)/thirdpart/busybox.manifest
 BUSYBOX_PRIVATE   := $(BUILD_DIR)/thirdparty/busybox
@@ -132,7 +158,7 @@ BUSYBOX_INPUT_DG  := $(BUILD_DIR)/receipts/busybox.input.digest
 BUSYBOX_OVERLAY   := $(OS01_ROOT)/config/busybox.overlay
 
 $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
-	@mkdir -p $(dir $@) $(BUILD_DIR)/receipts
+	@mkdir -p $(dir $@) $(BUILD_DIR)/receipts $(BUILD_DIR)/thirdparty
 	@+$(SHELL) -ec '\
 	  if [ -n "$(DRY_RUN)" ]; then \
 	    echo "  [busybox] dry-run: not rebuilding"; \
@@ -171,8 +197,9 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	      find thirdpart/busybox-1.36.1 -type f -exec sha256sum {} + 2>/dev/null | sort; \
 	      sha256sum config/busybox.config.in thirdpart/busybox.manifest; \
 	      find config/busybox.overlay -type f -exec sha256sum {} + 2>/dev/null | sort; \
-	      sha256sum libc/arch/x86_64/crt0.S libc/arch/x86_64/user.ld; \
+	      sha256sum libc/arch/$(BUSYBOX_ARCH_DIR)/crt0.S libc/arch/$(BUSYBOX_ARCH_DIR)/user.ld; \
 	      printf "toolchain: %s\n" "$$($(CLANG) --version 2>/dev/null | head -1)"; \
+	      printf "sysroot generation: %s\n" "$$gen"; \
 	    } | sha256sum | cut -d" " -f1 ); \
 	    old=""; \
 	    if [ -f "$(BUSYBOX_RECEIPT)" ]; then old=$$(cat "$(BUSYBOX_RECEIPT)"); fi; \
@@ -183,7 +210,7 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	      fi; \
 	      env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
 	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" SKIP_STRIP=y $(MAKE) MAKEOVERRIDES= \
-	        -C "$(BUSYBOX_PRIVATE)" CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)"; \
+	        -C "$(BUSYBOX_PRIVATE)" CC="$(BUSYBOX_LINK)" LD="$(BUSYBOX_LINK)"; \
 	    else \
 	      echo "  [busybox] config changed or unbuilt, rebuilding in $(BUSYBOX_PRIVATE)"; \
 	      printf "%s\n" "$$digest" > "$(BUSYBOX_INPUT_DG)"; \
@@ -193,19 +220,20 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	      cp "$(BUSYBOX_OVERLAY)/applets/Kbuild.src" "$(BUSYBOX_PRIVATE)/applets/Kbuild.src"; \
 	      sed -e "s|@TARGET_INCLUDEDIR@|$(SYSROOT)/usr/include|g" \
 	          -e "s|@TARGET_LIBDIR@|$(SYSROOT)/usr/lib|g" \
-	          -e "s|@TARGET_LINKERSCRIPT@|$(OS01_ROOT)/libc/arch/x86_64/user.ld|g" \
+	          -e "s|@TARGET_LINKERSCRIPT@|$(OS01_ROOT)/libc/arch/$(BUSYBOX_ARCH_DIR)/user.ld|g" \
 	          -e "s|@CLANG_RESOURCE_DIR@|$(CLANG_RESOURCE_DIR)|g" \
 	          -e "s|-I../../libc/include -I../../kernel/include ||" \
+	          $(BUSYBOX_SED_A64) \
 	          "$(OS01_ROOT)/config/busybox.config.in" > "$(BUSYBOX_PRIVATE)/.config"; \
 	      env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
 	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" SKIP_STRIP=y $(MAKE) MAKEOVERRIDES= \
-	        -C "$(BUSYBOX_PRIVATE)" silentoldconfig CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)" 2>/dev/null || \
+	        -C "$(BUSYBOX_PRIVATE)" silentoldconfig CC="$(BUSYBOX_LINK)" LD="$(BUSYBOX_LINK)" 2>/dev/null || \
 	      yes "" | env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
 	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" SKIP_STRIP=y $(MAKE) MAKEOVERRIDES= \
-	        -C "$(BUSYBOX_PRIVATE)" oldconfig CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)"; \
+	        -C "$(BUSYBOX_PRIVATE)" oldconfig CC="$(BUSYBOX_LINK)" LD="$(BUSYBOX_LINK)"; \
 	      env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
 	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" SKIP_STRIP=y $(MAKE) MAKEOVERRIDES= \
-	        -C "$(BUSYBOX_PRIVATE)" CC="$(TARGET_CCLD)" LD="$(TARGET_CCLD)"; \
+	        -C "$(BUSYBOX_PRIVATE)" CC="$(BUSYBOX_LINK)" LD="$(BUSYBOX_LINK)"; \
 	      [ -f "$(BUSYBOX_PRIVATE)/busybox" ] || { echo "ERROR: busybox build produced no binary"; exit 1; }; \
 	      printf "%s\n" "$$digest" > "$(BUSYBOX_RECEIPT)"; \
 	    fi; \
@@ -214,6 +242,6 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	  fi; \
 '
 
-endif # RUNTIME_TARGET_user == x86_64-unknown-none (BusyBox adapter is x86-only)
+endif # RUNTIME_TARGET_user set (BusyBox adapter covers every userland profile)
 
 endif

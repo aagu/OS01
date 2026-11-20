@@ -1,6 +1,7 @@
 # OS01 /etc/inittab (aarch64 product)
 # Format: id:action:process
-# /bin/terminal opens /dev/fb + /dev/gfx0 and spawns /bin/sh on a PTY
-# when a framebuffer is present, or falls back to /bin/sh on /dev/tty
-# in headless boots.
+# /bin/terminal opens /dev/fb + /dev/gfx0 and spawns busybox ash
+# (/bin/busybox, or /bin/sh — the busybox multicall copy) on a PTY when a
+# framebuffer is present, or falls back to the same shell on /dev/tty in
+# headless boots.
 tty1:respawn:/bin/terminal

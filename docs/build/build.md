@@ -18,7 +18,7 @@
 | Profile | 能力 | 产物 |
 | --- | --- | --- |
 | `x86_64-clang`（默认） | `kernel userland rootfs uefi` | `kernel.bin`、用户 ELF + BusyBox、`image/disk.img`、BOOTX64.EFI |
-| `aarch64-clang` | `kernel uefi userland` | `kernel.elf`、BOOTAA64.EFI、用户 ELF（init/sh 等，无 BusyBox/gfx 应用）、64 MiB FAT `image/aarch64-uefi.img`（含 /bin/init、/bin/sh、/etc/inittab） |
+| `aarch64-clang` | `kernel uefi userland` | `kernel.elf`、BOOTAA64.EFI、用户 ELF + BusyBox（2026-11-21 起；无 mbedTLS/gfx 应用）、64 MiB FAT `image/aarch64-uefi.img`（含 /bin/init、/bin/busybox、/bin/sh、/bin/terminal、/etc/inittab；FAT 无软链，/bin/sh 为 busybox 拷贝） |
 
 **能力契约**：每个入口 target 都是能力感知的。在缺少对应能力的 profile 上执行会立即失败（解析期报错，不会等到编译）：
 

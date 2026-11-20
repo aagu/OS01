@@ -4,8 +4,11 @@
 # version-controlled rootfs manifest (config/rootfs.mk) into a fresh staging
 # tree ($(ROOTFS_STAGING)); mkdisk then fills a GPT dual-partition image from
 # the generated file/symlink manifest. The aarch64 bring-up image (uefi
-# capability) is a plain 64 MiB FAT carrying exactly BOOTAA64.EFI +
-# kernel.elf + firmware — no BusyBox/mbedTLS/user/rootfs. AARCH64_UEFI_DISK
+# capability) is a plain 64 MiB FAT carrying BOOTAA64.EFI + kernel.elf +
+# firmware and — since the 2026-11-18 userland capability — the product
+# userspace (/bin/init, /bin/terminal, /etc/inittab) plus BusyBox (2026-11-21)
+# as real files (FAT has no symlinks). No mbedTLS/GUI apps/rootfs manifest on
+# this arch. AARCH64_UEFI_DISK
 # is defined only by mk/targets/aarch64.mk (aarch64-clang profile), so the
 # `ifdef AARCH64_UEFI_DISK` gates below keep aarch64-only rules out of
 # x86_64-clang now that both profiles share the `uefi` capability.
@@ -263,7 +266,7 @@ $(AARCH64_SELFTEST_MARKER): FORCE
 $(AARCH64_UEFI_DISK): $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
 		$(BUILD_DIR)/artifacts/kernel.elf $(AARCH64_UEFI_FIRMWARE) \
 		$(HOST_MKDISK) $(INITTAB_FILE) \
-		$(if $(filter userland,$(PROFILE_CAPABILITIES)),$(USER_ARTIFACT_DIR)/init.elf $(USER_ARTIFACT_DIR)/sh.elf $(USER_ARTIFACT_DIR)/terminal.elf) \
+		$(if $(filter userland,$(PROFILE_CAPABILITIES)),$(USER_ARTIFACT_DIR)/init.elf $(USER_ARTIFACT_DIR)/busybox.elf $(USER_ARTIFACT_DIR)/terminal.elf) \
 		$(if $(filter selftest,$(IMAGE_VARIANT)),$(AARCH64_SELFTEST_MARKER))
 ifeq ($(IMAGE_VARIANT),selftest)
 	@$(MAKE) -C tools check-deps HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools
@@ -285,11 +288,17 @@ else
 	@mcopy -i $@ $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI ::/EFI/BOOT/BOOTAA64.EFI
 	@mcopy -i $@ $(BUILD_DIR)/artifacts/kernel.elf ::/kernel.elf
 	@# Product userspace (2026-11-19): /bin/init is spawned by the boot-5
-	@# chain (kernel_start_userspace); its inittab respawns /bin/sh — the
-	@# serial shell (user/sh.c reading /dev/tty ASCII lines).  The x86
-	@# rootfs contract installs user programs extension-less (/bin/<name>).
+	@# chain (kernel_start_userspace); its inittab respawns /bin/terminal,
+	@# which execs /bin/busybox ash when busybox is present (or /bin/sh as
+	@# the fallback).  The x86 rootfs contract installs user programs
+	@# extension-less (/bin/<name>).
 	@mcopy -i $@ $(USER_ARTIFACT_DIR)/init.elf ::/bin/init
-	@mcopy -i $@ $(USER_ARTIFACT_DIR)/sh.elf ::/bin/sh
+	@# BusyBox (2026-11-21): FAT has no symlinks, so /bin/sh is a COPY of
+	@# the multicall binary — busybox dispatches applets on the argv[0]
+	@# basename, so the copy behaves exactly like the x86 /bin/sh→busybox
+	@# symlink.  terminal.elf prefers /bin/busybox ash (terminal.c stat).
+	@mcopy -i $@ $(USER_ARTIFACT_DIR)/busybox.elf ::/bin/busybox
+	@mcopy -i $@ $(USER_ARTIFACT_DIR)/busybox.elf ::/bin/sh
 	@mcopy -i $@ $(USER_ARTIFACT_DIR)/terminal.elf ::/bin/terminal
 	@mcopy -i $@ $(INITTAB_FILE) ::/etc/inittab
 endif

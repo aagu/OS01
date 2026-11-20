@@ -1,9 +1,9 @@
 # ── aarch64-clang profile ───────────────────────────────────────
 # aarch64 UEFI profile. Capabilities: kernel, uefi and (2026-11-18,
 # M4-remaining product userspace) userland — the aarch64 userland build
-# chain publishes its own sysroot generation and user ELFs.  It still
-# does not depend on mbedTLS, BusyBox (x86-only adapter), a general
-# rootfs, or the x86 test targets.
+# chain publishes its own sysroot generation and user ELFs.  BusyBox joined
+# the userland surface (2026-11-21, arch-parametrized adapter); it still
+# does not depend on mbedTLS, a general rootfs, or the x86 test targets.
 
 PROFILE_CAPABILITIES := kernel uefi userland
 
