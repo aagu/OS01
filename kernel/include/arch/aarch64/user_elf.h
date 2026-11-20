@@ -10,6 +10,15 @@
 /* Bounded, memory-backed ET_EXEC loader for the BSP EL0 probe. */
 #define AARCH64_ELF_MAX_PAGES 16
 
+/* Per-image resident-page cap for the M4 production image constructor.
+ * The M4 design's 16-page bound (§映像构造与所有权) was the BSP EL0
+ * probe's fixed-array bound; the production constructor maps pages
+ * dynamically and needs real binaries — busybox (2026-11-21) alone
+ * needs ~64 text pages.  1024 pages = 4 MiB resident, mirroring the
+ * AARCH64_SPAWN_ELF_MAX_BYTES file cap so an accepted image can never
+ * exceed one 4 MiB-scale budget for pages + stack. */
+#define AARCH64_PRODUCT_ELF_MAX_PAGES 1024
+
 /* Program-header cap shared by the legacy probe loader and the M4
  * production image constructor (M4 design §映像构造与所有权: "限制 32 个
  * 程序头和 16 个装载页"). */
@@ -36,7 +45,10 @@ struct aarch64_elf_view {
  *
  * `reject_tls` enables the PT_TLS rejection the production loader
  * requires (the M4 image has no TLS support yet); the legacy probe
- * passes false and keeps its historical format contract.
+ * passes false and keeps its historical format contract.  `max_pages`
+ * is the caller's per-image resident-page cap — the probe passes its
+ * fixed-array bound AARCH64_ELF_MAX_PAGES, the production constructor
+ * passes AARCH64_PRODUCT_ELF_MAX_PAGES.
  *
  * Returns 0 on success — *out then holds an owned view that must be
  * released with aarch64_elf_view_release().  On failure *out is left
@@ -44,7 +56,7 @@ struct aarch64_elf_view {
  * rejected layout), -EINVAL (bad argument) or -ENOMEM (no heap for the
  * program-header array). */
 int aarch64_elf_view_parse(const void *bytes, size_t size, bool reject_tls,
-                            struct aarch64_elf_view *out);
+                            unsigned max_pages, struct aarch64_elf_view *out);
 
 /* Release the program-header array owned by a parsed view.  Safe on a
  * zeroed or already-released view. */

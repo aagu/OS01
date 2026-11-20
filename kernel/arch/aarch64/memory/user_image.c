@@ -95,7 +95,7 @@ int aarch64_user_image_load(const void *bytes, size_t size,
     int rc = aarch64_elf_view_parse(bytes, size,
                                      true /* the production image has no
                                            * TLS support yet */,
-                                     &view);
+                                     AARCH64_PRODUCT_ELF_MAX_PAGES, &view);
     if (rc) {
 #if AARCH64_EL0_TEST
         aarch64_user_task_test_note_image(false);

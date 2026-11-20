@@ -29,10 +29,14 @@ enum { ELF_CURRENT_VERSION = 1 };
 
 /* Segment-level rules shared by both loaders.  `reject_tls` adds the
  * PT_TLS rejection the production loader needs; the legacy probe keeps
- * its historical contract and passes false. */
+ * its historical contract and passes false.  `max_pages` is the
+ * per-image resident-page cap: the probe's fixed 16-page bound
+ * (AARCH64_ELF_MAX_PAGES — its loader stores page PAs in a fixed
+ * array) or the production constructor's AARCH64_PRODUCT_ELF_MAX_PAGES. */
 static bool aarch64_elf_segments_ok(const elf64_ehdr_t *ehdr,
                                      const elf64_phdr_t *phdrs,
-                                     bool reject_tls)
+                                     bool reject_tls,
+                                     unsigned max_pages)
 {
     unsigned page_count = 0;
     bool entry_file_backed = false;
@@ -55,7 +59,7 @@ static bool aarch64_elf_segments_ok(const elf64_ehdr_t *ehdr,
             return false;
 
         uint64_t pages = (ph->p_memsz + PAGE_4K_SIZE - 1) / PAGE_4K_SIZE;
-        if (pages > AARCH64_ELF_MAX_PAGES - page_count)
+        if (pages > max_pages - page_count)
             return false;
         page_count += pages;
 
@@ -85,9 +89,9 @@ void aarch64_elf_sync_icache(void)
 }
 
 int aarch64_elf_view_parse(const void *bytes, size_t size, bool reject_tls,
-                            struct aarch64_elf_view *out)
+                            unsigned max_pages, struct aarch64_elf_view *out)
 {
-    if (!out)
+    if (!out || max_pages == 0)
         return -EINVAL;
     out->ehdr = (elf64_ehdr_t){0};
     out->phdrs = NULL;
@@ -124,7 +128,7 @@ int aarch64_elf_view_parse(const void *bytes, size_t size, bool reject_tls,
 
     elf_layout_t layout;
     if (elf_layout_validate_machine(&ehdr, phdrs, size, EM_AARCH64, &layout) ||
-        !aarch64_elf_segments_ok(&ehdr, phdrs, reject_tls)) {
+        !aarch64_elf_segments_ok(&ehdr, phdrs, reject_tls, max_pages)) {
         aarch64_elf_view_release(out);
         return -ENOEXEC;
     }
@@ -164,7 +168,7 @@ int aarch64_user_elf_load(const void *file, size_t size,
     int rc = aarch64_elf_view_parse(file, size,
                                      false /* the probe keeps its format
                                             * contract: no PT_TLS reject */,
-                                     &view);
+                                     AARCH64_ELF_MAX_PAGES, &view);
     if (rc)
         return rc;
 
