@@ -20,7 +20,11 @@
  * BSS bytes stay zero, shared-page payloads survive, holes have no
  * PTE, injected alloc/read/map failures roll back every created
  * leaf exactly once, and the loader returns -ENOEXEC/-ENOMEM
- * without disturbing the caller mm on failure).
+ * without disturbing the caller mm on failure).  W^X refinement:
+ * writable leaves carry NX, RO non-executable leaves carry NX,
+ * only segments (or shared pages) that request execute stay
+ * executable, and an executable request against an existing NX
+ * shared leaf is rejected with -ENOEXEC.
  */
 #include "test_framework.h"
 #include <fcntl.h>
@@ -51,6 +55,7 @@
 #define PAGE_WRITE_BIT  0x2UL
 #define PAGE_USER_BIT   0x4UL
 #define PAGE_HUGE_BIT   (1UL << 7)
+#define PAGE_NO_EXEC_BIT (1UL << 63)   /* x86 PTE bit 63 (NX) */
 
 /* ── Per-test fixtures ─────────────────────────────────────── */
 
@@ -162,10 +167,12 @@ TEST_FUNC(test_load_single_4k_text) {
     assert_true(rec->phys != 0);
     /* No PAGE_HUGE bit — must be a 4 KiB PTE leaf. */
     assert_eq(0UL, rec->flags & PAGE_HUGE_BIT);
-    /* PF_R|PF_X maps to RO user (W not set), so PAGE_USER | PAGE_VALID. */
+    /* PF_R|PF_X maps to RO user executable (W not set, X granted),
+     * so PAGE_USER | PAGE_VALID and no NX. */
     assert_true((rec->flags & PAGE_USER_BIT) != 0);
     assert_true((rec->flags & PAGE_VALID_BIT) != 0);
     assert_eq(0UL, rec->flags & PAGE_WRITE_BIT);
+    assert_eq(0UL, rec->flags & PAGE_NO_EXEC_BIT);
 
     /* mm code bounds */
     assert_eq(0x400000UL, fixture_mm.start_code);
@@ -251,8 +258,9 @@ TEST_FUNC(test_load_bss_preserves_zero) {
     for (int i = 0; i < (int)sizeof(code); i++) code[i] = 0xAA;
     /* 4 KiB memsz, 0x400 bytes of file data — second page is
      * pure BSS.  Entry must fall inside an executable PT_LOAD
-     * (per elf_layout_validate); we mark the segment RX + RW
-     * which the loader still maps as RO/RW based on PF_W. */
+     * (per elf_layout_validate); we mark the segment R+W+X,
+     * which the loader maps RWX (explicit W|X keeps the leaf
+     * executable under the W^X refinement). */
     segment_spec_t segs[] = {
         { PF_R | PF_W | PF_X, 0x600000, 0x400, 0x2000, code }
     };
@@ -288,40 +296,86 @@ TEST_FUNC(test_load_bss_preserves_zero) {
     teardown_fixture();
 }
 
-/* 5. Adjacent segments sharing one 4 KiB leaf — RW data first,
- * RX text second.  Per the brief, the loader keeps the existing
- * RW mapping (compatibility: RO request is a subset of RW). */
-TEST_FUNC(test_load_adjacent_segments_share_page_rw_first) {
+/* 5a. Adjacent segments sharing one 4 KiB leaf — RW data first,
+ * RX text second.  Under the W^X refinement the RW leaf is NX, and
+ * the loader never rewrites a leaf's flags (first mapper wins), so
+ * the executable request cannot be satisfied — genuinely
+ * incompatible → -ENOEXEC (the shared page must never end up RWX). */
+TEST_FUNC(test_load_shared_page_exec_after_rw_rejected) {
     uint8_t text_data[0x800];
     uint8_t data_bytes[0x800];
     for (int i = 0; i < 0x800; i++) { text_data[i] = 0x11; data_bytes[i] = 0x22; }
     segment_spec_t segs[] = {
-        /* data first (RW): 0x400000..0x400800 */
+        /* data first (RW): 0x400000..0x400800 — leaf is RW+NX */
         { PF_R | PF_W, 0x400000, 0x800, 0x800, data_bytes },
-        /* text second (RX): 0x400800..0x401000 */
+        /* text second (RX): 0x400800..0x401000 — wants X on the NX leaf */
         { PF_R | PF_X, 0x400800, 0x800, 0x800, text_data }
     };
     size_t file_size = build_elf_image(0x400900, segs, 2);
     setup_fixture(file_size, 0x100000);
 
+    uint64_t entry = 0xDEADBEEFUL;
+    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    assert_eq(-ENOEXEC, rc);
+    assert_eq(0xDEADBEEFUL, entry);
+
+    /* Rollback: every created leaf freed/unmapped exactly once. */
+    assert_eq(elf_load_state.total_allocs, elf_load_state.total_frees);
+    assert_eq(elf_load_state.total_maps, elf_load_state.total_unmaps);
+    assert_null(stubs_find_mapping(0x400000));
+
+    teardown_fixture();
+}
+
+/* 5b. Adjacent segments sharing one 4 KiB leaf — RW data first,
+ * R (.rodata) second.  Compatibility: the RO/NX request is a subset
+ * of the existing RW/NX leaf, so the merge keeps W and NX.  A
+ * separate RX text segment supplies the entry point. */
+TEST_FUNC(test_load_adjacent_segments_share_page_rw_first) {
+    uint8_t rodata_bytes[0x800];
+    uint8_t data_bytes[0x800];
+    uint8_t text_data[0x200];
+    for (int i = 0; i < 0x800; i++) { rodata_bytes[i] = 0x11; data_bytes[i] = 0x22; }
+    for (int i = 0; i < 0x200; i++) text_data[i] = 0x33;
+    segment_spec_t segs[] = {
+        /* data first (RW): 0x400000..0x400800 */
+        { PF_R | PF_W, 0x400000, 0x800, 0x800, data_bytes },
+        /* rodata second (R): 0x400800..0x401000 — same leaf */
+        { PF_R, 0x400800, 0x800, 0x800, rodata_bytes },
+        /* text (RX): own page, entry point */
+        { PF_R | PF_X, 0x402000, 0x200, 0x200, text_data }
+    };
+    size_t file_size = build_elf_image(0x402010, segs, 3);
+    setup_fixture(file_size, 0x100000);
+
     uint64_t entry = 0;
     int rc = elf_load(&fixture_node, &fixture_mm, &entry);
     assert_eq(0, rc);
+    assert_eq(0x402010UL, entry);
 
-    /* Exactly one leaf for both segments — no double alloc. */
+    /* Shared leaf for the first two segments + one text leaf — no
+     * double alloc on the shared page. */
     assert_not_null(stubs_find_mapping(0x400000));
-    assert_eq(1, elf_load_state.total_maps);
-    assert_eq(1, elf_load_state.total_allocs);
+    assert_not_null(stubs_find_mapping(0x402000));
+    assert_eq(2, elf_load_state.total_maps);
+    assert_eq(2, elf_load_state.total_allocs);
 
-    /* Existing W must be preserved (compatible merge). */
+    /* Existing W must be preserved (compatible merge), and the page
+     * stays NX — neither segment asked for execute. */
     elf_load_pte_record_t *rec = stubs_find_mapping(0x400000);
     assert_true((rec->flags & PAGE_WRITE_BIT) != 0);
     assert_true((rec->flags & PAGE_USER_BIT) != 0);
     assert_true((rec->flags & PAGE_VALID_BIT) != 0);
+    assert_true((rec->flags & PAGE_NO_EXEC_BIT) != 0);
+
+    /* The text leaf is the only executable one. */
+    elf_load_pte_record_t *txt = stubs_find_mapping(0x402000);
+    assert_eq(0UL, txt->flags & PAGE_NO_EXEC_BIT);
+    assert_eq(0UL, txt->flags & PAGE_WRITE_BIT);
 
     /* Both segments' file bytes must survive in the single backing
-     * page: bytes 0..0x7FF = data (0x22), bytes 0x800..0xFFF = text
-     * (0x11). */
+     * page: bytes 0..0x7FF = data (0x22), bytes 0x800..0xFFF =
+     * rodata (0x11). */
     for (int i = 0; i < ELF_LOAD_PAGE_POOL_SIZE; i++) {
         if (elf_load_page_pool[i].phys == rec->phys) {
             uint8_t *p = (uint8_t *)elf_load_page_pool[i].backing;
@@ -508,17 +562,20 @@ TEST_FUNC(test_load_rollback_on_map_failure) {
 }
 
 /* 11. Each newly mapped page is allocated exactly once (no
- * double-alloc on shared 4 KiB pages). */
+ * double-alloc on shared 4 KiB pages).  RX text first, R
+ * (.rodata) second: the NX request is a subset of the existing
+ * R+X leaf, so the merge succeeds and keeps the page executable. */
 TEST_FUNC(test_load_shared_page_no_double_alloc) {
-    uint8_t text[0x800], data[0x800];
+    uint8_t text[0x800], rodata[0x800];
     memset(text, 0x11, sizeof(text));
-    memset(data, 0x22, sizeof(data));
-    /* Two segments share 4 KiB page at 0x400000. */
+    memset(rodata, 0x22, sizeof(rodata));
+    /* Two segments share 4 KiB page at 0x400000.  Entry must sit
+     * inside the executable text range [0x400000, 0x400800). */
     segment_spec_t segs[] = {
-        { PF_R | PF_W, 0x400000, 0x800, 0x800, data },
-        { PF_R | PF_X, 0x400800, 0x800, 0x800, text }
+        { PF_R | PF_X, 0x400000, 0x800, 0x800, text },
+        { PF_R, 0x400800, 0x800, 0x800, rodata }
     };
-    size_t file_size = build_elf_image(0x400900, segs, 2);
+    size_t file_size = build_elf_image(0x400100, segs, 2);
     setup_fixture(file_size, 0x100000);
 
     uint64_t entry = 0;
@@ -530,6 +587,12 @@ TEST_FUNC(test_load_shared_page_no_double_alloc) {
     assert_eq(1, elf_load_state.total_maps);
     assert_eq(0, elf_load_state.total_unmaps);
     assert_eq(0, elf_load_state.total_frees);
+
+    /* First mapper wins on X: the leaf stays executable (no NX),
+     * no W (neither segment asked for it). */
+    elf_load_pte_record_t *rec = stubs_find_mapping(0x400000);
+    assert_eq(0UL, rec->flags & PAGE_NO_EXEC_BIT);
+    assert_eq(0UL, rec->flags & PAGE_WRITE_BIT);
 
     teardown_fixture();
 }
@@ -811,6 +874,100 @@ TEST_FUNC(test_detect_abi_interp_ignored) {
     teardown_fixture();
 }
 
+/* 16. W^X leaf refinement: a writable segment (.data/.bss shape,
+ * PF_R|PF_W) maps RW+NX; the text segment maps R+X.  This is the
+ * roadmap "ELF 分段 NX 细化" core assertion — writable ELF leaves
+ * must never be RWX. */
+TEST_FUNC(test_load_writable_leaf_is_nx) {
+    uint8_t text[0x100], data[0x100];
+    memset(text, 0x11, sizeof(text));
+    memset(data, 0x22, sizeof(data));
+    segment_spec_t segs[] = {
+        { PF_R | PF_X, 0x400000, 0x100, 0x1000, text },
+        { PF_R | PF_W, 0x401000, 0x100, 0x2000, data }  /* 2nd page = BSS */
+    };
+    size_t file_size = build_elf_image(0x400010, segs, 2);
+    setup_fixture(file_size, 0x100000);
+
+    uint64_t entry = 0;
+    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    assert_eq(0, rc);
+
+    /* Text leaf: user R+X (no W, no NX). */
+    elf_load_pte_record_t *txt = stubs_find_mapping(0x400000);
+    assert_not_null(txt);
+    assert_eq(0UL, txt->flags & PAGE_WRITE_BIT);
+    assert_eq(0UL, txt->flags & PAGE_NO_EXEC_BIT);
+
+    /* Data leaf (file-backed part): user RW + NX. */
+    elf_load_pte_record_t *dat = stubs_find_mapping(0x401000);
+    assert_not_null(dat);
+    assert_true((dat->flags & PAGE_WRITE_BIT) != 0);
+    assert_true((dat->flags & PAGE_NO_EXEC_BIT) != 0);
+
+    /* BSS leaf (memsz tail, no file bytes): same RW+NX word. */
+    elf_load_pte_record_t *bss = stubs_find_mapping(0x402000);
+    assert_not_null(bss);
+    assert_true((bss->flags & PAGE_WRITE_BIT) != 0);
+    assert_true((bss->flags & PAGE_NO_EXEC_BIT) != 0);
+
+    teardown_fixture();
+}
+
+/* 17. A read-only, non-executable segment (.rodata shape, PF_R
+ * only) maps RO+NX — no longer ROX under the W^X refinement. */
+TEST_FUNC(test_load_rodata_leaf_ro_nx) {
+    uint8_t text[0x100], rodata[0x100];
+    memset(text, 0x11, sizeof(text));
+    memset(rodata, 0xAA, sizeof(rodata));
+    segment_spec_t segs[] = {
+        { PF_R | PF_X, 0x400000, 0x100, 0x1000, text },
+        { PF_R, 0x401000, 0x100, 0x1000, rodata }
+    };
+    size_t file_size = build_elf_image(0x400010, segs, 2);
+    setup_fixture(file_size, 0x100000);
+
+    uint64_t entry = 0;
+    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    assert_eq(0, rc);
+
+    elf_load_pte_record_t *ro = stubs_find_mapping(0x401000);
+    assert_not_null(ro);
+    assert_eq(0UL, ro->flags & PAGE_WRITE_BIT);
+    assert_true((ro->flags & PAGE_NO_EXEC_BIT) != 0);
+    assert_true((ro->flags & PAGE_USER_BIT) != 0);
+    assert_true((ro->flags & PAGE_VALID_BIT) != 0);
+
+    teardown_fixture();
+}
+
+/* 18. A segment explicitly requesting W+X keeps the executable RW
+ * leaf (no NX) — the same relaxation x86_vma_pte_flags grants
+ * mmap PROT_READ|PROT_WRITE|PROT_EXEC, so the loader and the VMA
+ * policy agree on RWX. */
+TEST_FUNC(test_load_rwx_segment_stays_executable) {
+    uint8_t rwxblob[0x100], text[0x100];
+    memset(rwxblob, 0x44, sizeof(rwxblob));
+    memset(text, 0x11, sizeof(text));
+    segment_spec_t segs[] = {
+        { PF_R | PF_X, 0x400000, 0x100, 0x1000, text },
+        { PF_R | PF_W | PF_X, 0x401000, 0x100, 0x1000, rwxblob }
+    };
+    size_t file_size = build_elf_image(0x400010, segs, 2);
+    setup_fixture(file_size, 0x100000);
+
+    uint64_t entry = 0;
+    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    assert_eq(0, rc);
+
+    elf_load_pte_record_t *rwx = stubs_find_mapping(0x401000);
+    assert_not_null(rwx);
+    assert_true((rwx->flags & PAGE_WRITE_BIT) != 0);
+    assert_eq(0UL, rwx->flags & PAGE_NO_EXEC_BIT);
+
+    teardown_fixture();
+}
+
 /* ── Test registration ──────────────────────────────────── */
 
 /* Source-access helpers for the over-cap defense contract (the
@@ -918,6 +1075,10 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_load_rejects_zero_pt_loads),
     TEST_ENTRY(test_load_mm_code_bounds_from_layout),
     TEST_ENTRY(test_load_multi_page_with_bss),
+    TEST_ENTRY(test_load_shared_page_exec_after_rw_rejected),
+    TEST_ENTRY(test_load_writable_leaf_is_nx),
+    TEST_ENTRY(test_load_rodata_leaf_ro_nx),
+    TEST_ENTRY(test_load_rwx_segment_stays_executable),
     TEST_ENTRY(test_detect_abi_native),
     TEST_ENTRY(test_detect_abi_linux_note),
     TEST_ENTRY(test_detect_abi_other_note),

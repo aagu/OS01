@@ -57,16 +57,24 @@
  * adjacent segments overlap. */
 #define MAX_LOAD_LEAVES 8192
 
-/* PTE flags derived from p_flags:
- *   PF_W set  → PAGE_USER_PTE     (user R/W)
- *   PF_W clear → PAGE_USER_PTE_RO (user RO)
- * NX is intentionally not refined (Task 2 brief: "do not refine
- * NX / per-segment RWX").  Both classes share the kernel's default
- * (no NX in our current PTE permission set — only USER/VALID/WRITE
- * bits are used). */
+/* PTE flags derived from p_flags (W^X refinement — the leaf-level
+ * counterpart of the VMA policy in <arch/x86_64/vma.h>, which adds
+ * PAGE_NO_EXEC whenever EXEC is not granted):
+ *   PF_W set                → PAGE_USER_PTE | PAGE_NO_EXEC (user RW, NX)
+ *   PF_W clear, PF_X set    → PAGE_USER_PTE_RO             (user R, X)
+ *   PF_W clear, PF_X clear  → PAGE_USER_PTE_RO | PAGE_NO_EXEC (user RO, NX)
+ * A segment that requests both W and X keeps the executable RW leaf
+ * (no NX) — mmap's PROT_READ|PROT_WRITE|PROT_EXEC gets the same
+ * relaxation from x86_vma_pte_flags, so the two policies agree: NX
+ * everywhere except segments (or VMA prots) that explicitly ask for
+ * execute.  .data/.bss leaves are therefore RW/NX and .rodata leaves
+ * RO/NX; only .text stays executable. */
 static inline uint64_t elf_pte_flags(uint32_t p_flags)
 {
-    return (p_flags & PF_W) ? PAGE_USER_PTE : PAGE_USER_PTE_RO;
+    uint64_t f = (p_flags & PF_W) ? PAGE_USER_PTE : PAGE_USER_PTE_RO;
+    if (!(p_flags & PF_X))
+        f |= PAGE_NO_EXEC;
+    return f;
 }
 
 /* Returns 1 if a later PT_LOAD's request is compatible with the
@@ -75,18 +83,26 @@ static inline uint64_t elf_pte_flags(uint32_t p_flags)
  *   "If permissions are genuinely incompatible (W on one, no-W
  *    on another sharing a page), reject with -ENOEXEC".
  * Compatibility rule: existing must already be a superset of the
- * request.  We only check the W bit; the loader only ever sets
- * USER / VALID / (optionally WRITE).  Two PAGE_USER_PTE_RO leaves
- * are trivially compatible; one PAGE_USER_PTE_RO followed by a
- * PAGE_USER_PTE request is incompatible (RO existing can't
- * satisfy RW); one PAGE_USER_PTE followed by a PAGE_USER_PTE_RO
- * request is compatible (keep W).
+ * request on BOTH the W and the X axis (X = absence of
+ * PAGE_NO_EXEC; first mapper wins, the loader never rewrites a
+ * leaf's flags).  One PAGE_USER_PTE_RO|NX followed by a
+ * PAGE_USER_PTE request is incompatible (RO existing can't satisfy
+ * RW); one PAGE_USER_PTE|NX followed by a PAGE_USER_PTE_RO request
+ * is compatible (keep W).  The X axis works the same way: an NX
+ * leaf can't satisfy an executable request — in particular a
+ * writable segment and an executable segment sharing one 4 KiB
+ * page can never both be satisfied without producing a RWX leaf,
+ * so such images are rejected with -ENOEXEC (a shared page stays
+ * W^X-clean or the exec fails up front, never silently RWX).
  */
 static inline int pte_flags_compatible(uint64_t existing, uint64_t request)
 {
     uint64_t want_w = (request & PAGE_FLAGS_WRITE_BIT) ? 1 : 0;
     uint64_t have_w = (existing & PAGE_FLAGS_WRITE_BIT) ? 1 : 0;
     if (want_w && !have_w) return 0;
+    uint64_t want_x = (request & PAGE_NO_EXEC) ? 0 : 1;
+    uint64_t have_x = (existing & PAGE_NO_EXEC) ? 0 : 1;
+    if (want_x && !have_x) return 0;
     return 1;
 }
 
@@ -218,10 +234,13 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
 
                 /* Check permission compatibility.  Incompatibility
                  * means the page was previously mapped with stricter
-                 * (RO) permissions than this segment needs (RW) —
-                 * rejecting here keeps the existing mapping intact
-                 * for the caller to free later. */
-                uint64_t existing = *pte & PAGE_FLAGS_NR_MASK;
+                 * (RO or NX) permissions than this segment needs
+                 * (RW or X) — rejecting here keeps the existing
+                 * mapping intact for the caller to free later.
+                 * PAGE_FLAGS_NR_MASK alone would drop the NX bit
+                 * (bit 63), so it is OR-ed in explicitly. */
+                uint64_t existing =
+                    (*pte & (PAGE_FLAGS_NR_MASK | PAGE_NO_EXEC));
                 if (!pte_flags_compatible(existing, seg_flags)) {
                     debug_fs("elf_load: incompatible PTE at %p (have=%lx want=%lx)\n",
                                   (void *)pg, existing, seg_flags);

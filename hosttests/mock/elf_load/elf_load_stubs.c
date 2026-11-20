@@ -209,7 +209,14 @@ int x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys,
      // invariant is exercised by the test's PTE flags/phys inspection. */
     rec->phys  = phys;
     rec->flags = flags;
-    rec->pte   = (phys & ~0xFFFUL) | (flags & 0xFFFUL);
+    /* The stored PTE word keeps the low-12 flag bits (the presence
+     * checks — rec->pte & PAGE_VALID — and the loader's PA read-back
+     * depend on them) and additionally carries PAGE_NO_EXEC: the W^X
+     * loader reads NX (bit 63) back through vmm_pt_walk when it
+     * checks shared-page compatibility, mirroring production
+     * x86_pte_4k_make which keeps every non-PA flag bit. */
+    rec->pte   = (phys & ~0xFFFUL) | (flags & 0xFFFUL) |
+                 (flags & PAGE_NO_EXEC);
     elf_load_state.total_maps++;
     return 0;
 }
