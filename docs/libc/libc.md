@@ -131,12 +131,11 @@ libc 的真实消费者都在本仓库里，且**必须走真实库能力**：
   语义）。
 - **BusyBox**（`thirdpart/busybox-1.36.1/`）：子模块**未被改写**；`HAVE_GETLINE` 由 BusyBox
   自己的配置决定，libc 侧的 `getline` 是真实现（不再需要 fallback）。
-- **内核侧 `libk.a`**：只提供内核需要的子集，**不**要求用户态的 `posix_memalign`/
-  `aligned_alloc`/正则/浮点扫描接口（审计脚本的 `LIBK_NOT_REQUIRED`）。
-  `realpath` 在 libk 里**保留为历史上的空壳**（恒答 `NULL`）：用户态的真实实现会调用
-  `getcwd`/`lstat`/`readlink` 这些**用户 syscall**，不能进内核归档。审计脚本把
-  "libk 不许丢掉已支持的导出"当作冻结契约，所以两个 profile 的 libk 都继续导出这个符号，
-  但它只是壳（`llvm-nm --print-size`：libk 24 字节 / 用户 `libc.a` 2409 字节）。
+- **内核侧 `libk.a`**：x86_64 与 aarch64 现共用**同一套架构中立的 freestanding 内核子集**
+  （`ctype`/`errno`/`list`/`rbtree`/`string`/`malloc`/`calloc`/`reallocarray`/`strtol`/`sprintf`/`vsnprintf`/`vsprintf` 等），
+  不包含用户态 syscall 包装与浮点对象，审计脚本使用统一的 `LIBK_SUPPORTED` 基线。
+  `realpath` 在 libk 里仍保留为空壳（恒答 `NULL`，`#ifndef __is_libk` 隔离用户态实现），
+  双架构导出完全一致。
 
 ---
 

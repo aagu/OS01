@@ -32,30 +32,26 @@ CFLAGS := $(CFLAGS) -ffreestanding -Wall -Wextra -D__is_libc -Iinclude -fstack-p
 LIBK_CFLAGS := $(CFLAGS) -D__is_libk -mno-red-zone -I../kernel/include -fno-stack-protector $(KERNEL_ARCH_CFLAGS)
 
 # ── Source discovery (wildcard — no manual lists!) ──────────
-# x86_64 builds the full userland libc (libc.a + libk.a are both installed
-# to the immutable sysroot generation for kernel/user linking). aarch64
-# historically only needed libk.a (kernel-link only); since the 2026-11-18
-# userland capability it builds BOTH: libc.a uses the same full source list
-# as x86 (libc/include/sys/syscall.h now carries an __aarch64__ SVC branch,
-# so the historical x86-asm blocker is gone), while libk.a keeps the
-# intentionally narrower kernel subset.
+# Both x86_64 and aarch64 build the full userland libc.a AND the same
+# unified freestanding kernel subset libk.a (no user-syscall wrappers, no
+# floating-point objects that violate aarch64's -mgeneral-regs-only).
 #
-# `stdlib/realpath.c` is in the aarch64 libk list for the libk SURFACE only:
+# `stdlib/realpath.c` is in the unified libk list for the libk SURFACE only:
 # under __is_libk the file compiles to the historical empty shell (it answers
 # NULL), so the kernel archive exports the symbol without gaining an object
 # that would issue user syscalls.  The user-space implementation is in the
 # same file, behind `#ifndef __is_libk`.
-ifeq ($(HOSTARCH),aarch64)
 LIBK_C_SOURCES := \
     $(wildcard ctype/*.c) \
     $(wildcard errno/*.c) \
     $(wildcard list/*.c) \
     $(wildcard rbtree/*.c) \
     stdlib/calloc.c stdlib/malloc.c stdlib/reallocarray.c \
-    stdlib/realpath.c \
+    stdlib/realpath.c stdlib/strtol.c \
     stdio/vsprintf.c stdio/vsnprintf.c stdio/sprintf.c \
     $(wildcard string/*.c) \
     $(filter-out ssp/ssp.c, $(wildcard ssp/*.c))
+
 LIBC_C_SOURCES := \
     $(wildcard ctype/*.c) \
     $(wildcard errno/*.c) \
@@ -83,36 +79,6 @@ LIBC_C_SOURCES := \
     $(wildcard pthread/*.c) \
     $(wildcard random/*.c) \
     $(wildcard ssp/*.c)
-else
-LIBK_C_SOURCES := \
-    $(wildcard ctype/*.c) \
-    $(wildcard errno/*.c) \
-    $(wildcard list/*.c) \
-    $(wildcard rbtree/*.c) \
-    $(wildcard network/*.c) \
-    $(wildcard stdio/*.c) \
-    $(wildcard stdlib/*.c) \
-    $(wildcard string/*.c) \
-    $(wildcard time/*.c) \
-    $(wildcard sys/stat/*.c) \
-    $(wildcard unistd/*.c) \
-    $(wildcard termios/*.c) \
-    $(wildcard socket/*.c) \
-    $(wildcard netdb/*.c) \
-    $(wildcard sched/*.c) \
-    $(wildcard xattr/*.c) \
-    $(wildcard resource/*.c) \
-    $(wildcard pwd/*.c) \
-    $(wildcard grp/*.c) \
-    $(wildcard csu/*.c) \
-    $(wildcard signal/*.c) \
-    $(wildcard arpa/*.c) \
-    $(wildcard libgen/*.c) \
-    $(wildcard pthread/*.c) \
-    $(wildcard random/*.c) \
-    $(wildcard ssp/*.c)
-LIBC_C_SOURCES := $(LIBK_C_SOURCES)
-endif
 
 # Remove duplicates: free.c conflicts with malloc.c (chown.c conflict gone — uid_stubs.c deleted)
 LIBK_C_SOURCES := $(filter-out stdlib/free.c, $(LIBK_C_SOURCES))

@@ -141,68 +141,25 @@ LIBK_NOT_REQUIRED: frozenset[str] = frozenset({
 # touch the allocator's private block layout.
 LIBK_SHARED: frozenset[str] = frozenset({"reallocarray"})
 
-# The api-group symbols that each profile's libk.a already provides — the
-# "already-supported subset" the plan freezes for the libk audit.  libk is
-# NOT required to provide the rest of the user-facing API: the api-group
-# symbols that libk does not have are simply out of the libk scope, and
-# the explicitly shared symbols (LIBK_SHARED) are the only additions a
-# later task may make.  The x86_64 and aarch64 libk builds export
-# different subsets, so the baseline is per profile.
-LIBK_SUPPORTED: dict[str, frozenset[str]] = {
-    "x86_64-clang": frozenset(
+# The api-group symbols that the unified kernel libk.a provides across ALL
+# architectures.  libk is NOT required to provide user-only syscall wrappers
+# or floating-point interfaces (blocked by aarch64 -mgeneral-regs-only);
+# both x86_64 and aarch64 now build the exact same freestanding kernel subset,
+# so a single arch-neutral baseline applies to every profile.
+KNOWN_PROFILES: frozenset[str] = frozenset({"x86_64-clang", "aarch64-clang"})
+
+LIBK_SUPPORTED: frozenset[str] = frozenset(
     """
-_exit abort accept access alarm asctime asctime_r atexit atof atoi
-atol basename bcmp bind bsearch calloc cfgetispeed cfgetospeed
-cfsetispeed cfsetospeed chdir chmod chown chroot clearenv clearerr
-clock clock_gettime close closedir connect ctime ctime_r dirname
-dprintf dup dup2 execv execve execvp exit fchdir fchmod fchown fclose
-fcntl fdopen ferror_unlocked fflush fgets_unlocked fgetxattr
-fileno_unlocked flistxattr fopen fprintf fputc fputs fread free
-freeaddrinfo fremovexattr fsetxattr fstat fstatat ftruncate fwrite
-gai_strerror getaddrinfo getauxval getc_unlocked getchar
-getchar_unlocked getcwd getdents64 getegid getenv geteuid getgid
-getgrgid getgrnam getgroups gethostbyname getnameinfo getopt
-getpeername getpgid getpgrp getpid getppid getpwnam getpwuid getrandom
-getrlimit getservbyname getsid getsockname getsockopt gettimeofday
-getuid getxattr gmtime gmtime_r hstrerror htonl htons inet_aton
-inet_ntoa initgroups ioctl isalnum isalpha isascii isatty isblank
-iscntrl isdigit isgraph islower isprint ispunct isspace isupper
-isxdigit kill killpg lchown lgetxattr link listen listxattr llistxattr
-localtime localtime_r longjmp lremovexattr lseek lsetxattr lstat
-malloc memchr memcmp memcpy memmove mempcpy memset mkdir mknod mkstemp
-mktime mmap mprotect munmap nanosleep ntohl ntohs open opendir perror
-pipe poll prctl printf pselect pthread_mutex_destroy
-pthread_mutex_init pthread_mutex_lock pthread_mutex_trylock
-pthread_mutex_unlock putc_unlocked putchar putchar_unlocked putenv
-puts qsort raise rand read readdir readlink realloc realpath recv
-recvfrom removexattr rename rmdir sched_get_priority_max
-sched_get_priority_min sched_getaffinity sched_getscheduler
-sched_setaffinity sched_setscheduler sched_yield select send sendto
-setegid setenv seteuid setgid setgroups setjmp setpgid setrlimit
-setsid setsockopt settimeofday setuid setxattr shutdown sigaction
-signal sigprocmask sigsuspend skip_atoi sleep snprintf socket
-socketpair sprintf srand sscanf stat stpcpy stpncpy strcasecmp strcat
-strchr strchrnul strcmp strcpy strcspn strdup strerror strftime strlen
-strncasecmp strncat strncmp strncpy strndup strnlen strpbrk strptime
-strrchr strsep strsignal strspn strstr strtod strtok strtok_r strtol
-strtoll strtoul strtoull strverscmp symlink sysconf tcflow tcflush
-tcgetattr tcgetpgrp tcsetattr tcsetpgrp time times tolower toupper
-truncate ttyname_r umask uname unlink unsetenv utimes vasprintf vfork
-vfprintf vprintf vsnprintf vsprintf waitpid write
-    """.split()
-),
-    "aarch64-clang": frozenset(
-    """
-bcmp bsearch calloc free isalnum isalpha isascii isblank iscntrl
+atoi atol bcmp bsearch calloc free isalnum isalpha isascii isblank iscntrl
 isdigit isgraph islower isprint ispunct isspace isupper isxdigit
 malloc memchr memcmp memcpy memmove mempcpy memset perror realloc
-realpath skip_atoi stpcpy stpncpy strcasecmp strcat strchr strchrnul
-strcmp strcpy strcspn strdup strerror strlen strncasecmp strncat
-strncmp strncpy strndup strnlen strpbrk strrchr strsep strsignal
-strspn strstr strtok strtok_r strverscmp tolower toupper vsprintf
+realpath skip_atoi snprintf sprintf stpcpy stpncpy strcasecmp strcat
+strchr strchrnul strcmp strcpy strcspn strdup strerror strlen strncasecmp
+strncat strncmp strncpy strndup strnlen strpbrk strrchr strsep strsignal
+strspn strstr strtok strtok_r strtol strtoul strverscmp tolower toupper
+vsnprintf vsprintf
     """.split()
 )
-}
 
 # ── The api group inventory ────────────────────────────────────────────
 # header -> the public functions the header declares.  These are the
@@ -1283,10 +1240,10 @@ def libk_required(group: str, profile: str = "x86_64-clang") -> set[str]:
     group delivers them.
     """
     syms = all_group_symbols(group)
-    supported = LIBK_SUPPORTED.get(profile, frozenset())
+    _ = profile  # unified arch-neutral libk baseline
     required = {
         s for s in syms
-        if s in supported
+        if s in LIBK_SUPPORTED
         and s not in LIBK_NOT_REQUIRED
     }
     required |= (syms & LIBK_SHARED)
@@ -1625,9 +1582,9 @@ def main(argv: list[str]) -> int:
 
     profile = args.profile or infer_profile(args.libc_archive, args.libk_archive) \
         or "x86_64-clang"
-    if profile not in LIBK_SUPPORTED:
+    if profile not in KNOWN_PROFILES:
         print(f"ERROR: unknown profile '{profile}'; known: "
-              f"{', '.join(sorted(LIBK_SUPPORTED))}", file=sys.stderr)
+              f"{', '.join(sorted(KNOWN_PROFILES))}", file=sys.stderr)
         return 2
 
     if args.groups:
