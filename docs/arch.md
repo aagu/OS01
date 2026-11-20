@@ -116,10 +116,12 @@ x86_64 原生适配在 `kernel/arch/x86_64/intr/irq_entry.c`，先校验 frame/v
 > **2026-11-13 更新：M4 用户态五块已闭环**（单核 BSP 上跑通正式 EL0 用户任务，见下文 §aarch64 用户态现状），
 > 剩余差距收窄为**产品接入 + 抢占/多核语义**（产品 `/bin/init` 链路与 VFS 门、waitpid/信号/文件映射、
 > IRQ 返回抢占、统一 SMP 启动与多核上下文切换、ASID），粗估 **3–5 周**（一个人全职）。
+>
+> **2026-11-20 更新：中断/异常 dispatch 剩余项、正式 EL0 IRQ 返回抢占、8-bit ASID 与固定单核亲和 SMP 用户调度已闭环**（`OS01_HAS_USERSPACE=1` 与统一 SMP 启动已于 2026-11-19 闭环；详见 `docs/changelog.md` 2026-11-19 / 2026-11-20 条目与下文 §aarch64 用户态现状）。
 
 ~4–8 周（一个人全职），3 个独立 spec/plan 增量推进：
 
-1. **Spec A — 中断/异常 dispatch 收尾 + 上下文切换 arch 抽象**：`arch_irq_dispatch` 已落地；第一期已在 `kernel/intr/dispatch.c` 落地 arch-neutral 无状态事件分派，aarch64 EL1h sync/IRQ 与 x86 #DE/#UD/#GP/#PF 六条入口已接入（证据见 [验证报告](superpowers/reports/2026-10-24-intr-dispatch-phase1-validation.md)）。第二期已将当前安装的全部 48 条 x86 入口接入：异常 `0..14,16..20` 与 IRQ `0x20..0x37,0x38,0x40,0x41,0xff`；syscall `0x80` 及未安装 ISA 异常不在范围。gate 类型/DPL/IST 与返回语义保留，设备 ACK 和 timer/IPI EOI 仍归原业务，`0xff` 不 EOI 且不执行 `ret_from_intr` 工作。MADT type-4 按 processor UID/LINT/flags 配置 NMI，AP 在 GDT/IDT/TSS/TR 就绪后才启用路由。第二期证据见 [验证报告](superpowers/reports/2026-10-25-intr-dispatch-phase2-x86-validation.md)。**剩余**：EL0/SVC、aarch64 可恢复 abort/uaccess、用户页表/ASID/COW、aarch64 `smp.c` 的 context switch 拆分。预计 2–4 周。
+1. **Spec A — 中断/异常 dispatch 收尾 + 上下文切换 arch 抽象**：`arch_irq_dispatch` 已落地；第一期已在 `kernel/intr/dispatch.c` 落地 arch-neutral 无状态事件分派，aarch64 EL1h sync/IRQ 与 x86 #DE/#UD/#GP/#PF 六条入口已接入（证据见 [验证报告](superpowers/reports/2026-10-24-intr-dispatch-phase1-validation.md)）。第二期已将当前安装的全部 48 条 x86 入口接入：异常 `0..14,16..20` 与 IRQ `0x20..0x37,0x38,0x40,0x41,0xff`；syscall `0x80` 及未安装 ISA 异常不在范围。gate 类型/DPL/IST 与返回语义保留，设备 ACK 和 timer/IPI EOI 仍归原业务，`0xff` 不 EOI 且不执行 `ret_from_intr` 工作。MADT type-4 按 processor UID/LINT/flags 配置 NMI，AP 在 GDT/IDT/TSS/TR 就绪后才启用路由。第二期证据见 [验证报告](superpowers/reports/2026-10-25-intr-dispatch-phase2-x86-validation.md)。**2026-11-20 闭环**：EL0/SVC、uaccess、用户页表/8-bit ASID/COW、正式 EL0 IRQ 返回抢占（`aarch64_user_irq_return()`）与固定单核亲和 SMP 用户调度均已落地；**剩余**：用户态进入/返回纳入 `arch/context.h` 门面、运行期跨核任务迁移与 EL0 FP/SIMD。
 2. **Spec B — 统一 SMP 启动 + 定时器 + CPU 特性**：`arch_smp_boot_aps` + `clockevent` 双 arch 注册 + `arch_cpu_features()`（三者仓库内均尚未落地；当前只有跨架构钩子 `arch_boot_aps()` 与 per-arch 各自的启动实现）。预计 2–3 周。
 3. **Spec C — 统一 kernel_main（✅ 2026-11-07 闭环）**：在 A、B 之上定义 `arch_early_init`/`arch_late_init`，单 `kernel_main` 按固定 init 顺序调（pmm_init → arch_early_init → scheduler → arch_late_init → ...）。设计 init 顺序契约。**实际落地为 `kernel/include/arch/boot.h` 的 9 个强覆盖启动钩子 + `kernel/include/arch/features.h` 的 `OS01_HAS_VFS` / `OS01_HAS_USERSPACE` 编译期特性门**；x86_64 拆为 `x86_64_boot_early/memory/subsystems/device_nodes/percpu/aps`，aarch64 由原 `aarch64_main()` 改写为同名 facade 实现；入口唯一性由 `test-aarch64-audit` 的 readelf 符号审计门禁强制。
 
@@ -162,30 +164,16 @@ M4 把 aarch64 从「只有 EL1 内核」推进到「单核 BSP 上跑得起来�
 net / proc / resource / time / misc 组仍隐藏。详见
 [syscall.md](syscall/syscall.md#跨架构共享-syscall-表2026-11-12)。
 
-**当前边界（如实记录）**：
+**当前边界（2026-11-20 更新，如实记录）**：
 
-- 验收范围是**单核 BSP 自测启动**（`AARCH64_EL0_TEST=1`，`SMP=1`）；普通 AArch64 镜像的
-  `OS01_HAS_VFS` **已于 2026-11-18 翻 1**（fs 栈与块设备可用），但
-  `OS01_HAS_USERSPACE` **仍为 0**——缺 userland 构建链（crt0 / linker script / libc），
-  产品启动路径仍进 idle，`/bin/init` 尚未装载。
-- ASID 恒为 0；无 TLS、无 FP/SIMD 上下文；用户映像是内存中的静态 ELF。
-- 未覆盖：`/bin/init` 装载、文件映射、`MAP_FIXED`、共享映射、设备映射、
-  SMP 用户调度、IRQ 返回抢占。aarch64 侧的 `mmap` 策略对共享 / 文件 / 固定映射一律返回
-  `-EOPNOTSUPP`（`kernel/arch/aarch64/memory/user_vm_policy.c:610-612`），设备映射无实现。
-- **EL0 抢占只在单核探针里验证**：`aarch64_el0_preempt` 在多核启动下直接拒绝运行
-  （`kernel/selftest/test_aarch64_el0.c:414-416`），且 IRQ 路径明确不做调度
-  （`kernel/arch/aarch64/intr/trap.c:83-92`）；AP 侧仍是轮询 resched，尚无 resched SGI。
-- 用户态进入/返回**尚未纳入 `arch/context.h` 门面**：x86 走 `iretq`、aarch64 走 `eret`，各自实现。
-- `arch_cpu_features()` 仓库内仍无此接口；`arch_smp_boot_aps()` 已于 2026-11-19 随
-  统一 SMP 启动闭环落地（`kernel/include/arch/smp.h` 单入口 + `kernel/core/smp.c`
-  公共编排/AP 状态机，双架构统一 Fail-Closed）。
+- **产品用户态已接入（2026-11-19）**：`OS01_HAS_VFS=1`、`OS01_HAS_USERSPACE=1`，aarch64 产品镜像经 boot-5 编排装载 `/bin/init` → `/bin/sh`，支持 `MAP_FIXED`、文件映射、`MAP_SHARED`（fork 后代一致性）与 `/dev/mem` 设备映射。
+- **正式 EL0 IRQ 返回与抢占（2026-11-20）**：`aarch64_el0_irq()` 计入 per-CPU IRQ 深度，在设备分派与 EOI 后由正式分支调用 `aarch64_user_irq_return()`（检查拥有帧与 `need_resched` 后调 `schedule()`，并在返回 EL0 前投递挂起信号）。VM 授权/edit 状态按任务持有（`aarch64_vm_task_editing()`），copy window 按 CPU 持有，`switch_to()` 原子完成保存 prev TLS → 切换用户根 → 恢复 next TLS。旧 `aarch64_el0_preempt` 探针仍限单核（`kernel/selftest/test_aarch64_el0.c:414-416`）。
+- **8-bit ASID 与失效边界（2026-11-20）**：`user_asid.c` 维护 1..255 非零标签池（0 为退化回退），`TCR_EL1.A1=0, AS=0`，ASID 编码于 `TTBR0[55:48]`（CnP=0），用户叶带 `nG` 位。BSP 与 AP 在接入调度前均安装共享空 TTBR0 根（内核与设备地址走 TTBR1）；活跃低 VA 使用 `tlbi vaae1is`，标签回收先完成 `tlbi aside1is` 再归还池位。
+- **固定单核亲和 SMP 用户调度（2026-11-20）**：PID 1 固定 BSP（boot-5 特例），运行期 fork/spawn 通过 `aarch64_user_pick_cpu()` 在已就绪 CPU 上轮转放核（`sched_alloc_and_publish_task`），任务终身固定单核亲和（**不做运行期跨核迁移**）。配套完成两阶段孤儿退出交接（`task_finish_switch` / `task_publish_process_exit`）、COW 末引用释放顺序、原子信号 pending、共享 `FD_VFS` `file_t` pos 锁与 `ic ialluis` 跨核同步；产品镜像已通过 1/2/4/8 核启动与 2 核串口交互验收（`MODE=user-runtime USER_RUNTIME_CASE=irq|asid|smp|product`）。
+- **仍保留的边界**：无 EL0 FP/SIMD 上下文（userland soft-float）；用户态进入/返回**尚未纳入 `arch/context.h` 门面**（x86 走 `iretq`、aarch64 走 `eret`）；`arch_cpu_features()` 仓库内仍无此接口；`arch_smp_boot_aps()` 已于 2026-11-19 随统一 SMP 启动闭环落地。
 
-**剩余差距**：产品用户态接入（**VFS 门已于 2026-11-18 打开**；剩 userland 构建链与
-`/bin/init` 装载 + 文件/共享/设备映射 + `MAP_FIXED`）
-+ IRQ 返回抢占 + 多核上下文切换（统一 SMP 启动已于 2026-11-19 闭环）+ ASID，粗估 **2–3 周**
-（一个人全职，较 2026-11-13 的 3–5 周收窄：waitpid / exec / 信号三块已闭环，VFS 门随后打开）。
-规划项见 [roadmap.md](roadmap.md) P2。
-闭环记录见 `docs/changelog.md` 2026-11-11 ~ 2026-11-18 各条目；COW/VM 细节见
+**剩余差距**：`arch/context.h` 用户态进入/返回门面、运行期跨核任务迁移、EL0 FP/SIMD、userland libc 完整度（floatscan/strtod/setjmp 等）与跨进程 inode 级 `MAP_SHARED`。规划项见 [roadmap.md](roadmap.md) P2。
+闭环记录见 `docs/changelog.md` 2026-11-11 ~ 2026-11-20 各条目；COW/VM 细节见
 [cow-mmap.md](memory/cow-mmap.md#aarch64-cow--匿名-vma2026-11-11--2026-11-13-闭环)。
 
 ---

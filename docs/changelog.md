@@ -7,6 +7,22 @@
 
 ## 2026-11-20
 
+- feat(aarch64,sched): **中断/异常 dispatch 统一（剩余项）与 SMP 用户调度/抢占闭环（roadmap P2）**——正式 EL0 IRQ 返回抢占、8-bit ASID 与固定单核亲和 SMP 用户调度（spec `docs/superpowers/specs/2026-11-20-intr-dispatch-remaining-design.md`、plan `docs/superpowers/plans/2026-11-20-intr-dispatch-remaining.md`；`a100a7f2` / `862c75bc` / `fab576c5` / `7f0dd1a5` / `9a187a83` / `23f989df` / `9d1b6561`）：
+
+  **做了什么**
+  - **阶段 A — 正式 EL0 IRQ 返回抢占与 per-task VM 状态 / TLS**：`aarch64_el0_irq()` 计入 per-CPU IRQ 深度，设备分派与 EOI 后由正式分支调用 `aarch64_user_irq_return()`——检查拥有帧与 `need_resched` 后调 `schedule()`，并在返回 EL0 前投递挂起信号（`862c75bc`）。VM 授权/edit 状态迁至每任务（`aarch64_vm_task_editing()`），copy window 迁至每 CPU，`switch_to()` 原子执行保存 prev TLS → 切换用户根 → 恢复 next TLS（`a100a7f2`）。
+  - **阶段 B — 8-bit ASID、空 TTBR0 根与 TLBI 边界**：`user_asid.c` 实现锁保护 8-bit 标签池（1..255，0 为退化回退），`TCR_EL1.A1=0, AS=0`，ASID 编码于 `TTBR0[55:48]`（CnP=0），用户叶带 `nG` 位；BSP 在 `aarch64_user_runtime_init()` 安装共享空 TTBR0 根（内核与设备走 TTBR1）；活跃低 VA 使用 `tlbi vaae1is`，标签回收与 `aarch64_user_mm_destroy()` 先完成 `tlbi aside1is` 再释放页表并归还标签（`7f0dd1a5`、`9a187a83`）。
+  - **阶段 C — 并发资源交接与固定单核亲和 SMP 用户调度**：
+    - 跨核资源契约（`23f989df`）：`task_finish_switch()` 与 `task_publish_process_exit()` 统一 `task_list_lock → rq_lock` 锁序并原子确定孤儿 ZOMBIE 归属；`cow_private_page()` / `user_vm_prepare_copy()` 在叶切换与失效完成后才释放旧 PA；`sched/signal.c` 与 `sys_native.c` 对 pending 使用原子 `fetch-or` / `fetch-and`；共享 `FD_VFS` `file_t` 用 `mutex_t` 序列化隐式文件位置操作；`aarch64_elf_sync_icache()` 与 `user_vm_policy.c` 使用 `ic ialluis` 跨核同步。
+    - AP 接纳与多核用户调度（`9d1b6561`）：`aarch64_user_runtime_init_cpu()` 在 AP `scheduler_ok` 前安装共享空 TTBR0 根；`aarch64_user_pick_cpu()` 为运行期 fork/spawn 在已就绪 CPU 上轮转放核（PID 1 固定 BSP，任务终身固定单核亲和）；移除 `kernel/init/userspace.c` 的 aarch64 kernel-only 分支。
+
+  **验收（本分支实测）**
+  - `make PROFILE=aarch64-clang test-aarch64 MODE=user-runtime USER_RUNTIME_CASE=irq|asid|smp|product`：`irq`（单核，真实 CNTP EOI→switch→resume 与编辑中信号抢占）、`asid`（单核，两非零 ASID 同 VA 隔离、干净切换零全刷与释放再用）、`smp`（2 核，fork 跨核落 CPU1、双核 COW 末引用释放、阻塞 waitpid 唤醒与零泄漏）、`product`（普通 `aarch64-uefi` 1/2/4/8 核启动至 `OS01 Shell` + 2 核串口 `echo hi`/`exit`/respawn + `llvm-nm` 无测试符号泄漏）全部 `PASS`。
+  - `make test-host` EXIT=0；`make PROFILE=aarch64-clang test-aarch64-audit`（含 `intr-dispatch-audit` 与 `stack-frame-audit`）`PASS`。
+
+  **已知边界**
+  - 任务终身固定单核亲和（不做运行期跨核迁移）；EL0 无 FP/SIMD 上下文；用户态进入/返回尚未纳入 `arch/context.h` 门面。
+
 - feat(gfx,gui,terminal): **损伤区域与批量 present（roadmap P3「脏矩形与批量提交」）**——通用 `GFX_PRESENT_RECTS` 批量 ABI + terminal/LVGL 双消费端迁移（spec `docs/superpowers/specs/2026-11-19-gfx-damage-batch-present-design.md`；8515a766..b98a0578）：
 
   **做了什么**
