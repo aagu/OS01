@@ -32,6 +32,7 @@
 /* The x86 first-entry trampoline (kernel/arch/x86_64/cpu/thread_entry.S):
  * pops the pt_regs frame, calls fn(arg), then do_exit(). */
 extern void arch_kernel_thread_entry(void);
+extern void ret_from_intr(void);
 
 struct tss_struct init_tss[NR_CPUS] = { [0 ... NR_CPUS - 1] = INIT_TSS };
 
@@ -80,6 +81,12 @@ void arch_task_init_platform(void)
               init_tss[0].ist7);
 
     init_tss[0].rsp0 = init_thread.rsp0;
+}
+
+void arch_task_prepare_user_entry(task_t *task, struct pt_regs *frame)
+{
+    task->thread->rsp = (uintptr_t)frame;
+    task->thread->rip = (uintptr_t)ret_from_intr;
 }
 
 /* ── Kernel-thread constructor hook (x86) ─────────────────────

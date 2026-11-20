@@ -528,23 +528,22 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
         }
     }
 
-    memcpy((void *)((uint64_t)tsk + STACK_SIZE - sizeof(pt_regs_t)),
-           regs, sizeof(pt_regs_t));
+    pt_regs_t *child_regs = (pt_regs_t *)((uint64_t)tsk + STACK_SIZE - sizeof(pt_regs_t));
+    memcpy(child_regs, regs, sizeof(pt_regs_t));
 
     // Child process sees fork() return 0
-    {
-        pt_regs_t *child_regs = (pt_regs_t *)((uint64_t)tsk + STACK_SIZE - sizeof(pt_regs_t));
-        child_regs->rax = 0;
-    }
+    child_regs->rax = 0;
 
     thd->rsp0 = (uint64_t)tsk + STACK_SIZE;
-    thd->rsp  = (uint64_t)tsk + STACK_SIZE - sizeof(pt_regs_t);
     thd->fs   = KERNEL_DS;
     thd->gs   = KERNEL_DS;
 
-    thd->rip = regs->rip;
-    if (!(tsk->flags & PF_KTHREAD))
-        thd->rip = (uint64_t)ret_from_intr;  // child via softirq/preemption check
+    if (!(tsk->flags & PF_KTHREAD)) {
+        arch_task_prepare_user_entry(tsk, child_regs);
+    } else {
+        thd->rsp = (uint64_t)child_regs;
+        thd->rip = regs->rip;
+    }
     // Parent: do NOT change regs->rip — returns via error_code → RESTORE_ALL
 
     tsk->state = TASK_RUNNING;

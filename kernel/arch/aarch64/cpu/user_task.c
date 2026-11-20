@@ -483,15 +483,25 @@ void aarch64_user_switch_mm(struct task_struct *prev,
  * marks the running state and then hands the prepared frame to the
  * shared restore path, which ERETs into EL0. */
 __attribute__((noreturn))
-void aarch64_user_first_entry(void)
+extern void aarch64_el0_restore(struct pt_regs *frame);
+
+__attribute__((noreturn))
+static void aarch64_user_first_entry(void)
 {
     arch_aarch64_entry_prepare();
 
     task_t *t = arch_current_task();
-    uint64_t frame = aarch64_user_task_frame(t);
+    struct pt_regs *frame =
+        (struct pt_regs *)(uintptr_t)aarch64_user_task_frame(t);
 
-    aarch64_do_signal_delivery((pt_regs_t *)frame);
+    aarch64_do_signal_delivery(frame);
     aarch64_el0_restore(frame);
+}
+
+void arch_task_prepare_user_entry(task_t *task, struct pt_regs *frame)
+{
+    task->thread->sp = (uintptr_t)frame;
+    task->thread->x30 = (uintptr_t)aarch64_user_first_entry;
 }
 
 void aarch64_user_irq_return(pt_regs_t *regs)
@@ -1128,20 +1138,18 @@ int user_task_prepare(task_t *tsk, void *arg)
     ctx_thread->x19 = 0;
     ctx_thread->x20 = 0;
     ctx_thread->x21 = (uint64_t)(uintptr_t)ctx_thread;
-    ctx_thread->x30 = (uint64_t)(uintptr_t)aarch64_user_first_entry;
 
     /* The first EL0 frame lives at the top of the kernel stack.  A
      * fork copies the parent's SVC frame so both resume at the same
      * instruction, with the child's x0 set to 0. */
-    uint64_t frame = top - PT_REGS_SIZE;
+    pt_regs_t *frame = (pt_regs_t *)(top - PT_REGS_SIZE);
     if (ctx->frame) {
-        pt_regs_t *child_frame = (pt_regs_t *)frame;
-        *child_frame = *ctx->frame;
-        child_frame->x0 = 0;
+        *frame = *ctx->frame;
+        frame->x0 = 0;
     } else {
-        aarch64_user_image_init_regs(owner->image, (pt_regs_t *)frame);
+        aarch64_user_image_init_regs(owner->image, frame);
     }
-    ctx_thread->sp = frame;
+    arch_task_prepare_user_entry(tsk, frame);
 
     memset(&owner->vm, 0, sizeof(owner->vm));
     if (ctx->parent && aarch64_user_task_is_user(ctx->parent)) {

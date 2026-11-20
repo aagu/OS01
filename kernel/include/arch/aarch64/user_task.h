@@ -167,12 +167,6 @@ uint64_t aarch64_user_task_frame(const struct task_struct *tsk);
  * no TLS, so every user entry starts from a clean slate. */
 void aarch64_user_clear_tls(void);
 
-/* Hand a prepared pt_regs frame to the shared restore path.  The
- * frame address goes in x0; the helper moves the stack pointer onto
- * the frame and ERETs into EL0 with the frame's saved PSTATE.  Never
- * returns. */
-__attribute__((noreturn)) void aarch64_el0_restore(uint64_t frame_addr);
-
 /* Formal EL0 IRQ return tail: checks owned frame and local schedulable
  * condition, services need_resched via schedule() once, re-verifies
  * current task/frame/root, and delivers pending user signals. */

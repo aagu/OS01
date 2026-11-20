@@ -565,10 +565,9 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 
     // 8. Thread context for switch_to / __switch_to
     thd->rsp0 = (uint64_t)tsk + STACK_SIZE;
-    thd->rsp  = (uint64_t)tsk + STACK_SIZE - sizeof(pt_regs_t);
     thd->fs   = KERNEL_DS;
     thd->gs   = KERNEL_DS;
-    thd->rip  = (uint64_t)ret_from_intr;   // first entry via RESTORE_ALL → iretq
+    arch_task_prepare_user_entry(tsk, regs);
 
     // ── PUBLISH (single release point, spec §5.1) ────────────
     // Every fallible preparation has succeeded; only now do we

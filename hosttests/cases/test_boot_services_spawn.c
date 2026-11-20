@@ -28,6 +28,7 @@
 #include <fs/file.h>
 #include <errno.h>
 #include <string.h>
+#include <arch/x86_64/regs.h>
 #include <arch/x86_64/vma.h>
 
 /* Mock / Real externs */
@@ -48,6 +49,14 @@ static int kfree_raw_calls = 0;
 
 static int enqueue_task_calls = 0;
 static int sched_notify_remote_calls = 0;
+static int prepare_user_entry_calls = 0;
+static int prepare_calls_at_enqueue = 0;
+static task_t *last_prepared_task = NULL;
+static struct pt_regs *last_prepared_frame = NULL;
+static uint64_t last_prepared_frame_rip = 0;
+static uint64_t last_prepared_frame_cs = 0;
+static uint64_t enqueue_observed_rsp = 0;
+static uint64_t enqueue_observed_rip = 0;
 
 /* Lock sequence tracking */
 enum {
@@ -85,9 +94,10 @@ vfs_node_t *vfs_lookup(const char *path)
 void vfs_node_put(vfs_node_t *node) { (void)node; }
 int elf_validate(vfs_node_t *node) { (void)node; return 0; }
 int elf_detect_abi(vfs_node_t *node) { (void)node; return 0; }
-int elf_load(vfs_node_t *node, uint64_t *out_entry)
+int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *out_entry)
 {
     (void)node;
+    (void)mm;
     *out_entry = 0x400000;
     return 0;
 }
@@ -211,7 +221,18 @@ spinlock_T task_list_lock = {1};
 
 pid_t alloc_pid(void) { return 1; }
 
-void ret_from_intr(void) {}
+static const uint8_t test_user_entry_sentinel = 0;
+
+void arch_task_prepare_user_entry(task_t *task, struct pt_regs *frame)
+{
+    prepare_user_entry_calls++;
+    last_prepared_task = task;
+    last_prepared_frame = frame;
+    last_prepared_frame_rip = frame->rip;
+    last_prepared_frame_cs = frame->cs;
+    task->thread->rsp = (uintptr_t)frame;
+    task->thread->rip = (uintptr_t)&test_user_entry_sentinel;
+}
 void task_nofile_init(task_t *task) { (void)task; }
 void task_identity_init(task_t *task, const char *comm) { (void)task; (void)comm; }
 const char *task_basename(const char *path) { return path; }
@@ -241,8 +262,11 @@ int64_t spawn_user_task(const char *path, const char *const *argv);
 /* Wrap or override enqueue / list / notify / locks to observe publication atomicity */
 void enqueue_task(task_t *task, percpu_t *rq)
 {
-    (void)task; (void)rq;
+    (void)rq;
     enqueue_task_calls++;
+    prepare_calls_at_enqueue = prepare_user_entry_calls;
+    enqueue_observed_rsp = task->thread->rsp;
+    enqueue_observed_rip = task->thread->rip;
 }
 
 void __wrap_sched_notify_remote(task_t *tsk)
@@ -267,6 +291,14 @@ static void reset_spawn_fixture(void)
     kfree_raw_calls = 0;
     enqueue_task_calls = 0;
     sched_notify_remote_calls = 0;
+    prepare_user_entry_calls = 0;
+    prepare_calls_at_enqueue = 0;
+    last_prepared_task = NULL;
+    last_prepared_frame = NULL;
+    last_prepared_frame_rip = 0;
+    last_prepared_frame_cs = 0;
+    enqueue_observed_rsp = 0;
+    enqueue_observed_rip = 0;
     lock_event_count = 0;
     inject_locked_recheck_fail_cpu = -1;
     mock_vfs_bootstrap_active = false;
@@ -294,9 +326,19 @@ static void test_target_eligibility(void)
     int64_t ret = spawn_user_task("/bin/init", NULL);
     assert_eq(1, ret);
     assert_eq(1, enqueue_task_calls);
+    assert_eq(1, prepare_user_entry_calls);
+    assert_eq(1, prepare_calls_at_enqueue);
     assert_eq(1, user_init_pid);
+    assert_true(user_init_task != NULL);
     if (user_init_task) {
         assert_eq(0, user_init_task->cpu);
+        assert_true(last_prepared_task == user_init_task);
+        assert_true((void *)last_prepared_frame ==
+                    (void *)((uintptr_t)user_init_task + STACK_SIZE - sizeof(pt_regs_t)));
+        assert_eq(0x400000ULL, last_prepared_frame_rip);
+        assert_eq(3ULL, last_prepared_frame_cs & 3ULL);
+        assert_eq((uint64_t)(uintptr_t)last_prepared_frame, enqueue_observed_rsp);
+        assert_eq((uint64_t)(uintptr_t)&test_user_entry_sentinel, enqueue_observed_rip);
     }
 
     /* 2. Window closed permanently via sched_boot_start() */

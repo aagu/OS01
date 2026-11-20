@@ -61,7 +61,6 @@ extern char _end;
 
 extern uint64_t _stack_start;
 
-extern void ret_from_intr(void);
 extern void idle_resume(void);
 
 #define TASK_RUNNING (1 << 0)

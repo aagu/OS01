@@ -110,7 +110,13 @@ void *kmalloc(size_t sz) { return malloc(sz); }
 void kfree(void *p) { free(p); }
 int elf_detect_abi(vfs_node_t *node) { (void)node; return 0; }
 int mm_init_user_heap(mm_t *mm, uint64_t elf_end) { (void)mm; (void)elf_end; return 0; }
-void ret_from_intr(void) {}
+static const uint8_t test_user_entry_sentinel = 0;
+
+void arch_task_prepare_user_entry(task_t *task, struct pt_regs *frame)
+{
+    task->thread->rsp = (uintptr_t)frame;
+    task->thread->rip = (uintptr_t)&test_user_entry_sentinel;
+}
 union task_union init_task_union;
 percpu_t percpu_data[NR_CPUS];
 void enqueue_task(task_t *task, percpu_t *rq) { (void)task; (void)rq; }

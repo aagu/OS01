@@ -99,7 +99,12 @@ const char *task_basename(const char *path) { return path; }
 int elf_detect_abi(vfs_node_t *node) { (void)node; return 0; }
 int elf_validate(vfs_node_t *node) { (void)node; return 0; }
 int elf_load(vfs_node_t *node, uint64_t *out_entry) { (void)node; *out_entry = 0x400000; return 0; }
-void ret_from_intr(void) {}
+struct pt_regs;
+void arch_task_prepare_user_entry(task_t *task, struct pt_regs *frame)
+{
+    (void)task;
+    (void)frame;
+}
 
 mm_t init_mm;
 mm_t *mm_alloc(void) { return calloc(1, sizeof(mm_t)); }

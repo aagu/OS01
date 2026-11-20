@@ -26,6 +26,7 @@
 #include <stdbool.h>
 struct task_struct;
 typedef struct task_struct task_t;
+struct pt_regs;
 #endif
 
 #ifdef __x86_64__
@@ -45,6 +46,7 @@ bool arch_task_context_valid(task_t *t, const char **reason);
 void arch_dump_task_context(task_t *t);
 void arch_task_check_prev(task_t *t);
 void arch_task_prepare_first_switch(task_t *t, void (*idle_entry)(void));
+void arch_task_prepare_user_entry(task_t *task, struct pt_regs *frame);
 
 /* ── Kernel-thread constructor hooks (spec §8.1) ─────────────
  * The common constructor in kernel/sched/kthread.c owns allocation,

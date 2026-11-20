@@ -2148,6 +2148,16 @@
       }
     },
     {
+      "id": "test_context_facade",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_context_facade.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_desktop_audit",
       "layer": "host",
