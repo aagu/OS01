@@ -370,8 +370,10 @@ KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_exec_main_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_exec_child_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_signal_image.o
 endif
-ifneq ($(ARCH):$(strip $(AARCH64_USER_RUNTIME_TEST)),aarch64:)
+ifeq ($(ARCH),aarch64)
+ifneq ($(strip $(AARCH64_USER_RUNTIME_TEST)),)
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_runtime_image.o
+endif
 endif
 
 KERNEL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_EXTRA_OBJECTS)
@@ -1017,7 +1019,8 @@ $(BUILD_DIR)/generated/aarch64_user_signal_image.o: $(BUILD_DIR)/generated/aarch
 	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
 endif
 
-ifneq ($(ARCH):$(strip $(AARCH64_USER_RUNTIME_TEST)),aarch64:)
+ifeq ($(ARCH),aarch64)
+ifneq ($(strip $(AARCH64_USER_RUNTIME_TEST)),)
 $(BUILD_DIR)/selftest/fixtures/aarch64_user_runtime.o: selftest/fixtures/aarch64_user_runtime.S
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(filter-out -mgeneral-regs-only,$(ALL_CFLAGS)) -MD -MP -c $< -o $@
@@ -1028,6 +1031,7 @@ $(BUILD_DIR)/generated/aarch64_user_runtime.elf: $(BUILD_DIR)/selftest/fixtures/
 
 $(BUILD_DIR)/generated/aarch64_user_runtime_image.o: $(BUILD_DIR)/generated/aarch64_user_runtime.elf
 	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+endif
 endif
 
 # PSF font → .o (both arches — kernel/core/printk.c on x86_64 AND
@@ -1248,8 +1252,10 @@ ALL_DEPS := $(patsubst %.o,%.d,$(C_OBJECTS) $(ASM_OBJECTS))
 ifeq ($(ARCH):$(AARCH64_EL0_TEST),aarch64:1)
 ALL_DEPS += $(BUILD_DIR)/selftest/fixtures/aarch64_el0.d
 endif
-ifneq ($(ARCH):$(strip $(AARCH64_USER_RUNTIME_TEST)),aarch64:)
+ifeq ($(ARCH),aarch64)
+ifneq ($(strip $(AARCH64_USER_RUNTIME_TEST)),)
 ALL_DEPS += $(BUILD_DIR)/selftest/fixtures/aarch64_user_runtime.d
+endif
 endif
 ifeq ($(ARCH),x86_64)
 ALL_DEPS += $(BUILD_DIR)/$(ARCHDIR)/trampoline.d
