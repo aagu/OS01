@@ -509,7 +509,9 @@ _X86_EARLY_CHAIN = ("arch_intr_dispatch", "arch_intr_handle_sync",
                     "arch_irq_dispatch", "generic_intr_dispatch", "x86_irq_entry")
 _X86_DISASM_SYMS = (
     list(_X86_SYNC_NAMES) + ["do_" + n for n in _X86_SYNC_NAMES]
-    + ["error_code", "RESTORE_ALL", "x86_intr_restore_only"]
+    + ["error_code", "RESTORE_ALL", "x86_intr_restore_only",
+       "arch_context_restore_frame", "ret_from_exception"]
+    + ["arch_task_prepare_user_entry", "spawn_user_task", "do_fork"]
     + [name for name, _ in _X86_IRQ.values()]
     + list(_X86_EARLY_CHAIN) + list(_X86_IRQ_BUSINESS)
     + ["sys_vector_install", "arch_irq_install", "lapic_timer_init", "ipi_init", "lapic_init"]
@@ -530,7 +532,9 @@ _A64_DISASM_SYMS = (
     ["exception_vectors", "el1_sync_entry", "aarch64_el1_sync",
      "aarch64_intr_decode_sync", "arch_intr_dispatch",
      "arch_intr_handle_sync", "arch_intr_handle_irq",
-     "arch_intr_bad_event"]
+     "arch_intr_bad_event",
+     "restore_pt_regs", "arch_context_restore_frame", "aarch64_el0_restore",
+     "arch_task_prepare_user_entry", "aarch64_user_first_entry"]
     + ["el0_sync_entry", "el0_irq_entry",
        "aarch64_el0_sync_route", "aarch64_el0_irq"]
     + ["aarch64_uaccess_fixup", "aarch64_user_current_mm",
@@ -880,7 +884,7 @@ def _audit_x86_installed(symtab, blocks, repo, errors, notes):
             zero_setups = {"movq $0x0, %rsi", "xorl %esi, %esi", "movl $0x0, %esi"}
             if not _x86_value_survives(ins, zero_setups, "rsi", call) or not _x86_value_survives(ins, {"movq %rsp, %rdi"}, "rdi", call):
                 errors.append("NMI nmi: explicit C error code zero/frame argument unproven")
-            if any(e.kind in ("call", "jmp", "branch", "table") and e.target not in ("do_nmi", "RESTORE_ALL", "x86_intr_restore_only") for e in es):
+            if any(e.kind in ("call", "jmp", "branch", "table") and e.target not in ("do_nmi", "RESTORE_ALL", "x86_intr_restore_only", "arch_context_restore_frame") for e in es):
                 errors.append("NMI nmi: unexpected work/return transfer")
             if not _restore_edge(es, symtab):
                 errors.append("NMI nmi: independent restore-only return missing")
@@ -921,7 +925,7 @@ def _audit_x86_installed(symtab, blocks, repo, errors, notes):
             errors.append(f"{name}: expected exactly one transfer to {target}")
         allowed = {target, "ret_from_intr"}
         if vector == 0xff:
-            allowed = {target, "RESTORE_ALL", "x86_intr_restore_only"}
+            allowed = {target, "RESTORE_ALL", "x86_intr_restore_only", "arch_context_restore_frame"}
             if not _restore_edge(es, symtab):
                 errors.append(f"{name}: spurious must use restore-only return")
             sequence = ["movq %rsp, %rbx", "andq $-0x10, %rsp"]
@@ -942,7 +946,12 @@ def _audit_x86_installed(symtab, blocks, repo, errors, notes):
             if e.kind in ("call", "jmp", "branch") and e.target not in allowed:
                 errors.append(f"{name}: wrong family/ACK/return transfer {e.target}")
 
-    restore = blocks.get("x86_intr_restore_only") or blocks.get("RESTORE_ALL") or []
+    restore = (
+        blocks.get("arch_context_restore_frame")
+        or blocks.get("x86_intr_restore_only")
+        or blocks.get("RESTORE_ALL")
+        or []
+    )
     expected_pops = list(reversed(tail)) + ["%rax"] * 3
     pops = [i.text.split(" ", 1)[1] for i in restore if i.text.startswith("popq ")]
     if pops != expected_pops or "addq $0x10, %rsp" not in [i.text for i in restore] or not any(i.text == "iretq" for i in restore):
@@ -975,15 +984,71 @@ def _audit_x86_installed(symtab, blocks, repo, errors, notes):
 
     _audit_x86_gate_elf(symtab, blocks, errors)
     _audit_x86_gate_sources(repo, errors)
+    _audit_x86_context_facade(symtab, blocks, errors, notes)
     notes.append("installed surface: 20 exceptions + 28 IRQs, gate source evidence; runtime IDT snapshots and dynamic controller tables require runtime/host tests")
 
 
+def _check_unique_global_text(symtab, name, errors, notes, label="context facade"):
+    strong = symtab.strong_defs(name)
+    weak = symtab.weak_defs(name)
+    if not strong:
+        errors.append(f"{label}: {name} has no strong text definition")
+        return None
+    if len(strong) > 1:
+        errors.append(f"{label}: {name} has {len(strong)} strong definitions")
+        return None
+    if strong[0][1] != "T":
+        errors.append(f"{label}: {name} must be global text (T), got {strong[0][1]}")
+        return None
+    if weak:
+        errors.append(f"{label}: {name} has {len(weak)} weak definition(s)")
+        return None
+    notes.append(f"{label}: {name} @ 0x{strong[0][0]:x} (T)")
+    return strong[0][0]
+
+
+def _audit_x86_context_facade(symtab, blocks, errors, notes):
+    _check_unique_global_text(symtab, "arch_task_prepare_user_entry", errors, notes)
+    facade_addr = _check_unique_global_text(symtab, "arch_context_restore_frame", errors, notes)
+    if facade_addr is not None:
+        for alias in ("RESTORE_ALL", "x86_intr_restore_only"):
+            defs = symtab.strong_defs(alias)
+            if not defs:
+                errors.append(f"context facade: {alias} missing from x86 ELF")
+            elif defs[0][0] != facade_addr:
+                errors.append(
+                    f"context facade: arch_context_restore_frame (0x{facade_addr:x}) "
+                    f"must match {alias} (0x{defs[0][0]:x})"
+                )
+
+    ret_exc = _block(blocks, "ret_from_exception", errors, "x86 exception restore")
+    if ret_exc is not None:
+        es = x86_edges(ret_exc, symtab)
+        if not _restore_edge(es, symtab):
+            errors.append("ret_from_exception: direct restore-only branch missing")
+        for e in es:
+            if e.kind in ("call", "jmp", "branch", "table") and e.target not in (
+                "RESTORE_ALL", "x86_intr_restore_only", "arch_context_restore_frame"
+            ):
+                errors.append(f"ret_from_exception: unexpected transfer {e.target}")
+
+    for caller in ("spawn_user_task", "do_fork"):
+        ins = _block(blocks, caller, errors, "x86 user entry prepare")
+        if ins is not None:
+            es = x86_edges(ins, symtab)
+            if not any(e.target == "arch_task_prepare_user_entry" for e in es):
+                errors.append(f"{caller}: must reach arch_task_prepare_user_entry")
+            else:
+                notes.append(f"edge {caller} -> arch_task_prepare_user_entry")
+
+
 def _restore_edge(edges, symtab):
-    aliases = {name for name in ("RESTORE_ALL", "x86_intr_restore_only")
-               if symtab.strong_defs(name)}
-    if len(aliases) == 2 and symtab.strong_defs("RESTORE_ALL")[0][0] != symtab.strong_defs("x86_intr_restore_only")[0][0]:
+    aliases = ("RESTORE_ALL", "x86_intr_restore_only", "arch_context_restore_frame")
+    addrs = {symtab.strong_defs(name)[0][0] for name in aliases if symtab.strong_defs(name)}
+    if len(addrs) > 1:
         return False
-    return any(e.kind == "branch" and e.target in aliases for e in edges)
+    present = {name for name in aliases if symtab.strong_defs(name)}
+    return any(e.kind == "branch" and e.target in present for e in edges)
 
 
 def _audit_x86_gate_elf(symtab, blocks, errors):
@@ -1492,7 +1557,7 @@ def _audit_aarch64(symtab, blocks, order, repo: Path,
         # The recovery edge: a matched user-copy abort makes the C
         # adapter return, and the entry must then resume through the
         # shared restore path instead of parking on the old fallback.
-        if not any(e.kind == "branch" and e.target == "restore_pt_regs"
+        if not any(e.kind == "branch" and e.target in ("restore_pt_regs", "arch_context_restore_frame")
                    for e in edges):
             errors.append(
                 "edge el1_sync_entry -> restore_pt_regs: not proven — a "
@@ -1630,6 +1695,108 @@ def _audit_aarch64(symtab, blocks, order, repo: Path,
     # 13. the anonymous-VM SVC/fault wiring, with SYS_futex and the
     #     acceptance observations excluded from the production image.
     _audit_aarch64_vm_wiring(symtab, blocks, errors, notes)
+
+    # 14. the user-context facade symbols, restore alias and EL0 edges.
+    _audit_aarch64_context_facade(symtab, blocks, errors, notes)
+
+
+def _audit_aarch64_context_facade(symtab, blocks, errors, notes):
+    _check_unique_global_text(symtab, "arch_task_prepare_user_entry", errors, notes)
+    facade_addr = _check_unique_global_text(symtab, "arch_context_restore_frame", errors, notes)
+    restore_defs = symtab.strong_defs("restore_pt_regs")
+    if not restore_defs:
+        errors.append("context facade: restore_pt_regs missing from aarch64 ELF")
+    elif facade_addr is not None and restore_defs[0][0] != facade_addr:
+        errors.append(
+            f"context facade: arch_context_restore_frame (0x{facade_addr:x}) "
+            f"must match restore_pt_regs (0x{restore_defs[0][0]:x})"
+        )
+
+    restore_names = ("arch_context_restore_frame", "restore_pt_regs")
+
+    def is_restore_target(target_name: Optional[str]) -> bool:
+        if not target_name or target_name not in restore_names:
+            return False
+        if facade_addr is None:
+            return True
+        defs = symtab.strong_defs(target_name)
+        return bool(defs and defs[0][0] == facade_addr)
+
+    first_entry = _block(blocks, "aarch64_user_first_entry", errors, "aarch64 first user entry")
+    if first_entry is not None:
+        es = a64_edges(first_entry, symtab)
+        if not any(e.kind in ("call", "branch") and e.target == "aarch64_el0_restore" for e in es):
+            errors.append("aarch64_user_first_entry: must call or branch to aarch64_el0_restore")
+        else:
+            notes.append("edge aarch64_user_first_entry -> aarch64_el0_restore")
+
+    el0_restore = _block(blocks, "aarch64_el0_restore", errors, "aarch64 EL0 restore adapter")
+    if el0_restore is not None:
+        texts = [i.text.lower() for i in el0_restore]
+        if not any(re.match(r"^mov\s+sp,\s*x0$", t) for t in texts):
+            errors.append("aarch64_el0_restore: must install frame pointer with 'mov sp, x0'")
+        es = a64_edges(el0_restore, symtab)
+        if not any(e.kind == "branch" and is_restore_target(e.target) for e in es):
+            errors.append("aarch64_el0_restore: must branch to arch_context_restore_frame")
+        if any(e.kind in ("call", "branch") and not is_restore_target(e.target) for e in es):
+            errors.append("aarch64_el0_restore: unexpected non-restore transfer")
+
+    el0_irq = _block(blocks, "el0_irq_entry", errors, "aarch64 EL0 IRQ entry")
+    if el0_irq is not None:
+        es = a64_edges(el0_irq, symtab)
+        if not any(e.kind == "branch" and is_restore_target(e.target) for e in es):
+            errors.append("el0_irq_entry: must branch to arch_context_restore_frame")
+
+    el0_sync = _block(blocks, "el0_sync_entry", errors, "aarch64 EL0 sync entry")
+    if el0_sync is not None:
+        cbnz_ok = False
+        for ins in el0_sync:
+            m = re.match(r"^cbnz\s+w0,\s*(0x[0-9a-f]+)", ins.text.lower())
+            if m:
+                addr = int(m.group(1), 16)
+                if facade_addr is not None and addr == facade_addr:
+                    cbnz_ok = True
+                elif is_restore_target(symtab.resolve(addr)):
+                    cbnz_ok = True
+        if not cbnz_ok:
+            errors.append("el0_sync_entry: must branch via 'cbnz w0, <arch_context_restore_frame>'")
+
+    restore_block = (
+        blocks.get("arch_context_restore_frame")
+        or blocks.get("restore_pt_regs")
+    )
+    if restore_block is None:
+        errors.append("context facade: missing disassembly block for arch_context_restore_frame / restore_pt_regs")
+    else:
+        rtexts = [i.text.lower() for i in restore_block]
+        res = a64_edges(restore_block, symtab)
+        if any(e.kind in ("call", "branch") for e in res):
+            errors.append("arch_context_restore_frame: unexpected call/branch in restore block")
+        expected_sys = (
+            (r"ldr\s+x1,\s*\[sp,\s*#(?:0xf8|248)\]", r"msr\s+sp_el0,\s*x1"),
+            (r"ldr\s+x1,\s*\[sp,\s*#(?:0x100|256)\]", r"msr\s+elr_el1,\s*x1"),
+            (r"ldr\s+x1,\s*\[sp,\s*#(?:0x108|264)\]", r"msr\s+spsr_el1,\s*x1"),
+        )
+        for ldr_pat, msr_pat in expected_sys:
+            ldr_idx = next((idx for idx, t in enumerate(rtexts) if re.match(ldr_pat, t)), -1)
+            msr_idx = next((idx for idx, t in enumerate(rtexts) if re.match(msr_pat, t)), -1)
+            if ldr_idx < 0 or msr_idx <= ldr_idx:
+                errors.append(f"arch_context_restore_frame: missing system-register restore ({ldr_pat} -> {msr_pat})")
+        if not any(re.match(r"ldr\s+x30,\s*\[sp,\s*#(?:0xf0|240)\]", t) for t in rtexts):
+            errors.append("arch_context_restore_frame: missing x30 restore from [sp, #0xf0]")
+        for pair_idx, even in enumerate(range(28, -1, -2)):
+            off = 0xe0 - pair_idx * 0x10
+            if off == 0:
+                off_pat = r"\[sp(?:\s*,\s*#(?:0x0|0))?\]"
+            else:
+                off_pat = rf"\[sp,\s*#(?:0x{off:x}|{off})\]"
+            pat = rf"ldp\s+x{even},\s*x{even + 1},\s*{off_pat}"
+            if not any(re.match(pat, t) for t in rtexts):
+                errors.append(f"arch_context_restore_frame: missing GPR pair restore x{even}/x{even + 1}")
+        if not any(re.match(r"add\s+sp,\s*sp,\s*#(?:0x110|272)", t) for t in rtexts):
+            errors.append("arch_context_restore_frame: missing 'add sp, sp, #0x110'")
+        if "eret" not in rtexts:
+            errors.append("arch_context_restore_frame: missing 'eret'")
 
 
 # ─────────────────────────────────────────────────────────────────

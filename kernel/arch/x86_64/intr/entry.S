@@ -1,4 +1,5 @@
 #include <arch/x86_64/linkage.h>
+#include <arch/context.h>
 #include <percpu/percpu.h>
 
 R15	=	0x00
@@ -26,6 +27,8 @@ RFLAGS	=	0xa8
 OLDRSP	=	0xb0
 OLDSS	=	0xb8
 
+.global ARCH_CONTEXT_RESTORE_FRAME
+ARCH_CONTEXT_RESTORE_FRAME:
 .global x86_intr_restore_only
 x86_intr_restore_only:
 RESTORE_ALL:
@@ -110,7 +113,7 @@ check_signal:
 #ifdef X86_BOOT_IRQ_TIME_TEST
     je  boot2_test_restore
 #else
-    je  RESTORE_ALL
+    je  ARCH_CONTEXT_RESTORE_FRAME
 #endif
     # Deliver pending signals.
     movq    %rsp,   %rdi
@@ -119,7 +122,7 @@ check_signal:
 #ifdef X86_BOOT_IRQ_TIME_TEST
     jz  boot2_test_restore    # nothing delivered → break loop
 #else
-    jz  RESTORE_ALL           # nothing delivered → break loop
+    jz  ARCH_CONTEXT_RESTORE_FRAME           # nothing delivered → break loop
 #endif
     jmp check_signal          # try next pending signal
 
@@ -136,7 +139,7 @@ boot2_test_restore:
     movq    %rbx,   %rdi
     call    boot2_test_irq_return
     movq    %rbx,   %rsp
-    jmp     RESTORE_ALL
+    jmp     ARCH_CONTEXT_RESTORE_FRAME
 #endif
 
 ENTRY(divide_error)

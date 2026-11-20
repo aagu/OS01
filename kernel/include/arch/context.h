@@ -75,6 +75,8 @@ void arch_kthread_drop_files(task_t *t);
  * the per-arch backends are strong symbols in
  * kernel/arch/<arch>/cpu/sched_notify.c, so common code no longer
  * branches on a capability macro. */
+#else /* __ASSEMBLER__ */
+#define ARCH_CONTEXT_RESTORE_FRAME arch_context_restore_frame
 #endif
 
 #endif /* KERNEL_ARCH_CONTEXT_H */

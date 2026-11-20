@@ -356,6 +356,8 @@ ffff0000400a2bd0 T aarch64_el1_sync_fatal
 ffff0000400a3000 T exception_vectors
 ffff0000400a3800 T el1_irq_entry
 ffff0000400a3864 t restore_pt_regs
+ffff0000400a3864 T arch_context_restore_frame
+ffff0000400a38b8 T aarch64_el0_restore
 ffff0000400a3900 T el1_sync_entry
 ffff0000400a3a00 t el0_irq_entry
 ffff0000400a3b00 t el0_sync_entry
@@ -366,6 +368,8 @@ ffff0000400a3e80 T aarch64_user_frame_is_valid
 ffff0000400a3f00 T aarch64_user_image_load
 ffff0000400a4000 T aarch64_user_task_spawn
 ffff0000400a4100 T aarch64_pt_root_unpublish_local
+ffff0000400a4180 T arch_task_prepare_user_entry
+ffff0000400a4200 t aarch64_user_first_entry
 ffff0000400971f4 T gic_dev_current
 ffff0000400978d4 T gic_dev_dispatch
 ffff0000400a0a80 T arch_early_putc
@@ -437,6 +441,42 @@ Disassembly of section .text:
 
 ffff0000400a3000 <exception_vectors>:
 """ + "\n".join(_SLOTS) + """
+
+ffff0000400a3864 <arch_context_restore_frame>:
+ffff0000400a3864: f9407fe1     	ldr	x1, [sp, #0xf8]
+ffff0000400a3868: d5184101     	msr	SP_EL0, x1
+ffff0000400a386c: f94083e1     	ldr	x1, [sp, #0x100]
+ffff0000400a3870: d5184021     	msr	ELR_EL1, x1
+ffff0000400a3874: f94087e1     	ldr	x1, [sp, #0x108]
+ffff0000400a3878: d5184001     	msr	SPSR_EL1, x1
+ffff0000400a387c: f9407be1     	ldr	x30, [sp, #0xf0]
+ffff0000400a3880: a94e77fc     	ldp	x28, x29, [sp, #0xe0]
+ffff0000400a3884: a94d6ffa     	ldp	x26, x27, [sp, #0xd0]
+ffff0000400a3888: a94c67f8     	ldp	x24, x25, [sp, #0xc0]
+ffff0000400a388c: a94b5ff6     	ldp	x22, x23, [sp, #0xb0]
+ffff0000400a3890: a94a57f4     	ldp	x20, x21, [sp, #0xa0]
+ffff0000400a3894: a9494ff2     	ldp	x18, x19, [sp, #0x90]
+ffff0000400a3898: a94847f0     	ldp	x16, x17, [sp, #0x80]
+ffff0000400a389c: a9473fee     	ldp	x14, x15, [sp, #0x70]
+ffff0000400a38a0: a94637ec     	ldp	x12, x13, [sp, #0x60]
+ffff0000400a38a4: a9452fea     	ldp	x10, x11, [sp, #0x50]
+ffff0000400a38a8: a94427e8     	ldp	x8, x9, [sp, #0x40]
+ffff0000400a38ac: a9431fe6     	ldp	x6, x7, [sp, #0x30]
+ffff0000400a38b0: a94217e4     	ldp	x4, x5, [sp, #0x20]
+ffff0000400a38b4: a9410fe2     	ldp	x2, x3, [sp, #0x10]
+ffff0000400a38b4: a94007e0     	ldp	x0, x1, [sp]
+ffff0000400a38b6: 910443ff     	add	sp, sp, #0x110
+ffff0000400a38b7: d69f03e0     	eret
+
+ffff0000400a38b8 <aarch64_el0_restore>:
+ffff0000400a38b8: 9100001f     	mov	sp, x0
+ffff0000400a38bc: 17ffffea     	b	0xffff0000400a3864 <arch_context_restore_frame>
+
+ffff0000400a4180 <arch_task_prepare_user_entry>:
+ffff0000400a4180: d65f03c0     	ret
+
+ffff0000400a4200 <aarch64_user_first_entry>:
+ffff0000400a4200: 97fffdaa     	bl	0xffff0000400a38b8 <aarch64_el0_restore>
 
 ffff0000400a3900 <el1_sync_entry>:
 ffff0000400a3900: d10443ff     	sub	sp, sp, #0x110
@@ -585,7 +625,7 @@ ffff0000400a3a00: d10443ff     	sub	sp, sp, #0x110
 ffff0000400a3a04: a90007e0     	stp	x0, x1, [sp]
 ffff0000400a3a5c: 910003e0     	mov	x0, sp
 ffff0000400a3a60: 97ffbfbe     	bl	0xffff0000400a3c00 <aarch64_el0_irq>
-ffff0000400a3a64: 17ffffa0     	b	0xffff0000400a3864 <restore_pt_regs>
+ffff0000400a3a64: 17ffffa0     	b	0xffff0000400a3864 <arch_context_restore_frame>
 
 ffff0000400a3b00 <el0_sync_entry>:
 ffff0000400a3b00: d10443ff     	sub	sp, sp, #0x110
@@ -594,7 +634,7 @@ ffff0000400a3b5c: 910003e0     	mov	x0, sp
 ffff0000400a3b60: d5385201     	mrs	x1, ESR_EL1
 ffff0000400a3b64: d5386002     	mrs	x2, FAR_EL1
 ffff0000400a3b68: 97ffe532     	bl	0xffff0000400a3d00 <aarch64_el0_sync_route>
-ffff0000400a3b6c: 35ffefc0     	cbnz	w0, 0xffff0000400a3864 <restore_pt_regs>
+ffff0000400a3b6c: 35ffefc0     	cbnz	w0, 0xffff0000400a3864 <arch_context_restore_frame>
 ffff0000400a3b70: d5034fdf     	msr	DAIFSet, #0xf
 ffff0000400a3b74: d503207f     	wfi
 
@@ -677,8 +717,13 @@ def _phase2_world():
         block(name, instructions)
         block(entry, [f"movabsq $0x{address('x86_intr_decode'):x}, %rax", "callq *%rax", f"movabsq $0x{address('arch_intr_dispatch'):x}, %rax", "callq *%rax", "retq"])
     block("RESTORE_ALL", [f"popq {r}" for r in reversed(SAVE[4:])] + ["popq %rax", "movq %rax, %ds", "popq %rax", "movq %rax, %es", "popq %rax", "addq $0x10, %rsp", "iretq"])
-    # Restore-only is an identical-address alias, not a separate block.
+    # Restore-only and facade label are identical-address aliases, not separate blocks.
     nm += f"{address('RESTORE_ALL'):x} T x86_intr_restore_only\n"
+    nm += f"{address('RESTORE_ALL'):x} T arch_context_restore_frame\n"
+    block("ret_from_exception", [branch("jmp", "RESTORE_ALL")])
+    block("arch_task_prepare_user_entry", ["retq"])
+    block("spawn_user_task", [branch("callq", "arch_task_prepare_user_entry"), "retq"])
+    block("do_fork", [branch("callq", "arch_task_prepare_user_entry"), "retq"])
     for vector in IRQ_VECTORS:
         name = f"IRQ{vector-32}_interrupt" if (vector < 0x38 or vector == 0x39 or (0x42 <= vector <= 0x7f)) else {0x38:"lapic_timer_stub", 0x40:"_intr_stub_tlb", 0x41:"_intr_stub_resched", 0xff:"lapic_spurious_stub"}[vector]
         target = "arch_irq_dispatch" if (vector < 0x38 or vector == 0x39 or (0x42 <= vector <= 0x7f)) else "generic_intr_dispatch" if vector in (0x40, 0x41) else "x86_irq_entry"
@@ -2008,6 +2053,71 @@ class InstalledSurfaceTests(IntrDispatchAuditFixture):
                 self.stage_x86()
                 self.assertTrue(any("gate" in e for e in self.audit(repo_root=repo)))
         trap.write_text(original)
+
+    def test_restore_alias_at_wrong_address(self):
+        bad_x86_nm = X86_NM.replace(
+            f"{next(int(l.split()[0], 16) for l in X86_NM.splitlines() if l.endswith(' T arch_context_restore_frame')):x} T arch_context_restore_frame",
+            "ffff8000002fff00 T arch_context_restore_frame",
+        )
+        self.stage_x86(nm_text=bad_x86_nm)
+        self.assertTrue(
+            any("arch_context_restore_frame" in e for e in self.audit()),
+            "x86 restore alias at wrong address must fail",
+        )
+
+        bad_a64_nm = A64_NM.replace(
+            "ffff0000400a3864 T arch_context_restore_frame",
+            "ffff0000400a3868 T arch_context_restore_frame",
+        )
+        self.stage_a64(nm_text=bad_a64_nm)
+        self.assertTrue(
+            any("arch_context_restore_frame" in e for e in self.audit()),
+            "aarch64 restore alias at wrong address must fail",
+        )
+
+    def test_el0_first_restore_without_installing_sp(self):
+        bad_disasm = A64_DISASM.replace(
+            "ffff0000400a38b8: 9100001f     \tmov\tsp, x0\n",
+            "",
+        )
+        self.stage_a64(disasm_text=bad_disasm)
+        self.assertTrue(
+            any("aarch64_el0_restore" in e for e in self.audit()),
+            "aarch64_el0_restore without 'mov sp, x0' must fail",
+        )
+
+    def test_el0_irq_wrong_restore_target(self):
+        bad_disasm = A64_DISASM.replace(
+            "ffff0000400a3a64: 17ffffa0     \tb\t0xffff0000400a3864 <arch_context_restore_frame>",
+            "ffff0000400a3a64: 17ffffa0     \tb\t0xffff0000400a38b8 <aarch64_el0_restore>",
+        )
+        self.stage_a64(disasm_text=bad_disasm)
+        self.assertTrue(
+            any("el0_irq_entry" in e for e in self.audit()),
+            "el0_irq_entry branching to wrong restore target must fail",
+        )
+
+    def test_el0_sync_wrong_restore_condition(self):
+        bad_disasm = A64_DISASM.replace(
+            "ffff0000400a3b6c: 35ffefc0     \tcbnz\tw0, 0xffff0000400a3864 <arch_context_restore_frame>",
+            "ffff0000400a3b6c: 34ffefc0     \tcbz\tw0, 0xffff0000400a3864 <arch_context_restore_frame>",
+        )
+        self.stage_a64(disasm_text=bad_disasm)
+        self.assertTrue(
+            any("el0_sync_entry" in e for e in self.audit()),
+            "el0_sync_entry with cbz instead of cbnz must fail",
+        )
+
+    def test_aarch64_restore_frame_with_missing_gpr(self):
+        bad_disasm = A64_DISASM.replace(
+            "ffff0000400a3890: a94a57f4     \tldp\tx20, x21, [sp, #0xa0]\n",
+            "",
+        )
+        self.stage_a64(disasm_text=bad_disasm)
+        self.assertTrue(
+            any("restore" in e for e in self.audit()),
+            "aarch64 restore frame missing GPR ldp must fail",
+        )
 
 
 if __name__ == "__main__":

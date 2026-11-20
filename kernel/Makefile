@@ -202,6 +202,7 @@ KERNEL_C_SOURCES := \
     $(wildcard bus/pci/*.c) \
     $(KERNEL_TEST_FAULT_C_SOURCES) \
     $(KERNEL_FB_TEST_C_SOURCES) \
+    ../libc/random/chacha20.c \
     ../runtime/builtins/udivti3.c
 
 # Platform devices are selected by arch/<arch>/make.config.  Keep x86-only

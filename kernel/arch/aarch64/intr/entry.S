@@ -37,6 +37,7 @@
  */
 
 #include <arch/aarch64/regs.h>
+#include <arch/context.h>
 
 .section .text.entry, "ax"
 
@@ -158,6 +159,8 @@ el1_irq_entry:
     mov     x0, sp                       /* x0 = &regs for el1_irq */
     bl      el1_irq
 restore_pt_regs:
+.globl ARCH_CONTEXT_RESTORE_FRAME
+ARCH_CONTEXT_RESTORE_FRAME:
     ldr     x1,       [sp, #PT_REGS_SP_EL0]
     msr     sp_el0, x1
     ldr     x1,       [sp, #PT_REGS_ELR_EL1]
@@ -197,7 +200,7 @@ restore_pt_regs:
 .type aarch64_el0_restore, %function
 aarch64_el0_restore:
     mov     sp, x0
-    b       restore_pt_regs
+    b       ARCH_CONTEXT_RESTORE_FRAME
 .size aarch64_el0_restore, . - aarch64_el0_restore
 
 /* ──────────────────────────────────────────────────────────────
@@ -234,7 +237,7 @@ el0_irq_entry:
     save_pt_regs
     mov     x0, sp
     bl      aarch64_el0_irq
-    b       restore_pt_regs
+    b       ARCH_CONTEXT_RESTORE_FRAME
 
 /* Lower-EL sync saves the same frame as IRQ. The route selects whether
  * to resume EL0 or to unwind the legacy probe's stack frame. */
@@ -245,7 +248,7 @@ el0_sync_entry:
     mrs     x1, esr_el1
     mrs     x2, far_el1
     bl      aarch64_el0_sync_route
-    cbnz    w0, restore_pt_regs
+    cbnz    w0, ARCH_CONTEXT_RESTORE_FRAME
 #if AARCH64_EL0_TEST
     /* The legacy probe ended its run: unwind its stack frame. */
     adr     x1, .Lel0_done

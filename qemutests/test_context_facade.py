@@ -174,6 +174,127 @@ class ContextFacadeTests(unittest.TestCase):
             "user_task_prepare must initialize fresh-image regs before calling arch_task_prepare_user_entry",
         )
 
+    def test_restore_symbol_assembler_only(self) -> None:
+        asm_src = """
+        #include <arch/context.h>
+        .globl ARCH_CONTEXT_RESTORE_FRAME
+        ARCH_CONTEXT_RESTORE_FRAME:
+        """
+        c_src = """
+        #include <arch/context.h>
+        #ifdef ARCH_CONTEXT_RESTORE_FRAME
+        #error "ARCH_CONTEXT_RESTORE_FRAME must not be defined for C"
+        #endif
+        int context_facade_asm_macro_absent(void) { return 1; }
+        """
+        for target in ("x86_64-unknown-none", "aarch64-none-elf"):
+            with self.subTest(target=target, mode="asm"):
+                cmd = [
+                    self.clang,
+                    "-target",
+                    target,
+                    f"-I{INCLUDE_DIR}",
+                    "-E",
+                    "-P",
+                    "-x",
+                    "assembler-with-cpp",
+                    "-",
+                ]
+                res = subprocess.run(cmd, input=asm_src, text=True, capture_output=True)
+                self.assertEqual(
+                    res.returncode,
+                    0,
+                    f"{target} asm preprocess failed:\n{res.stderr}",
+                )
+                self.assertIn(".globl arch_context_restore_frame", res.stdout)
+                self.assertIn("arch_context_restore_frame:", res.stdout)
+                self.assertNotIn("void arch_context_restore_frame", res.stdout)
+            with self.subTest(target=target, mode="c"):
+                res = self._run_clang(target, c_src)
+                self.assertEqual(
+                    res.returncode,
+                    0,
+                    f"{target} C macro guard failed:\n{res.stderr}",
+                )
+
+        x86_entry = (
+            ROOT / "kernel" / "arch" / "x86_64" / "intr" / "entry.S"
+        ).read_text(encoding="utf-8")
+        self.assertIn("#include <arch/context.h>", x86_entry)
+        self.assertIn(".global ARCH_CONTEXT_RESTORE_FRAME", x86_entry)
+        self.assertIn("ARCH_CONTEXT_RESTORE_FRAME:", x86_entry)
+        check_signal_block = re.search(
+            r"check_signal:.*?boot2_test_restore:", x86_entry, re.DOTALL
+        )
+        self.assertIsNotNone(check_signal_block)
+        assert check_signal_block is not None
+        self.assertRegex(
+            check_signal_block.group(0), r"\bje\s+ARCH_CONTEXT_RESTORE_FRAME\b"
+        )
+        self.assertRegex(
+            check_signal_block.group(0), r"\bjz\s+ARCH_CONTEXT_RESTORE_FRAME\b"
+        )
+        boot2_block = re.search(
+            r"boot2_test_restore:.*?#endif", x86_entry, re.DOTALL
+        )
+        self.assertIsNotNone(boot2_block)
+        assert boot2_block is not None
+        self.assertRegex(
+            boot2_block.group(0), r"\bjmp\s+ARCH_CONTEXT_RESTORE_FRAME\b"
+        )
+        ret_exc_block = re.search(
+            r"ret_from_exception:.*?ENTRY\(ret_from_intr\)", x86_entry, re.DOTALL
+        )
+        self.assertIsNotNone(ret_exc_block)
+        assert ret_exc_block is not None
+        self.assertRegex(ret_exc_block.group(0), r"\bjmp\s+RESTORE_ALL\b")
+        self.assertNotIn("ARCH_CONTEXT_RESTORE_FRAME", ret_exc_block.group(0))
+
+        a64_entry = (
+            ROOT / "kernel" / "arch" / "aarch64" / "intr" / "entry.S"
+        ).read_text(encoding="utf-8")
+        self.assertIn("#include <arch/context.h>", a64_entry)
+        self.assertRegex(
+            a64_entry,
+            r"restore_pt_regs:\s*\n\s*\.globl\s+ARCH_CONTEXT_RESTORE_FRAME\s*\n\s*ARCH_CONTEXT_RESTORE_FRAME:"
+            r"|\.globl\s+ARCH_CONTEXT_RESTORE_FRAME\s*\nrestore_pt_regs:\s*\nARCH_CONTEXT_RESTORE_FRAME:",
+        )
+        el0_restore_block = re.search(
+            r"aarch64_el0_restore:.*?\.size\s+aarch64_el0_restore", a64_entry, re.DOTALL
+        )
+        self.assertIsNotNone(el0_restore_block)
+        assert el0_restore_block is not None
+        self.assertRegex(
+            el0_restore_block.group(0),
+            r"mov\s+sp,\s*x0\s*\n\s*b\s+ARCH_CONTEXT_RESTORE_FRAME\b",
+        )
+        el0_irq_block = re.search(
+            r"el0_irq_entry:.*?el0_sync_entry:", a64_entry, re.DOTALL
+        )
+        self.assertIsNotNone(el0_irq_block)
+        assert el0_irq_block is not None
+        self.assertRegex(
+            el0_irq_block.group(0), r"\bb\s+ARCH_CONTEXT_RESTORE_FRAME\b"
+        )
+        el0_sync_block = re.search(
+            r"el0_sync_entry:.*?#if\s+AARCH64_EL0_TEST(.*?)#else", a64_entry, re.DOTALL
+        )
+        self.assertIsNotNone(el0_sync_block)
+        assert el0_sync_block is not None
+        self.assertRegex(
+            el0_sync_block.group(0), r"\bcbnz\s+w0,\s*ARCH_CONTEXT_RESTORE_FRAME\b"
+        )
+        self.assertRegex(
+            el0_sync_block.group(1), r"\bb\s+restore_pt_regs\b"
+        )
+        el1_sync_block = re.search(
+            r"el1_sync_entry:.*?el0_irq_entry:", a64_entry, re.DOTALL
+        )
+        self.assertIsNotNone(el1_sync_block)
+        assert el1_sync_block is not None
+        self.assertRegex(el1_sync_block.group(0), r"\bb\s+restore_pt_regs\b")
+        self.assertNotIn("ARCH_CONTEXT_RESTORE_FRAME", el1_sync_block.group(0))
+
 
 if __name__ == "__main__":
     unittest.main()
