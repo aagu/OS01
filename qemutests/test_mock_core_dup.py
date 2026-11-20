@@ -27,15 +27,53 @@ TEST_MANIFEST = {
 ROOT = Path(__file__).resolve().parents[1]
 PROFILE = os.environ.get("PROFILE", "x86_64-clang")
 LIBMOCK_CORE = ROOT / "build" / PROFILE / "host-test" / "libmock-core.a"
+PROFILE_FILE = ROOT / "mk" / "profiles" / f"{PROFILE}.mk"
 HOST_CC = os.environ.get("HOST_CC", "clang")
 
 
 class MockCoreDuplicateSymbolTests(unittest.TestCase):
-    def test_duplicate_g_log_level_fails_link(self):
+    def _ensure_libmock_core(self) -> None:
+        """Build libmock-core.a on demand.
+
+        `make test-harness` runs the harness modules with no build
+        prerequisites, so the shared mock archive usually does not exist
+        yet.  Build it through the hosttests sub-make (the same entry the
+        root Makefile uses) instead of failing on a missing artifact.
+        The archive needs only hosttests/mock/core/*.c and the host-test
+        include dir, so no sysroot or kernel build is involved.
+        """
+        if LIBMOCK_CORE.is_file():
+            return
+        env = {k: os.environ[k] for k in ("PATH", "HOME", "TMPDIR") if k in os.environ}
+        build = subprocess.run(
+            [
+                "make",
+                "--no-print-directory",
+                "-C",
+                str(ROOT / "hosttests"),
+                f"OS01_PROFILE_FILE={PROFILE_FILE}",
+                f"PROFILE={PROFILE}",
+                str(LIBMOCK_CORE),
+            ],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            timeout=300,
+        )
+        self.assertEqual(
+            build.returncode,
+            0,
+            f"failed to build {LIBMOCK_CORE}:\n{build.stdout}",
+        )
         self.assertTrue(
             LIBMOCK_CORE.is_file(),
-            f"libmock-core.a not found at {LIBMOCK_CORE}; build hosttests first",
+            f"libmock-core.a not found at {LIBMOCK_CORE} after building it",
         )
+
+    def test_duplicate_g_log_level_fails_link(self):
+        self._ensure_libmock_core()
         with tempfile.TemporaryDirectory(prefix="mock-core-dup-") as tmpdir:
             tmp = Path(tmpdir)
             src = tmp / "dup_probe.c"
