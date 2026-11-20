@@ -51,6 +51,9 @@
 #include <string.h>
 #include <uapi/syscall.h>
 #include <arch/aarch64/user_vm_policy.h>
+#ifdef AARCH64_USER_RUNTIME_TEST
+#include <selftest/aarch64_user_runtime.h>
+#endif
 
 #if AARCH64_EL0_TEST
 #include <arch/aarch64/reg.h>
@@ -333,6 +336,11 @@ void aarch64_user_restore_kernel_root(void)
 void aarch64_user_switch_mm(struct task_struct *prev,
                             const struct task_struct *next)
 {
+#ifdef AARCH64_USER_RUNTIME_TEST
+    extern void aarch64_user_runtime_test_note_switch(
+        const struct task_struct *prev, const struct task_struct *next);
+    aarch64_user_runtime_test_note_switch(prev, next);
+#endif
     /* 1. Save prev's EL0 TLS unless prev is in a paused edit (whose
      *    entry TLS is already preserved in its edit snapshot). */
     if (aarch64_user_task_is_user(prev) && !aarch64_vm_task_editing(prev)) {
@@ -382,6 +390,41 @@ void aarch64_user_first_entry(void)
 
     aarch64_do_signal_delivery((pt_regs_t *)frame);
     aarch64_el0_restore(frame);
+}
+
+void aarch64_user_irq_return(pt_regs_t *regs)
+{
+    if (!aarch64_user_frame_is_valid(regs))
+        return;
+
+    task_t *cur = arch_current_task();
+    if (aarch64_vm_task_editing(cur))
+        return;
+
+    percpu_t *cpu = this_cpu();
+    if (!cpu || !__atomic_load_n(&cpu->scheduler_ok, __ATOMIC_ACQUIRE))
+        return;
+
+    if (__atomic_load_n(&cpu->need_resched, __ATOMIC_ACQUIRE)) {
+#ifdef AARCH64_USER_RUNTIME_TEST
+        uint64_t switches_before = 0;
+        uint64_t elr_before = 0;
+        aarch64_user_runtime_test_irq_sched_before(
+            cur, regs, &switches_before, &elr_before);
+#endif
+        schedule();
+#ifdef AARCH64_USER_RUNTIME_TEST
+        aarch64_user_runtime_test_irq_sched_after(
+            cur, regs, switches_before, elr_before);
+#endif
+    }
+
+    if (arch_current_task() != cur)
+        return;
+    if (!aarch64_user_frame_is_valid(regs))
+        return;
+
+    aarch64_do_signal_delivery(regs);
 }
 
 /* ── Low-EL synchronous routing ─────────────────────────────────
@@ -958,6 +1001,9 @@ int64_t arch_syscall_sigreturn(void *arch_frame)
     task_t *cur = arch_current_task();
     cur->blocked = (int64_t)(frame.blocked &
                              ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1))));
+#ifdef AARCH64_USER_RUNTIME_TEST
+    aarch64_user_runtime_test_sigreturn(cur);
+#endif
     return 0;
 }
 

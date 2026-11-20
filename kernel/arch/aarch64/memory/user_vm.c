@@ -23,6 +23,9 @@
 #include <stdint.h>
 #include <syscall/dispatch.h>
 #include <uapi/syscall.h>
+#ifdef AARCH64_USER_RUNTIME_TEST
+#include <selftest/aarch64_user_runtime.h>
+#endif
 
 /* ══════════════════════════════════════════════════════════════
  * Transaction layer (M4 Task 3, per-task & per-CPU state)
@@ -170,6 +173,9 @@ int64_t arch_syscall_user_vm(uint64_t nr, const uint64_t args[6])
     int rc = aarch64_vm_edit_begin(mm);
     if (rc)
         return rc;
+#ifdef AARCH64_USER_RUNTIME_TEST
+    aarch64_user_runtime_test_vm_edit_pause(mm);
+#endif
 
     int64_t ret;
     switch (nr) {
@@ -191,6 +197,9 @@ int64_t arch_syscall_user_vm(uint64_t nr, const uint64_t args[6])
     }
 
     aarch64_vm_edit_end();
+#ifdef AARCH64_USER_RUNTIME_TEST
+    aarch64_user_runtime_test_vm_edit_after(mm);
+#endif
     return ret;
 }
 

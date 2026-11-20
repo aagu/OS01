@@ -896,6 +896,16 @@
       "source": "qemutests/test_aarch64_sched_tick.py"
     },
     {
+      "id": "qemutests.test_aarch64_user_runtime",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_aarch64_user_runtime.py"
+    },
+    {
       "kind": "suite",
       "id": "resolution",
       "layer": "qemu_e2e",

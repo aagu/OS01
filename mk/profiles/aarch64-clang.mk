@@ -193,6 +193,29 @@ endif
 endif
 endif
 
+# ── User runtime acceptance selector (AARCH64_USER_RUNTIME_TEST) ──
+# Selects the dedicated user-runtime-<case> kernel/image/firmware
+# trees (e.g. irq, and future asid/smp variants). Requires
+# KERNEL_SELFTEST=1 and is mutually exclusive with every other
+# compile-affecting test variant.
+AARCH64_USER_RUNTIME_TESTS_VALID := irq
+ifneq ($(strip $(AARCH64_USER_RUNTIME_TEST)),)
+ifeq ($(filter $(AARCH64_USER_RUNTIME_TEST),$(AARCH64_USER_RUNTIME_TESTS_VALID)),)
+$(error invalid AARCH64_USER_RUNTIME_TEST='$(AARCH64_USER_RUNTIME_TEST)'; valid: $(AARCH64_USER_RUNTIME_TESTS_VALID))
+endif
+ifneq ($(KERNEL_SELFTEST),1)
+$(error AARCH64_USER_RUNTIME_TEST='$(AARCH64_USER_RUNTIME_TEST)' requires KERNEL_SELFTEST=1)
+endif
+ifneq ($(strip $(AARCH64_EL0_TEST) $(AARCH64_SCHED_TEST) $(AARCH64_AP_SCHED_TEST) $(AARCH64_SCHED_TICK_TEST) $(AARCH64_M1_TEST) $(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST) $(BOOT_CONTRACT_CASE)),)
+$(error AARCH64_USER_RUNTIME_TEST='$(AARCH64_USER_RUNTIME_TEST)' cannot be combined with other compile-affecting test variants)
+endif
+ifneq ($(strip $(AARCH64_SMP_TEST_NO_ACK_CPU)),)
+ifeq ($(filter 0,$(strip $(AARCH64_SMP_TEST_NO_ACK_CPU))),)
+$(error AARCH64_USER_RUNTIME_TEST='$(AARCH64_USER_RUNTIME_TEST)' cannot be combined with AARCH64_SMP_TEST_NO_ACK_CPU=$(AARCH64_SMP_TEST_NO_ACK_CPU))
+endif
+endif
+endif
+
 AARCH64_SCHED_TESTS_VALID := positive sp-top sp-low pc-low pc-data
 ifneq ($(strip $(AARCH64_SCHED_TEST)),)
 ifeq ($(filter $(AARCH64_SCHED_TEST),$(AARCH64_SCHED_TESTS_VALID)),)
@@ -220,7 +243,7 @@ ifeq ($(AARCH64_EL0_TEST),1)
 ifneq ($(KERNEL_SELFTEST),1)
 $(error AARCH64_EL0_TEST=1 requires KERNEL_SELFTEST=1)
 endif
-ifneq ($(strip $(BOOT_CONTRACT_CASE) $(AARCH64_M1_TEST) $(AARCH64_SCHED_TEST) $(AARCH64_AP_SCHED_TEST) $(AARCH64_SCHED_TICK_TEST) $(filter-out 0,$(AARCH64_SYNC_FAULT_TEST) $(AARCH64_SMP_TEST_NO_ACK_CPU) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST))),)
+ifneq ($(strip $(BOOT_CONTRACT_CASE) $(AARCH64_M1_TEST) $(AARCH64_SCHED_TEST) $(AARCH64_AP_SCHED_TEST) $(AARCH64_SCHED_TICK_TEST) $(AARCH64_USER_RUNTIME_TEST) $(filter-out 0,$(AARCH64_SYNC_FAULT_TEST) $(AARCH64_SMP_TEST_NO_ACK_CPU) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST))),)
 $(error AARCH64_EL0_TEST=1 cannot be combined with another test variant)
 endif
 KERNEL_VARIANT := m4-1
@@ -256,6 +279,8 @@ endif
 else ifneq ($(strip $(AARCH64_SCHED_TICK_TEST)),)
 # The per-CPU tick variant owns its own kernel/image/firmware trees.
 KERNEL_VARIANT := sched-tick
+else ifneq ($(strip $(AARCH64_USER_RUNTIME_TEST)),)
+KERNEL_VARIANT := user-runtime-$(AARCH64_USER_RUNTIME_TEST)
 else ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
 KERNEL_VARIANT := sync-fault
 else ifneq ($(filter 1,$(KERNEL_TEST_FORCE_NO_RNDRRS)),)

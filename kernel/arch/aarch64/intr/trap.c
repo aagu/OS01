@@ -43,6 +43,7 @@
 #include <arch/aarch64/intr_decode.h>
 #include <arch/aarch64/intr_dispatch.h>
 #include <arch/aarch64/gic.h>
+#include <arch/aarch64/user_task.h>
 #if AARCH64_EL0_TEST
 #include <selftest/aarch64_user_task.h>
 #endif
@@ -85,18 +86,24 @@ void aarch64_el0_irq(pt_regs_t *regs)
     int pid_before = aarch64_user_task_test_pid();
     uint64_t switches_before = aarch64_user_task_test_mark();
 #endif
+    aarch64_vm_irq_enter();
     arch_intr_dispatch(&ev, regs);
+    aarch64_vm_irq_leave();
 #if AARCH64_EL0_TEST
+    if (aarch64_el0_probe_active()) {
+        /* Only CNTP advances this counter, on the same IRQ-masked BSP.
+         * Wait until dispatch has issued EOI before replacing the frame.
+         * The legacy probe's timer continuation stays behind the test
+         * macro; a normal image has no probe to continue. */
+        if (aarch64_el0_timer_ticks() != ticks)
+            aarch64_el0_timer_return(regs);
+        return;
+    }
     aarch64_user_task_test_note_el0_irq(
         aarch64_user_task_test_pid() == pid_before,
         aarch64_user_task_test_mark() == switches_before);
-    /* Only CNTP advances this counter, on the same IRQ-masked BSP.
-     * Wait until dispatch has issued EOI before replacing the frame.
-     * The legacy probe's timer continuation stays behind the test
-     * macro; a normal image has no probe to continue. */
-    if (aarch64_el0_timer_ticks() != ticks)
-        aarch64_el0_timer_return(regs);
 #endif
+    aarch64_user_irq_return(regs);
 }
 
 /* entry.S el1_sync_entry 的 C 落点（sync 适配器，offset 0x200）。

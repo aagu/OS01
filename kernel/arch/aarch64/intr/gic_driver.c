@@ -10,6 +10,9 @@
 #ifdef AARCH64_SCHED_TICK_TEST
 #include <selftest/aarch64_sched_tick.h>
 #endif
+#ifdef AARCH64_USER_RUNTIME_TEST
+#include <selftest/aarch64_user_runtime.h>
+#endif
 
 #define GICD_CTLR       0x000u
 #define GICD_TYPER      0x004u
@@ -230,5 +233,8 @@ void gic_dev_dispatch(struct gic_dev *dev, struct pt_regs *regs)
     if (fn) fn(intid, param, regs);                   /* 设备清源在 EOI 前 */
     else if (unexpected_cb) unexpected_cb(intid);     /* 对齐 time.c:105-115 语义 */
     gic_eoi(dev, iar);                                /* 完整 IAR 回写 (D7) */
-
+#ifdef AARCH64_USER_RUNTIME_TEST
+    if (intid == 30u)
+        aarch64_user_runtime_test_timer_eoi(intid, regs);
+#endif
 }

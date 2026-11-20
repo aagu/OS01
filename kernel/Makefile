@@ -155,6 +155,9 @@ KERNEL_C_SOURCES += selftest/test_aarch64_user_waitpid.c
 KERNEL_C_SOURCES += selftest/test_aarch64_user_exec.c
 KERNEL_C_SOURCES += selftest/test_aarch64_user_signal.c
 endif
+ifneq ($(strip $(AARCH64_USER_RUNTIME_TEST)),)
+KERNEL_C_SOURCES += selftest/test_aarch64_user_runtime.c
+endif
 # fs/elf_layout.c is shared ELF-layout validation: the M4 production
 # user-image constructor links it in every aarch64 build (normal and
 # AARCH64_EL0_TEST alike), so it is NOT gated on the EL0 test variant.
@@ -366,6 +369,9 @@ KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_waitpid_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_exec_main_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_exec_child_image.o
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_signal_image.o
+endif
+ifneq ($(ARCH):$(strip $(AARCH64_USER_RUNTIME_TEST)),aarch64:)
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_runtime_image.o
 endif
 
 KERNEL_OBJECTS := $(C_OBJECTS) $(ASM_OBJECTS) $(KERNEL_EXTRA_OBJECTS)
@@ -614,6 +620,13 @@ endif
 ifneq ($(strip $(AARCH64_SCHED_TICK_TEST)),)
 ifeq ($(ARCH),aarch64)
 ALL_CFLAGS += -DAARCH64_SCHED_TICK_TEST=1
+endif
+endif
+
+ifneq ($(strip $(AARCH64_USER_RUNTIME_TEST)),)
+ifeq ($(ARCH),aarch64)
+ALL_CFLAGS += -DAARCH64_USER_RUNTIME_TEST=1
+ALL_CFLAGS += $(if $(filter irq,$(AARCH64_USER_RUNTIME_TEST)),-DAARCH64_USER_RUNTIME_CASE_IRQ=1)
 endif
 endif
 
@@ -1004,6 +1017,19 @@ $(BUILD_DIR)/generated/aarch64_user_signal_image.o: $(BUILD_DIR)/generated/aarch
 	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
 endif
 
+ifneq ($(ARCH):$(strip $(AARCH64_USER_RUNTIME_TEST)),aarch64:)
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_runtime.o: selftest/fixtures/aarch64_user_runtime.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(filter-out -mgeneral-regs-only,$(ALL_CFLAGS)) -MD -MP -c $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_runtime.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_runtime.o selftest/fixtures/aarch64_user_task.ld
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_runtime_image.o: $(BUILD_DIR)/generated/aarch64_user_runtime.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+endif
+
 # PSF font → .o (both arches — kernel/core/printk.c on x86_64 AND
 # kernel/arch/aarch64/runtime/printk_fb.c on aarch64 reference these symbols)
 # `ld -r -b binary` derives the embedded symbols (_binary_kernel_font_psf_*)
@@ -1221,6 +1247,9 @@ clean:
 ALL_DEPS := $(patsubst %.o,%.d,$(C_OBJECTS) $(ASM_OBJECTS))
 ifeq ($(ARCH):$(AARCH64_EL0_TEST),aarch64:1)
 ALL_DEPS += $(BUILD_DIR)/selftest/fixtures/aarch64_el0.d
+endif
+ifneq ($(ARCH):$(strip $(AARCH64_USER_RUNTIME_TEST)),aarch64:)
+ALL_DEPS += $(BUILD_DIR)/selftest/fixtures/aarch64_user_runtime.d
 endif
 ifeq ($(ARCH),x86_64)
 ALL_DEPS += $(BUILD_DIR)/$(ARCHDIR)/trampoline.d

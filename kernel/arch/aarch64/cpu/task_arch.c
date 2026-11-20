@@ -32,6 +32,9 @@
 #ifdef AARCH64_SCHED_TICK_TEST
 #include <selftest/aarch64_sched_tick.h>
 #endif
+#ifdef AARCH64_USER_RUNTIME_TEST
+#include <selftest/aarch64_user_runtime.h>
+#endif
 
 extern char _text_start, _text_end;
 
@@ -572,6 +575,11 @@ void arch_aarch64_bsp_handoff(void)
     serial_printk("[selftest] done (failed=%u)\n",
                   (unsigned)selftest_failed);
     serial_printk("[sched-tick] END failed=%u\n", (unsigned)selftest_failed);
+#elif defined(AARCH64_USER_RUNTIME_TEST)
+    test_aarch64_user_runtime_run();
+    int selftest_failed = selftest_end_run();
+    serial_printk("[selftest] done (failed=%u)\n",
+                  (unsigned)selftest_failed);
 #elif defined(OS01_SELFTEST)
     test_aarch64_scheduler_run();
     int selftest_failed = selftest_end_run();

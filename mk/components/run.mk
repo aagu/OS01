@@ -299,7 +299,8 @@ $(if $(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERN
 $(if $(strip $(foreach v,$(2),$($(v))) $(KERNEL_SELFTEST)),$(error MODE=$(1) cannot be combined with $(subst $(space_for_gates),/,$(2))/KERNEL_SELFTEST overrides — it sets its own),)
 ,),)
 endef
-$(eval $(call _aarch64_mode_gate,sched-tick,AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_AP_SCHED_TEST AARCH64_SMP_TEST_NO_ACK_CPU))
+$(eval $(call _aarch64_mode_gate,sched-tick,AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_AP_SCHED_TEST AARCH64_USER_RUNTIME_TEST AARCH64_SMP_TEST_NO_ACK_CPU))
+$(eval $(call _aarch64_mode_gate,user-runtime,AARCH64_EL0_TEST AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_AP_SCHED_TEST AARCH64_SCHED_TICK_TEST AARCH64_SMP_TEST_NO_ACK_CPU))
 $(eval $(call _aarch64_mode_gate,sched-wake,AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_SMP_TEST_NO_ACK_CPU))
 $(eval $(call _aarch64_mode_gate,sched-ap,AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_SMP_TEST_NO_ACK_CPU))
 $(eval $(call _aarch64_mode_gate,lma-layout,AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_AP_SCHED_TEST AARCH64_SCHED_TICK_TEST AARCH64_SMP_TEST_NO_ACK_CPU))
@@ -374,6 +375,29 @@ _test-aarch64-run-sched-tick:
 	  --llvm-nm "$(AARCH64_NM)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched-tick/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+
+ifneq ($(filter test-aarch64,$(MAKECMDGOALS))$(findstring _test-aarch64-prep-user-runtime,$(MAKECMDGOALS))$(findstring _test-aarch64-run-user-runtime,$(MAKECMDGOALS)),)
+USER_RUNTIME_CASES_VALID := irq
+ifeq ($(USER_RUNTIME_CASE),)
+USER_RUNTIME_CASE := irq
+endif
+ifeq ($(filter $(USER_RUNTIME_CASE),$(USER_RUNTIME_CASES_VALID)),)
+$(error invalid USER_RUNTIME_CASE='$(USER_RUNTIME_CASE)'; valid: $(USER_RUNTIME_CASES_VALID))
+endif
+endif
+.PHONY: _test-aarch64-prep-user-runtime _test-aarch64-run-user-runtime
+_test-aarch64-prep-user-runtime:
+	$(MAKE) KERNEL_SELFTEST=1 AARCH64_USER_RUNTIME_TEST=$(USER_RUNTIME_CASE) aarch64-uefi
+_test-aarch64-run-user-runtime:
+	python3 qemutests/aarch64_user_runtime.py \
+	  --case "$(USER_RUNTIME_CASE)" \
+	  --image "$(call aarch64_variant_disk,user-runtime-$(USER_RUNTIME_CASE))" \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --elf "$(call aarch64_variant_kernel,user-runtime-$(USER_RUNTIME_CASE))" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --llvm-nm "$(AARCH64_NM)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-user-runtime-$(USER_RUNTIME_CASE)/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 
 # Per-MODE lookups. The "extra" DTB flag is a Make variable (NOT a shell
 # variable) so it survives across recipe lines — a shell variable set
@@ -617,8 +641,8 @@ test-aarch64:
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
 	@case "$(MODE)" in \
-	  smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|sched-tick|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract|lma-layout) ;; \
-	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|sched-tick|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract|lma-layout, got '$(MODE)'" >&2; exit 1;; \
+	  smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|sched-tick|user-runtime|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract|lma-layout) ;; \
+	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|sched-tick|user-runtime|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract|lma-layout, got '$(MODE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-aarch64] MODE=$(MODE) extra=$(TEST_AARCH64_EXTRA_$(MODE))"
 	$(MAKE) --no-print-directory _test-aarch64-prep-$(MODE)

@@ -112,7 +112,7 @@ int      pmm_cow_acquire(uint64_t phys, bool first_share);
 int      pmm_cow_release(uint64_t phys, bool *last);
 
 bool pmm_4k_page_allocated(uint64_t phys);
-#if AARCH64_EL0_TEST
+#if AARCH64_EL0_TEST || defined(AARCH64_USER_RUNTIME_TEST)
 uint64_t pmm_probe_4k_allocated_count(void);
 #endif
 
