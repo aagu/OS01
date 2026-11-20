@@ -2053,6 +2053,16 @@
       "source": "qemutests/test_brk_source_scan.py"
     },
     {
+      "id": "test_build_flag_names",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_build_flag_names.py"
+    },
+    {
       "kind": "host_test",
       "id": "test_canon",
       "layer": "host",
