@@ -30,7 +30,7 @@ static void console_scroll_snap(const fb_snapshot_t *snap)
     if (!printk_fb_view_resolve(snap, &view)) return;
     int rows = (int)(view.height / font->height);
     if (rows <= 0) return;
-    (void)printk_fb_scroll_view(&view, font->height);
+    printk_fb_scroll_view(&view, font->height);
     term_cursor_row = rows - 1;
 }
 

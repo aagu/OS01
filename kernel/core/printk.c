@@ -28,7 +28,6 @@
 #include <stdio.h>
 
 #include <arch/spinlock.h>
-#include <arch/clocksource.h>
 #include <arch/fb_copy.h>     // fb_copy_rows / fb_scroll_rows: the geometry
 #include <driver/serial.h>
 #include <driver/fb_state.h>
@@ -248,14 +247,10 @@ uint8_t *printk_fb_shadow_get(const printk_fb_view_t *view)
 
 /* ── The scroll ──────────────────────────────────────────────── */
 
-/* Scroll the visible framebuffer up by `shift_rows` VISIBLE pixel
- * rows.  Returns the time spent in the framebuffer write phase, or 0
- * when the geometry was rejected (in which case NOT a single pixel
- * was touched). */
-uint64_t printk_fb_scroll_view(const printk_fb_view_t *view, uint32_t shift_rows)
+void printk_fb_scroll_view(const printk_fb_view_t *view, uint32_t shift_rows)
 {
-    if (!view || !printk_fb_view_ok(view)) return 0;
-    if (shift_rows == 0 || shift_rows >= view->height) return 0;
+    if (!view || !printk_fb_view_ok(view)) return;
+    if (shift_rows == 0 || shift_rows >= view->height) return;
 
     uint32_t row_bytes = view->width * 4u;
 
@@ -268,20 +263,14 @@ uint64_t printk_fb_scroll_view(const printk_fb_view_t *view, uint32_t shift_rows
     uint8_t *shadow = printk_fb_shadow_get(view);
     if (shadow) {
         fb_scroll_packed(shadow, row_bytes, view->height, shift_rows);
-
-        uint64_t t0 = arch_clocksource_read_ns();
-        bool ok = fb_copy_rows(view, shadow, row_bytes, view->height);
-        uint64_t t1 = arch_clocksource_read_ns();
-        return ok ? (t1 - t0) : 0;
+        (void)fb_copy_rows(view, shadow, row_bytes, view->height);
+        return;
     }
 
     /* No shadow (the PMM is not ready, the allocation failed, or the
      * build has no shadow at all): scroll the visible pixels in place,
      * row by row, using the real pitch. */
-    uint64_t t0 = arch_clocksource_read_ns();
-    bool ok = fb_scroll_rows(view, shift_rows);
-    uint64_t t1 = arch_clocksource_read_ns();
-    return ok ? (t1 - t0) : 0;
+    (void)fb_scroll_rows(view, shift_rows);
 }
 
 /* Font symbols — produced by the kernel/Makefile `ld -r -b binary`
@@ -480,7 +469,7 @@ Label_tab:
 			// Scroll framebuffer up by one character row.
 			int rows = (int)(cur_yres / font->height);
 			if (have_view && rows > 0)
-				(void)printk_fb_scroll_view(&view, font->height);
+				printk_fb_scroll_view(&view, font->height);
 			if (rows > 0)
 				Pos.YPosition = rows - 1;
 		}
@@ -551,131 +540,3 @@ int serial_printk(const char *fmt, ...)
     spin_unlock_irqrestore(&serial_lock, sf);
     return i;
 }
-
-/* ── Boot-time framebuffer scroll probe (diagnostic fixture) ────
- *
- * Enabled with KERNEL_EXTRA_CFLAGS=-DOS01_TEST_FB_SCROLL and called
- * from x86_64_boot_devices() once the timer is calibrated and before
- * the display is handed over.
- *
- * It measures two things that must NOT be mixed:
- *   - seed_ns: the cost of building the shadow (the first copy of the
- *     visible pixels into the packed RAM buffer);
- *   - total_ns / fb_ns: the cost of a STEADY scroll, i.e. one that
- *     finds the shadow already in place.
- *
- * The log line is emitted AFTER Pos.lock and the writer lease are
- * released — no logging inside a lock.
- */
-#ifdef OS01_TEST_FB_SCROLL
-
-#include <log/log.h>
-
-#define PRINTK_FB_SCROLL_SAMPLES 8
-
-static uint64_t printk_fb_median(uint64_t *v, int n)
-{
-    for (int i = 1; i < n; i++) {
-        uint64_t k = v[i];
-        int j = i - 1;
-        while (j >= 0 && v[j] > k) { v[j + 1] = v[j]; j--; }
-        v[j + 1] = k;
-    }
-    /* An even count: the median is the mean of the two middle ones. */
-    return (v[n / 2 - 1] + v[n / 2]) / 2;
-}
-
-void printk_fb_scroll_probe(void)
-{
-    uint64_t seed_ns = 0;
-    uint64_t total_ns[PRINTK_FB_SCROLL_SAMPLES];
-    uint64_t fb_ns[PRINTK_FB_SCROLL_SAMPLES];
-    uint32_t width = 0, height = 0, stride = 0;
-    bool clock_ok = false;
-    bool shadow_ok = false;
-
-    for (int i = 0; i < PRINTK_FB_SCROLL_SAMPLES; i++) {
-        total_ns[i] = 0;
-        fb_ns[i] = 0;
-    }
-
-    uint64_t flags = spin_lock_irqsave(&Pos.lock);
-    fb_lease_t lease;
-    int lrc = fb_writer_begin(&lease, 0);
-    if (lrc == 0) {
-        printk_fb_view_t view;
-        if (printk_fb_view_resolve(&lease.snapshot, &view)) {
-            width  = view.width;
-            height = view.height;
-            stride = view.stride;
-
-            /* Drop a shadow left over from an earlier phase so the
-             * seed cost below is the real one. */
-            printk_fb_shadow_release();
-
-            /* A clock that does not advance is not a clock. */
-            uint64_t c0 = arch_clocksource_read_ns();
-            uint64_t c1 = arch_clocksource_read_ns();
-            clock_ok = (c1 != c0);
-
-            if (clock_ok) {
-                /* Seed: build the shadow and measure it on its own, so
-                 * the steady-state samples carry no seed cost. */
-                uint64_t s0 = arch_clocksource_read_ns();
-                uint8_t *shadow = printk_fb_shadow_get(&view);
-                uint64_t s1 = arch_clocksource_read_ns();
-                seed_ns = s1 - s0;
-                shadow_ok = (shadow != NULL);
-
-                if (shadow_ok) {
-                    /* Warm up along the SAME scroll path. */
-                    (void)printk_fb_scroll_view(&view, font->height);
-
-                    for (int i = 0; i < PRINTK_FB_SCROLL_SAMPLES; i++) {
-                        uint64_t t0 = arch_clocksource_read_ns();
-                        uint64_t f = printk_fb_scroll_view(&view, font->height);
-                        uint64_t t1 = arch_clocksource_read_ns();
-                        total_ns[i] = t1 - t0;
-                        fb_ns[i] = f;
-                    }
-                }
-            }
-        }
-        fb_writer_end(&lease);
-    }
-    spin_unlock_irqrestore(&Pos.lock, flags);
-
-    /* The result is reported only after the lock and the lease are
-     * gone. */
-    if (!clock_ok) {
-        log_info("[FB SCROLL] invalid: no clock (w=%u h=%u stride=%u)\n",
-                 width, height, stride);
-        return;
-    }
-    if (!shadow_ok) {
-        log_info("[FB SCROLL] invalid: no shadow (w=%u h=%u stride=%u)\n",
-                 width, height, stride);
-        return;
-    }
-
-    uint64_t total_sorted[PRINTK_FB_SCROLL_SAMPLES];
-    uint64_t fb_sorted[PRINTK_FB_SCROLL_SAMPLES];
-    for (int i = 0; i < PRINTK_FB_SCROLL_SAMPLES; i++) {
-        total_sorted[i] = total_ns[i];
-        fb_sorted[i] = fb_ns[i];
-    }
-    uint64_t med_total = printk_fb_median(total_sorted, PRINTK_FB_SCROLL_SAMPLES);
-    uint64_t med_fb = printk_fb_median(fb_sorted, PRINTK_FB_SCROLL_SAMPLES);
-
-    log_info("[FB SCROLL] cfg w=%u h=%u stride=%u seed_ns=%llu\n",
-             width, height, stride, seed_ns);
-    log_info("[FB SCROLL] total_ns=%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
-             total_ns[0], total_ns[1], total_ns[2], total_ns[3],
-             total_ns[4], total_ns[5], total_ns[6], total_ns[7]);
-    log_info("[FB SCROLL] fb_ns=%llu,%llu,%llu,%llu,%llu,%llu,%llu,%llu\n",
-             fb_ns[0], fb_ns[1], fb_ns[2], fb_ns[3],
-             fb_ns[4], fb_ns[5], fb_ns[6], fb_ns[7]);
-    log_info("[FB SCROLL] median total_ns=%llu fb_ns=%llu\n", med_total, med_fb);
-}
-
-#endif /* OS01_TEST_FB_SCROLL */

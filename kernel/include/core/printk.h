@@ -123,11 +123,7 @@ bool printk_fb_view_resolve(const struct fb_snapshot *snap, printk_fb_view_t *ou
 // Scroll the visible framebuffer up by `shift_rows` VISIBLE pixel
 // rows.  The caller MUST hold Pos.lock and a writer lease (or
 // otherwise guarantee that no other writer is active).
-//
-// Returns the time spent in the framebuffer write phase in
-// nanoseconds, or 0 when the geometry was rejected (in which case NOT
-// a single pixel was touched).
-uint64_t printk_fb_scroll_view(const printk_fb_view_t *view, uint32_t shift_rows);
+void printk_fb_scroll_view(const printk_fb_view_t *view, uint32_t shift_rows);
 
 // The boot-log shadow (x86 + FB_SHADOW builds only).  The shadow holds
 // the VISIBLE pixels of the framebuffer in a PACKED row layout (row
@@ -138,12 +134,6 @@ uint64_t printk_fb_scroll_view(const printk_fb_view_t *view, uint32_t shift_rows
 uint8_t *printk_fb_shadow_get(const printk_fb_view_t *view);
 void printk_fb_shadow_release(void);
 
-// Boot-time framebuffer scroll probe (diagnostic fixture).  Enabled
-// with -DOS01_TEST_FB_SCROLL; called from x86_64_boot_devices() once
-// the timer is calibrated and before the display is handed over.  It
-// reports the shadow seed cost and the steady-state scroll cost, and
-// it never logs while holding Pos.lock or a writer lease.
-void printk_fb_scroll_probe(void);
 void frame_buffer_init();
 void frame_buffer_early_init();
 

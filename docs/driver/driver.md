@@ -545,35 +545,6 @@ QEMU 可通过 `qemutests/run_test.py --disk <诊断镜像的副本> gfx-present
   以及滚屏几何（3 扫描行 × 2 可见像素、pitch 12、行尾哨兵；滚动 1 行后
   可见行上移、底行清零、padding 不变；长度差 1 字节时不写）。
 
-#### 开机日志滚屏探针（诊断夹具）
-
-`printk_fb_scroll_probe()` 在 `x86_64_boot_devices()` 里、计时器校准之后、
-显示交接之前调用，把「首次建立 shadow 的成本」和「稳态滚屏成本」分开记录。
-它持有 `Pos.lock` 与 writer lease 时**不打印任何日志**，日志行在两者都释放
-之后才输出。
-
-```sh
-make PROFILE=x86_64-clang FB_SHADOW=1 LOG_TARGET=both \
-  KERNEL_EXTRA_CFLAGS=-DOS01_TEST_FB_SCROLL "$PWD/build/x86_64-clang/image/disk.img"
-```
-
-输出格式：
-
-```
-[FB SCROLL] cfg w=1024 h=768 stride=4096 seed_ns=<首次建立 shadow 的耗时>
-[FB SCROLL] total_ns=<8 次稳态滚屏的整次耗时>
-[FB SCROLL] fb_ns=<8 次稳态滚屏的显存写入阶段>
-[FB SCROLL] median total_ns=<中位数> fb_ns=<中位数>
-```
-
-没有有效时钟或没有建立 shadow 时输出 `invalid`，该样本作废。
-新旧镜像必须使用同一夹具、同一分辨率、同一构建选项；
-QEMU 测得的耗时不构成真机门槛。
-
-参考值（QEMU GOP 1440×900 / stride 5760，**仅冒烟信号**）：稳态滚屏中位数
-**190.4 ms（旧实现）→ 5.2 ms（当前实现）**，其中显存写回阶段约 2.4 ms、
-首次建立 shadow 约 30 ms。真机 1024×768 / pitch 4096 的对照仍待验收。
-
 ### gfx0 设备（`/dev/gfx0`，2026-09-30）
 
 受限 present 设备，提供用户态 2D 图形 API（libgfx）的内核后端。文件位于 `kernel/arch/x86_64/driver/gfx.c`，ABI 定义在 `kernel/include/uapi/gfx.h`。

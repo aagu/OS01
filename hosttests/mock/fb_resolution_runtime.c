@@ -278,9 +278,8 @@ bool printk_fb_view_resolve(const struct fb_snapshot *snap, printk_fb_view_t *ou
     return true;
 }
 
-uint64_t printk_fb_scroll_view(const printk_fb_view_t *view, uint32_t shift_rows)
+void printk_fb_scroll_view(const printk_fb_view_t *view, uint32_t shift_rows)
 {
     (void)view;
     (void)shift_rows;
-    return 0;
 }
