@@ -26,6 +26,7 @@
 
 #include <stddef.h>
 #include <sys/types.h>          /* off_t */
+#include <libc_arch/float_abi.h>     /* fs_float_t */
 
 typedef struct os01_shfile {
     const char *buf;            /* start of the string */
@@ -67,7 +68,7 @@ extern "C" {
  * closing parenthesis), which is what strtod needs.  Returns the
  * value (long double; the caller narrows), sets errno = ERANGE on
  * overflow/underflow. */
-long double __floatscan(shfile_t *f, int prec, int pok);
+fs_float_t __floatscan(shfile_t *f, int prec, int pok);
 
 #ifdef __cplusplus
 }

@@ -29,35 +29,11 @@
 
 #include <stdlib/floatscan.h>
 
-/* ── static libm helpers (vendored, MIT — see manifest) ──────────────
- *
- * x86_64 long double is the 80-bit x87 type: LDBL_MANT_DIG == 64,
- * LDBL_MAX_EXP == 16384, little-endian union layout.  The other musl
- * branches (double-as-long-double, quad, big-endian m68k) are dropped:
- * this port targets exactly one long double ABI and does not change
- * it.  isnan(x) is written x != x; fabsl/copysign via builtins (no
- * external libcall). */
-
-#if LDBL_MANT_DIG != 64 || LDBL_MAX_EXP != 16384
-#error "floatscan port targets the x87 80-bit long double ABI"
-#endif
-
-union ldshape {
-    long double f;
-    struct {
-        uint64_t m;
-        uint16_t se;
-    } i;
-};
-
-/* musl src/math/copysignl.c */
-static long double fs_copysignl(long double x, long double y)
-{
-    union ldshape ux = {x}, uy = {y};
-    ux.i.se &= 0x7fff;
-    ux.i.se |= uy.i.se & 0x8000;
-    return ux.f;
-}
+/* ── static double scaling helper (arch-neutral binary64) ───────────
+ * Per-arch accumulator type (fs_float_t), precision macros (FS_MANT_DIG,
+ * FS_MAX_EXP, FS_MIN_EXP, FS_MAX, FS_MIN, FS_EPSILON), and bit-level
+ * helpers (fs_copysignl, fs_scalbnl, fs_fmodl, fs_mk_nan) live in the
+ * <arch/float_abi.h> facade (included via <stdlib/floatscan.h>). */
 
 /* musl src/math/scalbn.c */
 static double fs_scalbn(double x, int n)
@@ -91,119 +67,28 @@ static double fs_scalbn(double x, int n)
     return x;
 }
 
-/* musl src/math/scalbnl.c (LDBL_MANT_DIG == 64 branch) */
-static long double fs_scalbnl(long double x, int n)
-{
-    union ldshape u;
-
-    if (n > 16383) {
-        x *= 0x1p16383L;
-        n -= 16383;
-        if (n > 16383) {
-            x *= 0x1p16383L;
-            n -= 16383;
-            if (n > 16383)
-                n = 16383;
-        }
-    } else if (n < -16382) {
-        x *= 0x1p-16382L * 0x1p113L;
-        n += 16382 - 113;
-        if (n < -16382) {
-            x *= 0x1p-16382L * 0x1p113L;
-            n += 16382 - 113;
-            if (n < -16382)
-                n = -16382;
-        }
-    }
-    u.f = 1.0;
-    u.i.se = 0x3fff + n;
-    return x * u.f;
-}
-
-/* musl src/math/fmodl.c (LDBL_MANT_DIG == 64 branch) */
-static long double fs_fmodl(long double x, long double y)
-{
-    union ldshape ux = {x}, uy = {y};
-    int ex = ux.i.se & 0x7fff;
-    int ey = uy.i.se & 0x7fff;
-    int sx = ux.i.se & 0x8000;
-
-    if (y == 0 || y != y || ex == 0x7fff)
-        return (x * y) / (x * y);
-    ux.i.se = ex;
-    uy.i.se = ey;
-    if (ux.f <= uy.f) {
-        if (ux.f == uy.f)
-            return 0 * x;
-        return x;
-    }
-
-    /* normalize x and y */
-    if (!ex) {
-        ux.f *= 0x1p120f;
-        ex = ux.i.se - 120;
-    }
-    if (!ey) {
-        uy.f *= 0x1p120f;
-        ey = uy.i.se - 120;
-    }
-
-    /* x mod y */
-    uint64_t i, mx, my;
-    mx = ux.i.m;
-    my = uy.i.m;
-    for (; ex > ey; ex--) {
-        i = mx - my;
-        if (mx >= my) {
-            if (i == 0)
-                return 0 * x;
-            mx = 2 * i;
-        } else if (2 * mx < mx) {
-            mx = 2 * mx - my;
-        } else {
-            mx = 2 * mx;
-        }
-    }
-    i = mx - my;
-    if (mx >= my) {
-        if (i == 0)
-            return 0 * x;
-        mx = i;
-    }
-    for (; mx >> 63 == 0; mx *= 2, ex--);
-    ux.i.m = mx;
-
-    /* scale result */
-    if (ex <= 0) {
-        ux.i.se = (ex + 120) | sx;
-        ux.f *= 0x1p-120f;
-    } else
-        ux.i.se = ex | sx;
-    return ux.f;
-}
-
 /* ── the musl scanner proper (verbatim except the adaptation diff) ── */
 
-#if LDBL_MANT_DIG == 53 && LDBL_MAX_EXP == 1024
+#if FS_MANT_DIG == 53 && FS_MAX_EXP == 1024
 
 #define LD_B1B_DIG 2
 #define LD_B1B_MAX 9007199, 254740991
 #define KMAX 128
 
-#elif LDBL_MANT_DIG == 64 && LDBL_MAX_EXP == 16384
+#elif FS_MANT_DIG == 64 && FS_MAX_EXP == 16384
 
 #define LD_B1B_DIG 3
 #define LD_B1B_MAX 18, 446744073, 709551615
 #define KMAX 2048
 
-#elif LDBL_MANT_DIG == 113 && LDBL_MAX_EXP == 16384
+#elif FS_MANT_DIG == 113 && FS_MAX_EXP == 16384
 
 #define LD_B1B_DIG 4
 #define LD_B1B_MAX 10384593, 717069655, 257060992, 658440191
 #define KMAX 2048
 
 #else
-#error Unsupported long double representation
+#error Unsupported scanner float representation
 #endif
 
 #define MASK (KMAX-1)
@@ -235,7 +120,7 @@ static long long scanexp(shfile_t *f, int pok)
 }
 
 
-static long double decfloat(shfile_t *f, int c, int bits, int emin, int sign, int pok)
+static fs_float_t decfloat(shfile_t *f, int c, int bits, int emin, int sign, int pok)
 {
 	uint32_t x[KMAX];
 	static const uint32_t th[] = { LD_B1B_MAX };
@@ -248,9 +133,9 @@ static long double decfloat(shfile_t *f, int c, int bits, int emin, int sign, in
 	int e2;
 	int emax = -emin-bits+3;
 	int denormal = 0;
-	long double y;
-	long double frac=0;
-	long double bias=0;
+	fs_float_t y;
+	fs_float_t frac=0;
+	fs_float_t bias=0;
 	static const int p10s[] = { 10, 100, 1000, 10000,
 		100000, 1000000, 10000000, 100000000 };
 
@@ -316,14 +201,14 @@ static long double decfloat(shfile_t *f, int c, int bits, int emin, int sign, in
 
 	/* Optimize small integers (w/no exponent) and over/under-flow */
 	if (lrp==dc && dc<10 && (bits>30 || x[0]>>bits==0))
-		return sign * (long double)x[0];
+		return sign * (fs_float_t)x[0];
 	if (lrp > -emin/2) {
 		errno = ERANGE;
-		return sign * LDBL_MAX * LDBL_MAX;
+		return sign * FS_MAX * FS_MAX;
 	}
-	if (lrp < emin-2*LDBL_MANT_DIG) {
+	if (lrp < emin-2*FS_MANT_DIG) {
 		errno = ERANGE;
-		return sign * LDBL_MIN * LDBL_MIN;
+		return sign * FS_MIN * FS_MIN;
 	}
 
 	/* Align incomplete final B1B digit */
@@ -340,11 +225,11 @@ static long double decfloat(shfile_t *f, int c, int bits, int emin, int sign, in
 
 	/* Optimize small to mid-size integers (even in exp. notation) */
 	if (lnz<9 && lnz<=rp && rp < 18) {
-		if (rp == 9) return sign * (long double)x[0];
-		if (rp < 9) return sign * (long double)x[0] / p10s[8-rp];
+		if (rp == 9) return sign * (fs_float_t)x[0];
+		if (rp < 9) return sign * (fs_float_t)x[0] / p10s[8-rp];
 		int bitlim = bits-3*(int)(rp-9);
 		if (bitlim>30 || x[0]>>bitlim==0)
-			return sign * (long double)x[0] * p10s[rp-10];
+			return sign * (fs_float_t)x[0] * p10s[rp-10];
 	}
 
 	/* Drop trailing zeros */
@@ -432,22 +317,22 @@ static long double decfloat(shfile_t *f, int c, int bits, int emin, int sign, in
 	/* Assemble desired bits into floating point variable */
 	for (y=i=0; i<LD_B1B_DIG; i++) {
 		if ((a+i & MASK)==z) x[(z=(z+1 & MASK))-1] = 0;
-		y = 1000000000.0L * y + x[a+i & MASK];
+		y = (fs_float_t)1000000000.0 * y + x[a+i & MASK];
 	}
 
 	y *= sign;
 
 	/* Limit precision for denormal results */
-	if (bits > LDBL_MANT_DIG+e2-emin) {
-		bits = LDBL_MANT_DIG+e2-emin;
+	if (bits > FS_MANT_DIG+e2-emin) {
+		bits = FS_MANT_DIG+e2-emin;
 		if (bits<0) bits=0;
 		denormal = 1;
 	}
 
 	/* Calculate bias term to force rounding, move out lower bits */
-	if (bits < LDBL_MANT_DIG) {
-		bias = fs_copysignl(fs_scalbn(1, 2*LDBL_MANT_DIG-bits-1), y);
-		frac = fs_fmodl(y, fs_scalbn(1, LDBL_MANT_DIG-bits));
+	if (bits < FS_MANT_DIG) {
+		bias = fs_copysignl(fs_scalbn(1, 2*FS_MANT_DIG-bits-1), y);
+		frac = fs_fmodl(y, fs_scalbn(1, FS_MANT_DIG-bits));
 		y -= frac;
 		y += bias;
 	}
@@ -465,33 +350,33 @@ static long double decfloat(shfile_t *f, int c, int bits, int emin, int sign, in
 			else
 				frac += 0.75*sign;
 		}
-		if (LDBL_MANT_DIG-bits >= 2 && !fs_fmodl(frac, 1))
+		if (FS_MANT_DIG-bits >= 2 && !fs_fmodl(frac, 1))
 			frac++;
 	}
 
 	y += frac;
 	y -= bias;
 
-	if ((e2+LDBL_MANT_DIG & INT_MAX) > emax-5) {
-		if (__builtin_fabsl(y) >= 2/LDBL_EPSILON) {
-			if (denormal && bits==LDBL_MANT_DIG+e2-emin)
+	if ((e2+FS_MANT_DIG & INT_MAX) > emax-5) {
+		if (fs_fabs(y) >= 2/FS_EPSILON) {
+			if (denormal && bits==FS_MANT_DIG+e2-emin)
 				denormal = 0;
 			y *= 0.5;
 			e2++;
 		}
-		if (e2+LDBL_MANT_DIG>emax || (denormal && frac))
+		if (e2+FS_MANT_DIG>emax || (denormal && frac))
 			errno = ERANGE;
 	}
 
 	return fs_scalbnl(y, e2);
 }
 
-static long double hexfloat(shfile_t *f, int bits, int emin, int sign, int pok)
+static fs_float_t hexfloat(shfile_t *f, int bits, int emin, int sign, int pok)
 {
 	uint32_t x = 0;
-	long double y = 0;
-	long double scale = 1;
-	long double bias = 0;
+	fs_float_t y = 0;
+	fs_float_t scale = 1;
+	fs_float_t bias = 0;
 	int gottail = 0, gotrad = 0, gotdig = 0;
 	long long rp = 0;
 	long long dc = 0;
@@ -522,7 +407,7 @@ static long double hexfloat(shfile_t *f, int bits, int emin, int sign, int pok)
 			else d = c-'0';
 			if (dc<8) {
 				x = x*16 + d;
-			} else if (dc < LDBL_MANT_DIG/4+1) {
+			} else if (dc < FS_MANT_DIG/4+1) {
 				y += d*(scale/=16);
 			} else if (d && !gottail) {
 				y += 0.5*scale;
@@ -562,11 +447,11 @@ static long double hexfloat(shfile_t *f, int bits, int emin, int sign, int pok)
 	if (!x) return sign * 0.0;
 	if (e2 > -emin) {
 		errno = ERANGE;
-		return sign * LDBL_MAX * LDBL_MAX;
+		return sign * FS_MAX * FS_MAX;
 	}
-	if (e2 < emin-2*LDBL_MANT_DIG) {
+	if (e2 < emin-2*FS_MANT_DIG) {
 		errno = ERANGE;
-		return sign * LDBL_MIN * LDBL_MIN;
+		return sign * FS_MIN * FS_MIN;
 	}
 
 	while (x < 0x80000000) {
@@ -585,12 +470,12 @@ static long double hexfloat(shfile_t *f, int bits, int emin, int sign, int pok)
 		if (bits<0) bits=0;
 	}
 
-	if (bits < LDBL_MANT_DIG)
-		bias = fs_copysignl(fs_scalbn(1, 32+LDBL_MANT_DIG-bits-1), sign);
+	if (bits < FS_MANT_DIG)
+		bias = fs_copysignl(fs_scalbn(1, 32+FS_MANT_DIG-bits-1), sign);
 
 	if (bits<32 && y && !(x&1)) x++, y=0;
 
-	y = bias + sign*(long double)x + sign*y;
+	y = bias + sign*(fs_float_t)x + sign*y;
 	y -= bias;
 
 	if (!y) errno = ERANGE;
@@ -598,36 +483,7 @@ static long double hexfloat(shfile_t *f, int bits, int emin, int sign, int pok)
 	return fs_scalbnl(y, e2);
 }
 
-/* OS01 addition: a NaN carrying the parse's sign bit and (optionally)
- * the payload the n-chars spell, exactly what glibc's strtod answers
- * for "nan(123)" / "-nan".  The payload digits are read as a DECIMAL
- * number into the low mantissa bits (glibc's answer for digit-only
- * sequences; __builtin_nanf cannot be used here because a runtime
- * string turns the builtin into a libm nanf() call, and OS01 has no
- * libm).  Quiet bit and the x87 integer bit are already set by the
- * base quiet NaN; non-digit n-chars end the payload (a documented
- * simplification — the test table only exercises digit payloads). */
-static long double mk_nan(int sign, const char *payload)
-{
-    union ldshape u;
-    u.f = __builtin_nanf("");
-    if (payload) {
-        uint64_t m = 0;
-        int any = 0;
-        for (; *payload; payload++) {
-            if (*payload < '0' || *payload > '9') break;
-            m = m * 10 + (uint64_t)(*payload - '0');
-            any = 1;
-        }
-        if (any)
-            u.i.m |= m & (((uint64_t)1 << 62) - 1);
-    }
-    if (sign < 0)
-        u.i.se |= 0x8000;
-    return u.f;
-}
-
-long double __floatscan(shfile_t *f, int prec, int pok)
+fs_float_t __floatscan(shfile_t *f, int prec, int pok)
 {
 	int sign = 1;
 	size_t i;
@@ -645,8 +501,8 @@ long double __floatscan(shfile_t *f, int prec, int pok)
 		emin = DBL_MIN_EXP-bits;
 		break;
 	case 2:
-		bits = LDBL_MANT_DIG;
-		emin = LDBL_MIN_EXP-bits;
+		bits = FS_MANT_DIG;
+		emin = FS_MIN_EXP-bits;
 		break;
 	default:
 		return 0;
@@ -666,7 +522,7 @@ long double __floatscan(shfile_t *f, int prec, int pok)
 			shunget(f);
 			if (pok) for (; i>3; i--) shunget(f);
 		}
-		return sign < 0 ? -__builtin_inff() : (long double)__builtin_inff();
+		return sign < 0 ? -(fs_float_t)__builtin_inff() : (fs_float_t)__builtin_inff();
 	}
 	if (!i) for (i=0; i<3 && (c|32)=="nan"[i]; i++)
 		if (i<2) c = shgetc(f);
@@ -682,7 +538,7 @@ long double __floatscan(shfile_t *f, int prec, int pok)
 		size_t nn = 0;
 		if (shgetc(f) != '(') {
 			shunget(f);
-			return mk_nan(sign, NULL);
+			return fs_mk_nan(sign, NULL);
 		}
 		for (i=1; ; i++) {
 			c = shgetc(f);
@@ -693,7 +549,7 @@ long double __floatscan(shfile_t *f, int prec, int pok)
 			}
 			if (c==')') {
 				nchars[nn] = '\0';
-				return mk_nan(sign, nn ? nchars : NULL);
+				return fs_mk_nan(sign, nn ? nchars : NULL);
 			}
 			shunget(f);
 			if (!pok) {
@@ -702,9 +558,9 @@ long double __floatscan(shfile_t *f, int prec, int pok)
 				return 0;
 			}
 			while (i--) shunget(f);
-			return mk_nan(sign, NULL);
+			return fs_mk_nan(sign, NULL);
 		}
-		return mk_nan(sign, NULL);
+		return fs_mk_nan(sign, NULL);
 	}
 
 	if (i) {

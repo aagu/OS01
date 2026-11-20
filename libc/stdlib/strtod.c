@@ -22,16 +22,14 @@
 static int scan_is_hex(const char *s);
 
 /* the target type's smallest NORMAL for the requested precision */
-static long double fs_type_min(int prec)
+static fs_float_t fs_type_min(int prec)
 {
     switch (prec) {
     case 0:  return FLT_MIN;
     case 1:  return DBL_MIN;
-    default: return LDBL_MIN;
+    default: return FS_LDBL_MIN;
     }
 }
-
-/* Shared body — musl's src/stdlib/strtod.c strtox() shape, plus two
 
 /* Shared body — musl's src/stdlib/strtod.c strtox() shape, plus two
  * deliberate divergences recorded in the manifest:
@@ -42,21 +40,21 @@ static long double fs_type_min(int prec)
  *     only for some — the wrappers re-raise it by checking the result
  *     against the target type's MIN (POSIX: "may fail"; the oracle
  *     contract wants glibc's answer). */
-static long double strtod_scan(const char *s, char **endptr, int prec)
+static fs_float_t strtod_scan(const char *s, char **endptr, int prec)
 {
     int saved_errno = errno;
 
     shfile_t f;
     sh_fromstring(&f, s);
     shlim(&f, 0);
-    long double y = __floatscan(&f, prec, 1);
+    fs_float_t y = __floatscan(&f, prec, 1);
     long cnt = shcnt(&f);
 
     if (errno == EINVAL && saved_errno != EINVAL) {
         /* no conversion: endptr = nptr, errno untouched */
         errno = saved_errno;
         if (endptr) *endptr = (char *)s;
-        return 0.0L;
+        return (fs_float_t)0;
     }
 
     if (endptr) *endptr = cnt ? (char *)s + cnt : (char *)s;
@@ -67,8 +65,8 @@ static long double strtod_scan(const char *s, char **endptr, int prec)
      * be EXACTLY subnormal ("0x1p-1074"), and glibc answers no ERANGE
      * for those — the check therefore applies to decimal inputs only,
      * whose subnormal results are practically always inexact. */
-    if (!scan_is_hex(s) && y != 0.0L &&
-        __builtin_fabsl(y) < fs_type_min(prec))
+    if (!scan_is_hex(s) && y != (fs_float_t)0 &&
+        fs_fabs(y) < fs_type_min(prec))
         errno = ERANGE;
     return y;
 }
@@ -81,55 +79,21 @@ static int scan_is_hex(const char *s)
     return s[0] == '0' && (s[1] | 32) == 'x';
 }
 
-/* the target type's smallest NORMAL for the requested precision */
-/* the x87 80-bit layout (same definition as floatscan.c's vendored
- * libm.h union — kept literal so the two files agree by inspection) */
-union ldshape {
-    long double f;
-    struct {
-        uint64_t m;
-        uint16_t se;
-    } i;
-};
-
-/* Narrow a scanned long-double NaN to float/double WITHOUT losing
- * the sign or the payload bits: the x87 narrowing instruction keeps
- * only the quiet bit (the payload of "nan(123)" would be dropped).
- * The payload rides in the 80-bit mantissa's low bits (see
- * mk_nan in floatscan.c). */
-static float narrow_nanf(const long double y)
-{
-    union ldshape u80 = {y};
-    union { float f; uint32_t i; } r;
-    r.i = 0x7fc00000u | (uint32_t)(u80.i.m & 0x7fffffu);
-    if (u80.i.se & 0x8000) r.i |= 0x80000000u;
-    return r.f;
-}
-
-static double narrow_nand(const long double y)
-{
-    union ldshape u80 = {y};
-    union { double f; uint64_t i; } r;
-    r.i = 0x7ff8000000000000ULL | (u80.i.m & 0xffffffffffffULL);
-    if (u80.i.se & 0x8000) r.i |= 0x8000000000000000ULL;
-    return r.f;
-}
-
 double strtod(const char *nptr, char **endptr)
 {
-    long double y = strtod_scan(nptr, endptr, 1);
-    return (y != y) ? narrow_nand(y) : (double)y;
+    fs_float_t y = strtod_scan(nptr, endptr, 1);
+    return (y != y) ? fs_narrow_nand(y) : fs_to_double(y);
 }
 
 float strtof(const char *nptr, char **endptr)
 {
-    long double y = strtod_scan(nptr, endptr, 0);
-    return (y != y) ? narrow_nanf(y) : (float)y;
+    fs_float_t y = strtod_scan(nptr, endptr, 0);
+    return (y != y) ? fs_narrow_nanf(y) : fs_to_float(y);
 }
 
 long double strtold(const char *nptr, char **endptr)
 {
-    return strtod_scan(nptr, endptr, 2);
+    return fs_to_ldbl(strtod_scan(nptr, endptr, 2));
 }
 
 double atof(const char *nptr)

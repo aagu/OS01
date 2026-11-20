@@ -83,15 +83,6 @@ LIBC_C_SOURCES := \
     $(wildcard pthread/*.c) \
     $(wildcard random/*.c) \
     $(wildcard ssp/*.c)
-# The float-parse core (floatscan.c) and its consumers (strtod.c,
-# vsscanf.c) are out for aarch64: floatscan/strtod/vsscanf are vendored
-# for the x87 80-bit long double ABI and #error on the quad ABI.
-# floatconv.c uses binary64 `double` and is enabled for aarch64 userland.
-LIBC_C_SOURCES := $(filter-out stdlib/floatscan.c stdlib/strtod.c stdio/vsscanf.c,$(LIBC_C_SOURCES))
-# x86 inline-asm holdouts: setjmp (jmp_buf layout) and pthread/mutex
-# (xchg/cmpxchg) need an aarch64 port; nothing in the aarch64 userland
-# (init/sh) references them yet.
-LIBC_C_SOURCES := $(filter-out stdlib/setjmp.c pthread/mutex.c,$(LIBC_C_SOURCES))
 else
 LIBK_C_SOURCES := \
     $(wildcard ctype/*.c) \
@@ -190,7 +181,15 @@ $(BUILD_DIR)/%.o: %.c $(LIBC_COMPILE_KEY)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
+$(BUILD_DIR)/%.o: %.S $(LIBC_COMPILE_KEY)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
+
 $(BUILD_DIR)/%.libk.o: %.c $(LIBK_COMPILE_KEY)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(LIBK_CFLAGS) -MMD -MP -c $< -o $@
+
+$(BUILD_DIR)/%.libk.o: %.S $(LIBK_COMPILE_KEY)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(LIBK_CFLAGS) -MMD -MP -c $< -o $@
 

@@ -1,7 +1,7 @@
 #ifndef _SETJMP_H
 #define _SETJMP_H 1
 
-typedef unsigned long jmp_buf[16];
+#include <libc_arch/setjmp.h>
 
 #ifdef __cplusplus
 extern "C" {

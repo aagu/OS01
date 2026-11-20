@@ -97,6 +97,22 @@ EXCLUDED_HEADERS: dict[str, str] = {
     # the stream state and the bounded formatter.
     "stdio/file.h": "private stdio header (stream state), not a public libc interface",
     "stdio/internal.h": "private stdio header (bounded formatter), not a public libc interface",
+    # Private arch facade + per-arch override headers (mirroring kernel/include/arch/).
+    "libc_arch/atomic.h": "private arch facade (32-bit atomics), not a public libc interface",
+    "libc_arch/div.h": "private arch facade (do_div), not a public libc interface",
+    "libc_arch/float_abi.h": "private arch facade (floatscan ABI), not a public libc interface",
+    "libc_arch/setjmp.h": "private arch facade (jmp_buf layout), not a public libc interface",
+    "libc_arch/syscall.h": "private arch facade (syscall trap), not a public libc interface",
+    "libc_arch/x86_64/atomic.h": "private x86_64 arch override (32-bit atomics)",
+    "libc_arch/x86_64/div.h": "private x86_64 arch override (do_div)",
+    "libc_arch/x86_64/float_abi.h": "private x86_64 arch override (floatscan ABI)",
+    "libc_arch/x86_64/setjmp.h": "private x86_64 arch override (jmp_buf layout)",
+    "libc_arch/x86_64/syscall.h": "private x86_64 arch override (syscall trap)",
+    "libc_arch/aarch64/atomic.h": "private aarch64 arch override (32-bit atomics)",
+    "libc_arch/aarch64/div.h": "private aarch64 arch override (do_div)",
+    "libc_arch/aarch64/float_abi.h": "private aarch64 arch override (floatscan ABI)",
+    "libc_arch/aarch64/setjmp.h": "private aarch64 arch override (jmp_buf layout)",
+    "libc_arch/aarch64/syscall.h": "private aarch64 arch override (syscall trap)",
 }
 
 # Symbols a header declares only under a host-test-only condition.  They

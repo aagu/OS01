@@ -254,7 +254,7 @@ enum { FLOAT_OK = 0, FLOAT_NOMATCH, FLOAT_NOMEMORY };
  * precision (0 = float, 1 = double, 2 = long double), so a %Lf never
  * rounds through a double. */
 static int scan_float(const char *text, int width, int prec,
-                       long double *out, long *consumed)
+                       fs_float_t *out, long *consumed)
 {
     char stackbuf[96];
     char *buf = stackbuf;
@@ -281,7 +281,7 @@ static int scan_float(const char *text, int width, int prec,
 
     {
         shfile_t f;
-        long double v = 0;
+        fs_float_t v = 0;
         long cnt = 0;
         int saved_errno = errno;
 
@@ -563,16 +563,16 @@ int vsscanf(const char *str, const char *fmt, va_list ap)
             if (*s == '\0') { input_failure = 1; break; }
 
             {
-                long double v = 0;
+                fs_float_t v = 0;
                 long consumed = 0;
                 int st = scan_float(s, spec.width, prec, &v, &consumed);
                 if (st == FLOAT_NOMEMORY) { stop = 1; break; }
                 if (st == FLOAT_NOMATCH) { stop = 1; break; }
                 if (!spec.suppress) {
                     void *p = va_arg(ap, void *);
-                    if (prec == 0)      *(float *)p = (float)v;
-                    else if (prec == 1) *(double *)p = (double)v;
-                    else                *(long double *)p = v;
+                    if (prec == 0)      *(float *)p = fs_to_float(v);
+                    else if (prec == 1) *(double *)p = fs_to_double(v);
+                    else                *(long double *)p = fs_to_ldbl(v);
                     count++;
                 }
                 s += consumed;

@@ -36,8 +36,11 @@ static size_t exec_argc(const char *first, va_list ap)
     return n;
 }
 
-/* Collect the NULL-terminated argument list into a private heap array. */
-static char **exec_argv(const char *first, va_list ap, size_t n)
+/* Collect the NULL-terminated argument list into a private heap array.
+ * Takes `va_list *` (not `va_list` by value) so callers like execle()
+ * observe the advanced cursor on architectures where va_list is a struct
+ * (e.g. AAPCS64). */
+static char **exec_argv(const char *first, va_list *ap, size_t n)
 {
     char **argv = malloc((n + 1) * sizeof(char *));
     const char *a = first;
@@ -46,7 +49,7 @@ static char **exec_argv(const char *first, va_list ap, size_t n)
         return NULL;
     for (size_t i = 0; i < n; i++) {
         argv[i] = (char *)a;
-        a = va_arg(ap, const char *);
+        a = va_arg(*ap, const char *);
     }
     argv[n] = NULL;
     return argv;
@@ -70,7 +73,7 @@ int64_t execl(const char *path, const char *arg, ...)
     va_end(ap);
 
     va_start(ap, arg);
-    argv = exec_argv(arg, ap, n);
+    argv = exec_argv(arg, &ap, n);
     va_end(ap);
     if (argv == NULL) {
         errno = ENOMEM;
@@ -98,7 +101,7 @@ int64_t execlp(const char *file, const char *arg, ...)
     va_end(ap);
 
     va_start(ap, arg);
-    argv = exec_argv(arg, ap, n);
+    argv = exec_argv(arg, &ap, n);
     va_end(ap);
     if (argv == NULL) {
         errno = ENOMEM;
@@ -130,7 +133,7 @@ int64_t execle(const char *path, const char *arg, ...)
     va_end(ap);
 
     va_start(ap, arg);
-    argv = exec_argv(arg, ap, n);
+    argv = exec_argv(arg, &ap, n);
     if (argv != NULL)
         envp = va_arg(ap, char *const *);
     else

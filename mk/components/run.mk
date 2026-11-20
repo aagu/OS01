@@ -2253,10 +2253,11 @@ test-libc-dir-red:
 # groups (default: all enabled groups).  It is for debugging a single group;
 # the gate always covers every enabled group when it is unset.
 #
-# The aarch64 profile builds no libc.a (its libc component only produces the
-# kernel-side libk.a), so the user-libc archive is audited only when it
-# exists.  The libk.a itself comes from `lib` on a userland profile and from
-# the kernel build on a kernel-only profile.
+# Profiles with the `userland` capability (both x86_64-clang and aarch64-clang)
+# build libc.a alongside libk.a; kernel-only profiles build only libk.a, so
+# the user-libc archive is audited whenever libc.a exists.  The libk.a itself
+# comes from `lib` on a userland profile and from the kernel build on a
+# kernel-only profile.
 LIBC_API_AUDIT_PREREQ := $(if $(filter userland,$(PROFILE_CAPABILITIES)),lib,$(BUILD_DIR)/artifacts/kernel.elf)
 
 .PHONY: test-libc-api-audit
