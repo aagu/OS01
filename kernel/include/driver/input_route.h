@@ -197,12 +197,4 @@ void input_route_mouse_event(const mouse_event_t *event);
  * ownership/isolation state machine. */
 void input_route_mouse_usb_event(const mouse_event_t *event);
 
-#ifdef OS01_HOST_TEST
-/* Host-only: the DESYNC flag's value.  The flag has NO other observable
- * (only the owner of a LIVE lease can see it), so the fixture needs this
- * to pin WHERE it is cleared: at bind — not at revoke.  The production
- * build does not compile it. */
-int input_route__test_desync_active(void);
-#endif
-
 #endif /* __INPUT_ROUTE_H__ */

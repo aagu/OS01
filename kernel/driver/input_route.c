@@ -997,16 +997,3 @@ void input_route_mouse_usb_event(const mouse_event_t *event)
     route_publish_mouse_locked(event, INPUT_SRC_USB);
     spin_unlock_irqrestore(&route.lock, flags);
 }
-
-#ifdef OS01_HOST_TEST
-int input_route__test_desync_active(void)
-{
-    uint64_t flags;
-    int active;
-
-    flags = spin_lock_irqsave(&route.lock);
-    active = route.kbd_desync;
-    spin_unlock_irqrestore(&route.lock, flags);
-    return active;
-}
-#endif

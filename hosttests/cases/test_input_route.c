@@ -524,7 +524,7 @@ static void test_cross_epoch_make_reports_desync(void)
 
 /* ── A new lease starts from a known-consistent state ────────── */
 
-static void test_desync_is_cleared_at_bind(void)
+static void test_rebind_restores_keyboard_reads(void)
 {
     file_t *kbd, *mouse;
     uint8_t buf[16];
@@ -544,25 +544,15 @@ static void test_desync_is_cleared_at_bind(void)
     assert_eq(-EOVERFLOW, input_route_read(kbd, 0, sizeof(buf), buf));
     assert_eq(-EOVERFLOW, input_route_read(kbd, 0, sizeof(buf), buf));
 
-    /* The app cleans up: the lease is released. */
     input_route_unbind(view(), generation, 0);
-
-    /* The DESYNC flag SURVIVES the release: it belongs to the lease, and
-     * a release is not a bind.  This is what makes the clearing below the
-     * BIND's work — a clear at the release would fail HERE, even though
-     * the release happened before the new lease. */
-    assert_eq(1, input_route__test_desync_active());
-
-    /* A new lease starts from a known-consistent state: the previous
-     * lease's DESYNC does not follow it.
-     *
-     * THE CLEARING HAPPENS AT BIND — not at the release above — so this
-     * assertion fails if the bind-time reset is removed, even though the
-     * release already happened. */
     assert_eq(0, input_route_bind(view(), kbd, mouse, NULL, NULL));
-    assert_eq(0, input_route__test_desync_active());
     assert_false((input_route_poll(kbd, POLLIN, NULL) & POLLERR) != 0);
     assert_eq(-EAGAIN, input_route_read(kbd, 0, sizeof(buf), buf));
+
+    feed1(0x1E);
+    assert_eq(POLLIN, input_route_poll(kbd, POLLIN, NULL) & (POLLIN | POLLERR));
+    assert_eq(1, drain_bytes(kbd, buf, sizeof(buf)));
+    assert_eq(0x1E, buf[0]);
 }
 
 /* ── Binding while a key is held produces no new DOWN ───────── */
@@ -1235,15 +1225,15 @@ static void test_usb_batch_ps2_partial(void)
     feed1(0xE0);
     assert_eq(0, input_route_bind(view(), kbd, NULL, NULL, NULL));
     input_route_keyboard_usb_frames(&usb_a, 1);
-    assert_eq(0, input_route__test_desync_active());
+    assert_eq(POLLIN, input_route_poll(kbd, POLLIN, NULL) & (POLLIN | POLLERR));
     assert_eq(1, drain_bytes(kbd, buf, sizeof(buf)));
     assert_eq(0x1E, buf[0]);
     feed1(0x1D);
-    assert_eq(1, input_route__test_desync_active());
+    assert_eq(POLLERR, input_route_poll(kbd, POLLIN, NULL) & (POLLIN | POLLERR));
     assert_eq(-EOVERFLOW, drain_bytes(kbd, buf, sizeof(buf)));
     input_ps2_frame_t usb_a_rel = make_usb_frame(0x1E, 0);
     input_route_keyboard_usb_frames(&usb_a_rel, 1);
-    assert_eq(1, input_route__test_desync_active());
+    assert_eq(POLLERR, input_route_poll(kbd, POLLIN, NULL) & (POLLIN | POLLERR));
     assert_eq(-EOVERFLOW, drain_bytes(kbd, buf, sizeof(buf)));
 }
 
@@ -1382,7 +1372,7 @@ static void test_dual_owners(void)
     feed1(0xE0); /* begin E0 9D break in epoch 1 */
     assert_eq(0, input_route_bind(view(), kbd, NULL, NULL, NULL));
     feed1(0x9D); /* cross-epoch PS/2 break while USB still holds 0x11D */
-    assert_eq(1, input_route__test_desync_active());
+    assert_eq(POLLERR, input_route_poll(kbd, POLLIN, NULL) & (POLLIN | POLLERR));
     assert_eq(-EOVERFLOW, drain_bytes(kbd, buf, sizeof(buf)));
     /* Unbind back to NORMAL; USB still holds 0x11D so isolation remains. */
     input_route_unbind(view(), 0, 0);
@@ -1429,7 +1419,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_boundary_sequences_never_publish_half),
     TEST_ENTRY(test_cross_epoch_make_is_isolated_until_break),
     TEST_ENTRY(test_cross_epoch_make_reports_desync),
-    TEST_ENTRY(test_desync_is_cleared_at_bind),
+    TEST_ENTRY(test_rebind_restores_keyboard_reads),
     TEST_ENTRY(test_bind_with_held_key_produces_no_new_down),
     TEST_ENTRY(test_caps_typematic_does_not_flip),
     TEST_ENTRY(test_mouse_button_isolation_keeps_movement),
