@@ -11,7 +11,7 @@
 
   **做了什么**
   - UAPI（`kernel/include/uapi/gfx.h`）：`GFX_PRESENT_RECTS=0x470D`、`GFX_PRESENT_RECTS_MAX=64`、`gfx_rect_t`（16 B）与 `gfx_present_rects_req_t`（32 B，offset 钉死）。`completed_rects` IN/OUT：入 0，成功写回 count，失败写回失败点前完整写成的矩形数 k（best-effort 写回，fault 不改变返回值）。
-  - 内核（`kernel/arch/x86_64/driver/gfx.c`）：批量路径逐条镜像 `GFX_PRESENT_RECT` 阶段顺序——请求/矩形数组容错复制 → 短锁快照 → 无锁单遍校验（逐矩形减法式几何 + 溢出安全包络 range check；任一非法**整批拒绝、零 fb 写入**）→ 单租约 → 单 setjmp → 按序逐矩形逐行 bounce 宽写（整批共用 `max_w*4` bounce）。`gfx_present_stats` 追加 `batch=/batch_avg_ns=`；旧 full/rect 路径错误契约不变。
+  - 内核（`kernel/driver/gfx.c`，2026-11-20 由 arch/x86_64/driver/ 归位 kernel/driver/）：批量路径逐条镜像 `GFX_PRESENT_RECT` 阶段顺序——请求/矩形数组容错复制 → 短锁快照 → 无锁单遍校验（逐矩形减法式几何 + 溢出安全包络 range check；任一非法**整批拒绝、零 fb 写入**）→ 单租约 → 单 setjmp → 按序逐矩形逐行 bounce 宽写（整批共用 `max_w*4` bounce）。`gfx_present_stats` 追加 `batch=/batch_avg_ns=`；旧 full/rect 路径错误契约不变。
   - libgfx：`gfx_present_rects(h, rects, count, completed_out)`——发 ioctl 前短路非法参数（count 0/>MAX、NULL、逐矩形几何），恰一次 ioctl；全 view 矩形不路由 `gfx_present`（与单矩形 dispatch 差异已注释）；errno 原样透传，写回未落地时 k 折算 0。
   - terminal（`user/terminal/terminal_display.c`）：损伤列表提交从每矩形一次 `GFX_PRESENT_RECT`（≤64 次 ioctl）改为**一次批量 ioctl**；`completed_rects` 的 k 折算进 `failed_completed_rect_bytes`，失败整列表保留重试语义不变；NULL hook 保留旧逐矩形路径（注入测试兼容，生产恒接线）。`[term-present] version=1` 行格式不变，`rect_calls` 语义=每批量轮 1 次。
   - LVGL 后端（`libgui`）：`flush_cb` 累积本次刷新 flush area（容量 64=`GFX_PRESENT_RECTS_MAX`，溢出置 overflow 并清列表），step present 点一次批量替代原整视图 present，溢出/空列表回退 `gfx_present` 整帧；成功清列表，失败保留（250 ms retry 提交并集），终态重置。一次逻辑刷新最多一次提交、静态界面零提交。
