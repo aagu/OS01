@@ -31,6 +31,10 @@
 
 extern const uint8_t _binary_aarch64_user_runtime_elf_start[];
 extern const uint8_t _binary_aarch64_user_runtime_elf_end[];
+#ifdef AARCH64_USER_RUNTIME_CASE_SMP
+extern const uint8_t _binary_aarch64_user_runtime_comp_elf_start[];
+extern const uint8_t _binary_aarch64_user_runtime_comp_elf_end[];
+#endif
 
 #define URT_OBS_GEN   0x55525401U
 #define URT_SIGUSR1   10
@@ -50,7 +54,7 @@ static volatile int g_b_sigreturn_done;
 static bool g_vm_pause_done;
 static bool g_a_paused_root_ok;
 static bool g_a_post_edit_checked;
-static bool g_a_post_edit_ok;
+static bool g_a_post_edit_ok __attribute__((unused));
 static task_t *g_a_paused_task;
 static uint64_t g_a_saved_root_pa;
 static uint64_t g_a_saved_tpidr;
@@ -67,6 +71,20 @@ static uint64_t g_event_seq;
 static uint64_t g_uninstall_seq[256];
 static uint64_t g_tlbi_seq[256];
 static uint64_t g_release_seq[256];
+
+#ifdef AARCH64_USER_RUNTIME_CASE_SMP
+static int g_pid_comp0 = -1;
+static int g_pid_comp1 = -1;
+static int g_pid_child = -1;
+static int g_child_cpu = -1;
+static task_t *g_parent_task;
+static uint64_t g_smp_cpu_eoi[2];
+static uint64_t g_smp_cpu_sw[2];
+static volatile uint32_t g_cow_arrived_mask;
+static uint64_t g_cow_test_old_pa;
+static uint64_t g_cow_last_free_count;
+static int g_waitpid_blocked_ok;
+#endif
 
 static int urt_role_index(const task_t *tsk)
 {
@@ -95,6 +113,25 @@ void aarch64_user_runtime_test_note_switch(const struct task_struct *prev,
     if (!g_urt_active || prev == next)
         return;
     __atomic_fetch_add(&g_switch_seq, 1, __ATOMIC_RELEASE);
+#ifdef AARCH64_USER_RUNTIME_CASE_SMP
+    if (aarch64_user_task_is_user(next)) {
+        int npid = (int)next->pid;
+        if (npid == g_pid_a && !g_parent_task)
+            __atomic_store_n(&g_parent_task, (task_t *)next, __ATOMIC_RELEASE);
+        if (npid != g_pid_a && npid != g_pid_comp0 && npid != g_pid_comp1) {
+            if (g_pid_child < 0) {
+                g_pid_child = npid;
+                __atomic_store_n(&g_child_cpu, (int)next->cpu, __ATOMIC_RELEASE);
+            }
+        }
+    }
+    if (aarch64_user_task_is_user(prev) && aarch64_user_task_is_user(next) &&
+        prev->pid != next->pid) {
+        uint32_t c = cpu_id();
+        if (c < 2)
+            __atomic_fetch_add(&g_smp_cpu_sw[c], 1, __ATOMIC_RELAXED);
+    }
+#endif
 }
 
 void aarch64_user_runtime_test_note_ttbr_switch(uint64_t old_ttbr0,
@@ -149,6 +186,13 @@ void aarch64_user_runtime_test_timer_eoi(uint32_t intid, struct pt_regs *regs)
         return;
     if (!aarch64_user_frame_is_valid(regs))
         return;
+
+#ifdef AARCH64_USER_RUNTIME_CASE_SMP
+    uint32_t c = cpu_id();
+    if (c < 2)
+        __atomic_fetch_add(&g_smp_cpu_eoi[c], 1, __ATOMIC_RELAXED);
+    return;
+#endif
 
     task_t *cur = arch_current_task();
     int idx = urt_role_index(cur);
@@ -271,6 +315,68 @@ void aarch64_user_runtime_test_sigreturn(struct task_struct *tsk)
     }
 }
 
+void aarch64_user_runtime_test_cow_barrier(uint64_t va, uint64_t old_pa)
+{
+#ifdef AARCH64_USER_RUNTIME_CASE_SMP
+    if (!g_urt_active || va != 0x40000000ULL)
+        return;
+    uint32_t c = cpu_id();
+    if (c >= 2)
+        return;
+    __atomic_store_n(&g_cow_test_old_pa, old_pa, __ATOMIC_RELEASE);
+    __atomic_fetch_or(&g_cow_arrived_mask, (1U << c), __ATOMIC_ACQ_REL);
+
+    uint64_t freq = arch_cycle_freq();
+    uint64_t deadline = arch_cycle_counter() + (freq ? 2 * freq : 100000000ULL);
+    while ((__atomic_load_n(&g_cow_arrived_mask, __ATOMIC_ACQUIRE) & 3U) != 3U) {
+        if (arch_cycle_counter() > deadline)
+            break;
+        arch_cpu_pause();
+    }
+#else
+    (void)va;
+    (void)old_pa;
+#endif
+}
+
+void aarch64_user_runtime_test_cow_last_free(uint64_t old_pa)
+{
+#ifdef AARCH64_USER_RUNTIME_CASE_SMP
+    if (!g_urt_active)
+        return;
+    if (old_pa == __atomic_load_n(&g_cow_test_old_pa, __ATOMIC_ACQUIRE))
+        __atomic_fetch_add(&g_cow_last_free_count, 1, __ATOMIC_RELAXED);
+#else
+    (void)old_pa;
+#endif
+}
+
+void aarch64_user_runtime_test_before_exit(struct task_struct *tsk)
+{
+#ifdef AARCH64_USER_RUNTIME_CASE_SMP
+    if (!g_urt_active || !tsk)
+        return;
+    int child_pid = __atomic_load_n(&g_pid_child, __ATOMIC_ACQUIRE);
+    task_t *parent = __atomic_load_n(&g_parent_task, __ATOMIC_ACQUIRE);
+    if (child_pid <= 0 || (int)tsk->pid != child_pid || !parent)
+        return;
+
+    uint64_t freq = arch_cycle_freq();
+    uint64_t deadline = arch_cycle_counter() + (freq ? 2 * freq : 100000000ULL);
+    while (arch_cycle_counter() <= deadline) {
+        if (__atomic_load_n(&parent->state, __ATOMIC_ACQUIRE) == TASK_INTERRUPTIBLE &&
+            parent->blocker.type == BLOCKER_WAITPID &&
+            !__atomic_load_n(&parent->on_cpu, __ATOMIC_ACQUIRE)) {
+            __atomic_store_n(&g_waitpid_blocked_ok, 1, __ATOMIC_RELEASE);
+            return;
+        }
+        arch_cpu_pause();
+    }
+#else
+    (void)tsk;
+#endif
+}
+
 static void urt_reap_observe(struct task_struct *prev)
 {
     if (!prev || prev->state != TASK_ZOMBIE)
@@ -300,6 +406,22 @@ static volatile int g_urt_rc;
 static uint64_t urt_worker(uint64_t arg)
 {
     (void)arg;
+#ifdef AARCH64_USER_RUNTIME_CASE_SMP
+    const struct aarch64_user_elf_source catalog[2] = {
+        {
+            .bytes = _binary_aarch64_user_runtime_elf_start,
+            .size  = (size_t)(_binary_aarch64_user_runtime_elf_end -
+                              _binary_aarch64_user_runtime_elf_start),
+            .path  = "/bin/user_runtime",
+        },
+        {
+            .bytes = _binary_aarch64_user_runtime_comp_elf_start,
+            .size  = (size_t)(_binary_aarch64_user_runtime_comp_elf_end -
+                              _binary_aarch64_user_runtime_comp_elf_start),
+            .path  = "/bin/user_runtime_comp",
+        },
+    };
+#else
     const struct aarch64_user_elf_source catalog[1] = {
         {
             .bytes = _binary_aarch64_user_runtime_elf_start,
@@ -308,6 +430,7 @@ static uint64_t urt_worker(uint64_t arg)
             .path  = "/bin/user_runtime",
         },
     };
+#endif
 
     g_pid_a = -1;
     g_pid_b = -1;
@@ -341,6 +464,7 @@ static uint64_t urt_worker(uint64_t arg)
     memset(g_release_seq, 0, sizeof(g_release_seq));
 
     uint64_t alloc_before = pmm_probe_4k_allocated_count();
+    uint64_t roots_before = aarch64_pt_published_root_count();
     aarch64_sched_observer_begin(0, URT_OBS_GEN);
     uint64_t stack_rel_before =
         aarch64_sched_observer_released(AARCH64_SCHED_RESOURCE_STACK);
@@ -350,19 +474,49 @@ static uint64_t urt_worker(uint64_t arg)
     aarch64_sched_set_reap_observer(urt_reap_observe);
     g_urt_active = true;
 
-#ifdef AARCH64_USER_RUNTIME_CASE_ASID
+#ifdef AARCH64_USER_RUNTIME_CASE_SMP
+#define URT_CASE_NAME "smp"
+#define URT_EXPECTED_TASKS 4
+#elif defined(AARCH64_USER_RUNTIME_CASE_ASID)
 #define URT_CASE_NAME "asid"
+#define URT_EXPECTED_TASKS 2
 #else
 #define URT_CASE_NAME "irq"
+#define URT_EXPECTED_TASKS 2
 #endif
 
     int rc = 1;
+#ifdef AARCH64_USER_RUNTIME_CASE_SMP
+    g_pid_comp0 = -1;
+    g_pid_comp1 = -1;
+    g_pid_child = -1;
+    g_child_cpu = -1;
+    g_parent_task = NULL;
+    g_smp_cpu_eoi[0] = 0;
+    g_smp_cpu_eoi[1] = 0;
+    g_smp_cpu_sw[0] = 0;
+    g_smp_cpu_sw[1] = 0;
+    __atomic_store_n(&g_cow_arrived_mask, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_cow_test_old_pa, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_cow_last_free_count, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_waitpid_blocked_ok, 0, __ATOMIC_RELEASE);
+
+    g_pid_comp0 = aarch64_user_task_spawn_on_cpu(catalog, 2, 1, "user_rt_comp0", 0);
+    g_pid_comp1 = aarch64_user_task_spawn_on_cpu(catalog, 2, 1, "user_rt_comp1", 1);
+    g_pid_a = aarch64_user_task_spawn_on_cpu(catalog, 2, 0, "user_rt_parent", 0);
+    if (g_pid_comp0 < 0 || g_pid_comp1 < 0 || g_pid_a < 0) {
+        log_err("[user-runtime] FAIL case=smp reason=spawn_failed "
+                "p=%d c0=%d c1=%d\n", g_pid_a, g_pid_comp0, g_pid_comp1);
+        goto out;
+    }
+#else
     g_pid_a = aarch64_user_task_spawn(catalog, 1, 0, "user_rt_a");
     if (g_pid_a < 0) {
         log_err("[user-runtime] FAIL case=%s reason=spawn_failed rc=%d\n",
                 URT_CASE_NAME, g_pid_a);
         goto out;
     }
+#endif
 
     uint64_t deadline = jiffies + 1500;
     while (jiffies < deadline) {
@@ -372,7 +526,7 @@ static uint64_t urt_worker(uint64_t arg)
         uint64_t t_rel =
             aarch64_sched_observer_released(AARCH64_SCHED_RESOURCE_THREAD) -
             thread_rel_before;
-        if (s_rel >= 2 && t_rel >= 2)
+        if (s_rel >= URT_EXPECTED_TASKS && t_rel >= URT_EXPECTED_TASKS)
             break;
         kthread_yield();
     }
@@ -388,13 +542,70 @@ static uint64_t urt_worker(uint64_t arg)
     uint64_t alloc_after = pmm_probe_4k_allocated_count();
     uint64_t roots = aarch64_pt_published_root_count();
 
-    if (s_rel != 2 || t_rel != 2 || obs_rc != 0) {
+    if (s_rel != URT_EXPECTED_TASKS || t_rel != URT_EXPECTED_TASKS || obs_rc != 0) {
         log_err("[user-runtime] FAIL case=%s reason=resource_mismatch "
                 "s_rel=%lu t_rel=%lu obs_rc=%d\n",
                 URT_CASE_NAME,
                 (unsigned long)s_rel, (unsigned long)t_rel, obs_rc);
         goto out;
     }
+#ifdef AARCH64_USER_RUNTIME_CASE_SMP
+    if (!urt_saw_status(0x11ULL << 8) || !urt_saw_status(42ULL << 8) ||
+        !urt_saw_status(0x33ULL << 8)) {
+        log_err("[user-runtime] FAIL case=smp reason=exit_status_mismatch "
+                "reaps=%d\n", g_reap_count);
+        for (int i = 0; i < g_reap_count && i < URT_MAX_REAPS; i++) {
+            log_err("[user-runtime] reap[%d] pid=%d status=0x%lx\n",
+                    i, g_reap_pid[i], (unsigned long)g_reap_status[i]);
+        }
+        goto out;
+    }
+    if (g_child_cpu != 1) {
+        log_err("[user-runtime] FAIL case=smp reason=child_cpu expected=1 "
+                "got=%d\n", g_child_cpu);
+        goto out;
+    }
+    if (g_smp_cpu_eoi[0] == 0 || g_smp_cpu_eoi[1] == 0 ||
+        g_smp_cpu_sw[0] == 0 || g_smp_cpu_sw[1] == 0) {
+        log_err("[user-runtime] FAIL case=smp reason=smp_samples "
+                "eoi=(%lu,%lu) sw=(%lu,%lu)\n",
+                (unsigned long)g_smp_cpu_eoi[0],
+                (unsigned long)g_smp_cpu_eoi[1],
+                (unsigned long)g_smp_cpu_sw[0],
+                (unsigned long)g_smp_cpu_sw[1]);
+        goto out;
+    }
+    if (g_cow_last_free_count != 1 || g_waitpid_blocked_ok != 1) {
+        log_err("[user-runtime] FAIL case=smp reason=cow_or_waitpid "
+                "cow_last=%lu waitpid_blk=%d\n",
+                (unsigned long)g_cow_last_free_count, g_waitpid_blocked_ok);
+        goto out;
+    }
+    uint64_t leaked_roots = (roots > roots_before) ? (roots - roots_before) : 0;
+    uint64_t leaked_pages = (alloc_after > alloc_before) ? (alloc_after - alloc_before) : 0;
+    if (leaked_roots != 0 || leaked_pages != 0) {
+        log_err("[user-runtime] FAIL case=smp reason=leak roots=%lu(%lu) "
+                "alloc=%lu(%lu)\n",
+                (unsigned long)roots, (unsigned long)roots_before,
+                (unsigned long)alloc_after, (unsigned long)alloc_before);
+        goto out;
+    }
+
+    log_info("[user-runtime] smp-samples child_cpu=%d "
+             "cpu0_eoi=%lu cpu1_eoi=%lu cpu0_sw=%lu cpu1_sw=%lu "
+             "cow_last_free=%lu waitpid_blocked=%d waitpid_exit=42 "
+             "leaked_roots=%lu leaked_pages=%lu\n",
+             g_child_cpu,
+             (unsigned long)g_smp_cpu_eoi[0],
+             (unsigned long)g_smp_cpu_eoi[1],
+             (unsigned long)g_smp_cpu_sw[0],
+             (unsigned long)g_smp_cpu_sw[1],
+             (unsigned long)g_cow_last_free_count,
+             g_waitpid_blocked_ok,
+             (unsigned long)leaked_roots,
+             (unsigned long)leaked_pages);
+    log_info("[user-runtime] PASS case=smp cpu_mask=3\n");
+#else
     if (!urt_saw_status(0x11ULL << 8) || !urt_saw_status(0x22ULL << 8)) {
         log_err("[user-runtime] FAIL case=%s reason=exit_status_mismatch "
                 "reaps=%d\n", URT_CASE_NAME, g_reap_count);
@@ -506,6 +717,7 @@ static uint64_t urt_worker(uint64_t arg)
              (unsigned long)g_irq_switch_resume_samples[1]);
     log_info("[user-runtime] PASS case=irq cpu_mask=1\n");
 #endif
+#endif
     rc = 0;
 
 out:
@@ -527,7 +739,9 @@ void test_aarch64_user_runtime_run(void)
         kthread_yield();
 
     int rc = g_urt_done ? g_urt_rc : 1;
-#ifdef AARCH64_USER_RUNTIME_CASE_ASID
+#ifdef AARCH64_USER_RUNTIME_CASE_SMP
+    selftest_record_late("aarch64_user_runtime_smp", rc);
+#elif defined(AARCH64_USER_RUNTIME_CASE_ASID)
     selftest_record_late("aarch64_user_runtime_asid", rc);
 #else
     selftest_record_late("aarch64_user_runtime_irq", rc);

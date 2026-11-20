@@ -102,9 +102,13 @@
  * BSP/AP publish assertions. */
 typedef struct {
     uint64_t self, need_resched;
+    uint32_t online, scheduler_ok;
     uint32_t ipi_ready, tlb_ack_gen;
 } vmm_test_percpu_t;
 vmm_test_percpu_t percpu_data[8];
+
+static bool mock_boot_creation_open = false;
+bool sched_boot_creation_open(void) { return mock_boot_creation_open; }
 
 /* Controllable caller CPU for aarch64_user_mm_runtime_check() (M4).
  * The production gate object reads this through the mock cpu_id()
@@ -199,21 +203,17 @@ static void case_post_smp_count_mismatch_then_match(void)
      * < cpu_count(2). */
     assert_true(EXPECT_VIOLATION(vmm_gate_check()));
 
+    /* M4/C2: with 2 DTB CPUs and only BSP ipi_ready published (AP IPI
+     * not ready yet), aarch64_user_mm_runtime_check() must return -EAGAIN. */
+    percpu_data[0].online = 1;
+    percpu_data[0].scheduler_ok = 1;
+    mock_cpu_count_val = 2;
+    assert_eq(-EAGAIN, aarch64_user_mm_runtime_check());
+
     /* M4: BSP published (count == 1) on a single-core topology → the
      * user-mm runtime check admits. Restored right after. */
     mock_cpu_count_val = 1;
     assert_eq(0, aarch64_user_mm_runtime_check());
-    mock_cpu_count_val = 2;
-
-    /* M4: non-BSP caller → -EOPNOTSUPP, restored immediately. */
-    g_test_cpu_id = 1;
-    assert_eq(-EOPNOTSUPP, aarch64_user_mm_runtime_check());
-    g_test_cpu_id = 0;
-
-    /* M4: multi-core DTB topology → -EOPNOTSUPP (checked before IPI
-     * readiness). Restored to the M3 ambient value right after. */
-    mock_cpu_count_val = 3;
-    assert_eq(-EOPNOTSUPP, aarch64_user_mm_runtime_check());
     mock_cpu_count_val = 2;
 
     /* AP(1) publishes through the same function. count is now 2. */
@@ -224,6 +224,22 @@ static void case_post_smp_count_mismatch_then_match(void)
      * exercising this contract is the integration-level proof that
      * BSP and AP both publish ipi_ready through ipi_ready_publish_and_count. */
     vmm_gate_check();
+
+    /* C2: during BSP boot-5 creation window, aarch64_user_pick_cpu()
+     * only picks 0 even when all DTB IPIs are ready. */
+    percpu_data[0].scheduler_ok = 0;
+    mock_boot_creation_open = true;
+    assert_eq(0, aarch64_user_pick_cpu());
+    assert_eq(0, aarch64_user_pick_cpu());
+    mock_boot_creation_open = false;
+
+    /* C2: after BSP and AP scheduler_ok are published, two runtime
+     * aarch64_user_pick_cpu() calls return 1, 0 in order. */
+    percpu_data[0].scheduler_ok = 1;
+    percpu_data[1].online = 1;
+    percpu_data[1].scheduler_ok = 1;
+    assert_eq(1, aarch64_user_pick_cpu());
+    assert_eq(0, aarch64_user_pick_cpu());
 
     /* Bumping cpu_count up again makes the gate re-trip (defensive —
      * confirms we are reading the live counter, not a cached value). */

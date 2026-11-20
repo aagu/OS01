@@ -72,19 +72,16 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     if (!path || path[0] == '\0')
         return -ENOENT;
 
-    /* Single-core runtime gate: the user-mm primitives refuse a
-     * multi-core or non-BSP configuration. */
+    /* Runtime gate & CPU placement: SMP started, all DTB IPIs ready,
+     * current CPU ready; returns 0 during BSP boot-5 creation window,
+     * or round-robins across ready CPUs at runtime. */
     int rc = aarch64_user_mm_runtime_check();
     if (rc)
         return rc;
 
-    /* The scheduler must be ready: a user task is published into a
-     * live runqueue (the boot-5 creation window keeps the scheduler
-     * not-yet-ok while allowing CPU0 publication). */
-    if (!__atomic_load_n(&percpu_data[0].scheduler_ok, __ATOMIC_ACQUIRE)) {
-        if (!sched_boot_creation_open() || cpu_id() != 0)
-            return -EAGAIN;
-    }
+    int target_cpu = aarch64_user_pick_cpu();
+    if (target_cpu < 0)
+        return target_cpu;
 
     /* 1. Resolve the ELF through VFS.  The node reference is released
      * before the image construction — the bytes buffer carries all the
@@ -161,7 +158,8 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 
     task_t *tsk = NULL;
     int pid = 0;
-    rc = sched_alloc_and_publish_task(0, true /* pinned to the BSP */,
+    rc = sched_alloc_and_publish_task((uint32_t)target_cpu,
+                                      true /* single-bit affinity */,
                                       PF_PROCESS, task_basename(path),
                                       user_task_prepare, user_task_discard,
                                       &pctx, &tsk, &pid);

@@ -224,7 +224,9 @@ void selftest_register_builtin_tests(void)
     selftest_register_late("tick-global");
     selftest_register_late("tick-remote");
 #elif defined(__aarch64__) && defined(AARCH64_USER_RUNTIME_TEST)
-#ifdef AARCH64_USER_RUNTIME_CASE_ASID
+#ifdef AARCH64_USER_RUNTIME_CASE_SMP
+    selftest_register_late("aarch64_user_runtime_smp");
+#elif defined(AARCH64_USER_RUNTIME_CASE_ASID)
     selftest_register_late("aarch64_user_runtime_asid");
 #else
     selftest_register_late("aarch64_user_runtime_irq");

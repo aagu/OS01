@@ -198,7 +198,7 @@ endif
 # trees (e.g. irq, and future asid/smp variants). Requires
 # KERNEL_SELFTEST=1 and is mutually exclusive with every other
 # compile-affecting test variant.
-AARCH64_USER_RUNTIME_TESTS_VALID := irq asid
+AARCH64_USER_RUNTIME_TESTS_VALID := irq asid smp
 ifneq ($(strip $(AARCH64_USER_RUNTIME_TEST)),)
 ifeq ($(filter $(AARCH64_USER_RUNTIME_TEST),$(AARCH64_USER_RUNTIME_TESTS_VALID)),)
 $(error invalid AARCH64_USER_RUNTIME_TEST='$(AARCH64_USER_RUNTIME_TEST)'; valid: $(AARCH64_USER_RUNTIME_TESTS_VALID))

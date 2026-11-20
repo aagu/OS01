@@ -31,9 +31,10 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <config/limits.h>
 
-/* Registry capacity: 8 concurrently published translation roots. */
-#define AARCH64_PT_MAX_PUBLISHED_ROOTS 8
+/* Registry capacity: 2 * NR_CPUS + 8 concurrently published translation roots. */
+#define AARCH64_PT_MAX_PUBLISHED_ROOTS (2 * NR_CPUS + 8)
 
 /* Publish `root_pa` as an installed/installable translation root.
  * Idempotent (re-publishing the same PA returns true); root_pa == 0
@@ -75,13 +76,20 @@ uint32_t ipi_ready_count_get(void);
 /* Entry gate for arch_vmm_* / aarch64_pt_* public primitives. */
 void vmm_gate_check(void);
 
-/* M4 user-mm runtime gate (aarch64_user_mm_* and the user-root branch
+/* User-mm runtime gate (aarch64_user_mm_* and the user-root branch
  * of the four 4 KiB arch_vmm_* entries). Returns 0 when a user-mm
- * operation may proceed, -EAGAIN when SMP bring-up has not started or
- * the IPI-ready count is not yet exactly 1, and -EOPNOTSUPP when the
- * DTB topology is not single-core or the caller is not the BSP.
- * Order per the M4 spec: bring-up, topology, IPI readiness. */
+ * operation may proceed, -EAGAIN when SMP bring-up has not started,
+ * not all DTB target IPIs are ready, or the current CPU is not yet
+ * online/ipi_ready/scheduler_ok (except BSP during the boot-5 creation
+ * window), and -EOPNOTSUPP when the topology/caller CPU is invalid. */
 int aarch64_user_mm_runtime_check(void);
+
+/* Pick a target CPU for a new user process:
+ * - During BSP boot-5 creation window, returns 0.
+ * - At runtime, round-robins across ready CPUs (online && ipi_ready &&
+ *   scheduler_ok), starting cursor at 1.
+ * - Returns negative errno if no legal target is ready. */
+int aarch64_user_pick_cpu(void);
 
 /* Weak violation hook (see file comment); defined in vmm_gate.c. */
 void vmm_gate_violation(const char *reason);

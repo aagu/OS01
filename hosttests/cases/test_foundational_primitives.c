@@ -30,9 +30,12 @@
  * 刻意不复用 test_platform.h 的 percpu_t（它没有 ipi_ready/tlb_ack_gen）。 */
 typedef struct {
     uint64_t self, need_resched;
+    uint32_t online, scheduler_ok;
     uint32_t ipi_ready, tlb_ack_gen;
 } vmm_test_percpu_t;
 vmm_test_percpu_t percpu_data[8];
+
+bool sched_boot_creation_open(void) { return false; }
 
 /* M4: the production gate object reads cpu_id() through the mock in
  * vmm_gate_test_runtime.h; this TU defines the variable (it does not
@@ -84,11 +87,13 @@ static void suite_root_registry(void)
     assert_true(aarch64_pt_root_is_published(&(uint64_t){0x1000}));
     assert_false(aarch64_pt_root_is_published(&(uint64_t){0x2000}));
 
-    /* 灌满 8 槽（0x1000 已占 1 槽，再灌 7 个） */
-    for (uint64_t pa = 0x5000; pa <= 0xB000; pa += 0x1000)
+    /* 灌满 AARCH64_PT_MAX_PUBLISHED_ROOTS 槽（0x1000 已占 1 槽） */
+    for (unsigned i = 1; i < AARCH64_PT_MAX_PUBLISHED_ROOTS; i++) {
+        uint64_t pa = 0x5000 + (uint64_t)i * 0x1000;
         assert_true(aarch64_pt_root_publish(pa));
+    }
 
-    /* 第 9 个不同 root → violation */
+    /* 超限一个不同 root → violation */
     assert_true(EXPECT_VIOLATION(aarch64_pt_root_publish(0x21000)));
 }
 

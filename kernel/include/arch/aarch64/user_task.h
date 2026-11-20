@@ -89,10 +89,17 @@ struct user_task_prepare_ctx {
 int aarch64_user_task_spawn(const struct aarch64_user_elf_source *catalog,
                             size_t count, size_t index, const char *name);
 
-/* Runtime initialisation: remember the kernel TTBR0 root and disable
- * the FP/SIMD trap so user code cannot touch FP state.  Called from the
- * BSP handoff before the scheduler publishes its readiness. */
+/* Spawn a real EL0 user task on an explicit CPU (without advancing the
+ * round-robin placement cursor). */
+int aarch64_user_task_spawn_on_cpu(const struct aarch64_user_elf_source *catalog,
+                                   size_t count, size_t index, const char *name,
+                                   uint32_t cpu);
+
+/* Runtime initialisation: BSP allocates and publishes the shared empty
+ * TTBR0 root, then calls aarch64_user_runtime_init_cpu() for CPU 0.
+ * APs call aarch64_user_runtime_init_cpu() before publishing scheduler_ok. */
 void aarch64_user_runtime_init(void);
+void aarch64_user_runtime_init_cpu(void);
 
 /* Save prev's EL0 TLS, install next's address space (or kernel root
  * for kernel/idle/paused-edit tasks), and restore next's EL0 TLS.

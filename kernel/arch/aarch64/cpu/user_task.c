@@ -131,17 +131,17 @@ void aarch64_user_task_test_note_image(bool ok)
 }
 #endif /* AARCH64_EL0_TEST */
 
-/* Shared immutable zero-entry runtime ASID-0 TTBR0 root installed by
- * aarch64_user_runtime_init(). */
+/* Shared immutable zero-entry runtime ASID-0 TTBR0 root initialized by
+ * BSP aarch64_user_runtime_init() and published before APs enable. */
 static uint64_t g_kernel_root_pa;
-/* Full TTBR0_EL1 value (PA | (ASID << 48)) and split fields currently
- * live in TTBR0_EL1. */
-static uint64_t g_live_ttbr0;
-static uint64_t g_live_root_pa;
-static uint8_t  g_live_asid;
-/* Whether g_live_root_pa is a user root: only a user root is published
- * in the M3 registry and only a user root is revocable. */
-static bool g_live_root_is_user;
+/* Per-CPU TTBR0_EL1 value (PA | (ASID << 48)) and split fields
+ * currently live in TTBR0_EL1. */
+static uint64_t g_live_ttbr0[NR_CPUS];
+static uint64_t g_live_root_pa[NR_CPUS];
+static uint8_t  g_live_asid[NR_CPUS];
+/* Whether g_live_root_pa[cpu] is a user root: only a user root is
+ * published in the M3 registry and only a user root is revocable. */
+static bool g_live_root_is_user[NR_CPUS];
 
 void aarch64_user_clear_tls(void)
 {
@@ -189,21 +189,23 @@ bool aarch64_user_frame_is_valid(const struct pt_regs *regs)
 {
     if (!regs)
         return false;
-    /* The BSP owns the single-core user-task runtime.  The per-CPU
-     * pointer must be installed: an unset architecture pointer is not
-     * a supported BSP check. */
-    if (!this_cpu() || cpu_id() != 0)
+    /* Current CPU must have its percpu pointer installed and be fully
+     * admitted (online, ipi_ready, scheduler_ok). */
+    percpu_t *cpu = this_cpu();
+    if (!cpu || cpu->cpu_id >= NR_CPUS)
         return false;
-    /* The scheduler must be ready: a user task only exists after the
-     * scheduler published its readiness. */
-    if (!__atomic_load_n(&percpu_data[0].scheduler_ok, __ATOMIC_ACQUIRE))
+    if (!__atomic_load_n(&cpu->online, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&cpu->ipi_ready, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&cpu->scheduler_ok, __ATOMIC_ACQUIRE))
         return false;
     /* The current task must be a real user task ... */
     task_t *t = arch_current_task();
     if (!aarch64_user_task_is_user(t))
         return false;
-    /* ... a real process ... */
+    /* ... a real process with single-bit affinity on this CPU ... */
     if (!(t->flags & PF_PROCESS))
+        return false;
+    if (t->cpu != cpu->cpu_id || t->allowed_cpus != (1ULL << cpu->cpu_id))
         return false;
     /* ... with a private mm that is the image's own mm ... */
     const struct aarch64_user_task *owner = t->thread->user_task;
@@ -212,11 +214,15 @@ bool aarch64_user_frame_is_valid(const struct pt_regs *regs)
     struct mm_struct *mm = t->mm;
     if (!mm || mm != aarch64_user_image_mm(owner->image))
         return false;
-    /* ... and the root actually installed must be that task's root.
-     * The mm root, the image root and the installed root must all be
-     * the same non-zero PA. */
+    /* ... and the TTBR0_EL1 value (PA + ASID) actually installed must
+     * match that task's mm. */
+    uint64_t expected_ttbr0 = aarch64_user_ttbr0_value(mm);
+    if (!expected_ttbr0)
+        return false;
     uint64_t installed;
     __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(installed));
+    if (installed != expected_ttbr0)
+        return false;
     installed &= AARCH64_TTBR_BASE_MASK;
     return aarch64_user_frame_matches(regs, aarch64_user_sync_frame(),
                                        (uint64_t)(uintptr_t)mm->pgdir,
@@ -248,21 +254,26 @@ struct mm_struct *aarch64_user_current_mm(void)
     return t->mm;
 }
 
-void aarch64_user_runtime_init(void)
+void aarch64_user_runtime_init_cpu(void)
 {
-    uint64_t empty_pa = alloc_4k_page();
+    uint64_t empty_pa = __atomic_load_n(&g_kernel_root_pa, __ATOMIC_ACQUIRE);
     if (!empty_pa) {
-        log_err("[user-task] FATAL: failed to allocate empty TTBR0 root\n");
+        log_err("[user-task] FATAL: shared empty TTBR0 root not published\n");
         for (;;)
             arch_cpu_halt();
     }
-    __builtin_memset((void *)Phy_To_Virt(empty_pa), 0, PAGE_4K_SIZE);
 
-    g_kernel_root_pa = empty_pa;
-    g_live_ttbr0 = empty_pa;
-    g_live_root_pa = empty_pa;
-    g_live_asid = 0;
-    g_live_root_is_user = false;
+    uint32_t cpu = aarch64_user_vm_cpu_id();
+    if (cpu >= NR_CPUS) {
+        log_err("[user-task] FATAL: invalid cpu id in runtime init\n");
+        for (;;)
+            arch_cpu_halt();
+    }
+
+    g_live_ttbr0[cpu] = empty_pa;
+    g_live_root_pa[cpu] = empty_pa;
+    g_live_asid[cpu] = 0;
+    g_live_root_is_user[cpu] = false;
 
     /* Install the shared immutable empty ASID-0 TTBR0 root with a local
      * full TLB invalidation on first install; all subsequent kernel and
@@ -274,7 +285,7 @@ void aarch64_user_runtime_init(void)
         "tlbi vmalle1\n\t"
         "dsb ish\n\t"
         "isb"
-        :: "r"(g_kernel_root_pa) : "memory");
+        :: "r"(empty_pa) : "memory");
 
     /* Enable FP/SIMD for EL0 and EL1 (CPACR_EL1.FPEN = 0b11).  The
      * kernel is compiled with -mgeneral-regs-only so it never touches
@@ -284,6 +295,20 @@ void aarch64_user_runtime_init(void)
     __asm__ volatile("mrs %0, cpacr_el1" : "=r"(cpacr));
     cpacr |= (UINT64_C(3) << 20);
     __asm__ volatile("msr cpacr_el1, %0\n\tisb" :: "r"(cpacr) : "memory");
+}
+
+void aarch64_user_runtime_init(void)
+{
+    uint64_t empty_pa = alloc_4k_page();
+    if (!empty_pa) {
+        log_err("[user-task] FATAL: failed to allocate empty TTBR0 root\n");
+        for (;;)
+            arch_cpu_halt();
+    }
+    __builtin_memset((void *)Phy_To_Virt(empty_pa), 0, PAGE_4K_SIZE);
+
+    __atomic_store_n(&g_kernel_root_pa, empty_pa, __ATOMIC_RELEASE);
+    aarch64_user_runtime_init_cpu();
 }
 
 /* ── M4 user-VM hardware boundary ───────────────────────────────
@@ -324,6 +349,10 @@ void aarch64_user_install_mm(const struct mm_struct *mm)
     if (!mm || !mm->pgdir)
         return;
 
+    uint32_t cpu = aarch64_user_vm_cpu_id();
+    if (cpu >= NR_CPUS)
+        vmm_gate_violation("aarch64_user_install_mm: invalid cpu");
+
     uint64_t target_ttbr0 = aarch64_user_ttbr0_value(mm);
     if (!target_ttbr0)
         vmm_gate_violation("aarch64_user_install_mm: unregistered mm");
@@ -331,7 +360,7 @@ void aarch64_user_install_mm(const struct mm_struct *mm)
     uint64_t target_pa = target_ttbr0 & AARCH64_TTBR_BASE_MASK;
     uint8_t target_asid = (uint8_t)(target_ttbr0 >> 48);
 
-    if (g_live_root_is_user && g_live_ttbr0 == target_ttbr0)
+    if (g_live_root_is_user[cpu] && g_live_ttbr0[cpu] == target_ttbr0)
         return;
 
     /* Publish BEFORE the install: a root that is not published may not
@@ -340,7 +369,7 @@ void aarch64_user_install_mm(const struct mm_struct *mm)
         vmm_gate_violation("aarch64_user_install_mm: root publish failed");
 
     bool need_full_flush =
-        (target_asid == 0) || (g_live_root_is_user && g_live_asid == 0);
+        (target_asid == 0) || (g_live_root_is_user[cpu] && g_live_asid[cpu] == 0);
 
     if (need_full_flush) {
         __asm__ volatile("dsb ishst\n\tmsr ttbr0_el1, %0\n\tisb\n\t"
@@ -354,28 +383,32 @@ void aarch64_user_install_mm(const struct mm_struct *mm)
 #ifdef AARCH64_USER_RUNTIME_TEST
     extern void aarch64_user_runtime_test_note_ttbr_switch(
         uint64_t old_ttbr0, uint64_t new_ttbr0, bool full_flush);
-    aarch64_user_runtime_test_note_ttbr_switch(g_live_ttbr0, target_ttbr0,
+    aarch64_user_runtime_test_note_ttbr_switch(g_live_ttbr0[cpu], target_ttbr0,
                                                need_full_flush);
 #endif
 
     /* The old user root is revoked only AFTER the new one is
-     * installed: a normal single-core switch keeps at most two user
-     * roots published at a time. */
-    if (g_live_root_is_user && g_live_root_pa != target_pa)
-        aarch64_pt_root_unpublish_local(g_live_root_pa);
+     * installed: each CPU keeps at most two user roots published at a
+     * time across a switch. */
+    if (g_live_root_is_user[cpu] && g_live_root_pa[cpu] != target_pa)
+        aarch64_pt_root_unpublish_local(g_live_root_pa[cpu]);
 
-    g_live_ttbr0 = target_ttbr0;
-    g_live_root_pa = target_pa;
-    g_live_asid = target_asid;
-    g_live_root_is_user = true;
+    g_live_ttbr0[cpu] = target_ttbr0;
+    g_live_root_pa[cpu] = target_pa;
+    g_live_asid[cpu] = target_asid;
+    g_live_root_is_user[cpu] = true;
 }
 
 void aarch64_user_restore_kernel_root(void)
 {
-    if (!g_live_root_is_user && g_live_ttbr0 == g_kernel_root_pa)
+    uint32_t cpu = aarch64_user_vm_cpu_id();
+    if (cpu >= NR_CPUS)
         return;
 
-    bool need_full_flush = (g_live_root_is_user && g_live_asid == 0);
+    if (!g_live_root_is_user[cpu] && g_live_ttbr0[cpu] == g_kernel_root_pa)
+        return;
+
+    bool need_full_flush = (g_live_root_is_user[cpu] && g_live_asid[cpu] == 0);
 
     if (need_full_flush) {
         __asm__ volatile("dsb ishst\n\tmsr ttbr0_el1, %0\n\tisb\n\t"
@@ -389,17 +422,17 @@ void aarch64_user_restore_kernel_root(void)
 #ifdef AARCH64_USER_RUNTIME_TEST
     extern void aarch64_user_runtime_test_note_ttbr_switch(
         uint64_t old_ttbr0, uint64_t new_ttbr0, bool full_flush);
-    aarch64_user_runtime_test_note_ttbr_switch(g_live_ttbr0, g_kernel_root_pa,
+    aarch64_user_runtime_test_note_ttbr_switch(g_live_ttbr0[cpu], g_kernel_root_pa,
                                                need_full_flush);
 #endif
 
-    if (g_live_root_is_user)
-        aarch64_pt_root_unpublish_local(g_live_root_pa);
+    if (g_live_root_is_user[cpu])
+        aarch64_pt_root_unpublish_local(g_live_root_pa[cpu]);
 
-    g_live_ttbr0 = g_kernel_root_pa;
-    g_live_root_pa = g_kernel_root_pa;
-    g_live_asid = 0;
-    g_live_root_is_user = false;
+    g_live_ttbr0[cpu] = g_kernel_root_pa;
+    g_live_root_pa[cpu] = g_kernel_root_pa;
+    g_live_asid[cpu] = 0;
+    g_live_root_is_user[cpu] = false;
 }
 
 void aarch64_user_switch_mm(struct task_struct *prev,
@@ -410,6 +443,8 @@ void aarch64_user_switch_mm(struct task_struct *prev,
         const struct task_struct *prev, const struct task_struct *next);
     aarch64_user_runtime_test_note_switch(prev, next);
 #endif
+    uint32_t cpu = aarch64_user_vm_cpu_id();
+
     /* 1. Save prev's EL0 TLS unless prev is in a paused edit (whose
      *    entry TLS is already preserved in its edit snapshot). */
     if (aarch64_user_task_is_user(prev) && !aarch64_vm_task_editing(prev)) {
@@ -426,7 +461,7 @@ void aarch64_user_switch_mm(struct task_struct *prev,
     if (next_user_active)
         next_ttbr0 = aarch64_user_ttbr0_value(next->mm);
 
-    if (next_ttbr0 != g_live_ttbr0) {
+    if (cpu < NR_CPUS && next_ttbr0 != g_live_ttbr0[cpu]) {
         if (next_user_active)
             aarch64_user_install_mm(next->mm);
         else
@@ -542,6 +577,9 @@ __attribute__((noreturn)) static void aarch64_user_task_exit(uint64_t status);
 __attribute__((noreturn))
 void arch_syscall_exit(uint64_t status)
 {
+#ifdef AARCH64_USER_RUNTIME_TEST
+    aarch64_user_runtime_test_before_exit(arch_current_task());
+#endif
     aarch64_user_task_exit(status);
 }
 
@@ -1184,9 +1222,14 @@ static int user_task_fork_publish(void *arg)
         .files_state = &ctx->files_state,
     };
 
+    int target_cpu = aarch64_user_pick_cpu();
+    if (target_cpu < 0)
+        return target_cpu;
+
     task_t *tsk = NULL;
     int pid = 0;
-    int rc = sched_alloc_and_publish_task(0, true /* pinned to BSP */,
+    int rc = sched_alloc_and_publish_task((uint32_t)target_cpu,
+                                          true /* single-bit affinity */,
                                           PF_PROCESS, ctx->parent->comm,
                                           user_task_prepare, user_task_discard,
                                           &pctx, &tsk, &pid);
@@ -1278,24 +1321,25 @@ int64_t arch_syscall_fork(void *arch_frame)
     return fctx.pid;
 }
 
-int aarch64_user_task_spawn(const struct aarch64_user_elf_source *catalog,
-                            size_t count, size_t index, const char *name)
+int aarch64_user_task_spawn_on_cpu(const struct aarch64_user_elf_source *catalog,
+                                   size_t count, size_t index, const char *name,
+                                   uint32_t cpu)
 {
     /* The whole index range is checked before anything is built. */
-    if (!catalog || !count || index >= count)
+    if (!catalog || !count || index >= count || cpu >= NR_CPUS)
         return -EINVAL;
     if (!catalog[index].bytes || !catalog[index].size)
         return -EINVAL;
 
-    /* Single-core runtime gate: the user-mm primitives refuse to run
-     * on a multi-core or non-BSP configuration. */
+    /* Runtime gate: SMP started, all DTB IPIs ready, current CPU ready. */
     int rc = aarch64_user_mm_runtime_check();
     if (rc)
         return rc;
 
-    /* The scheduler must be ready: a user task is published into a
-     * live runqueue. */
-    if (!__atomic_load_n(&percpu_data[0].scheduler_ok, __ATOMIC_ACQUIRE))
+    /* Target CPU must be online and schedulable. */
+    if (!__atomic_load_n(&percpu_data[cpu].online, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&percpu_data[cpu].ipi_ready, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&percpu_data[cpu].scheduler_ok, __ATOMIC_ACQUIRE))
         return -EINVAL;
 
     struct aarch64_user_image *image = NULL;
@@ -1323,7 +1367,7 @@ int aarch64_user_task_spawn(const struct aarch64_user_elf_source *catalog,
 
     task_t *tsk = NULL;
     int pid = 0;
-    rc = sched_alloc_and_publish_task(0, true /* pinned to the BSP */,
+    rc = sched_alloc_and_publish_task(cpu, true /* pinned to explicit CPU */,
                                       PF_PROCESS, name,
                                       user_task_prepare, user_task_discard,
                                       &pctx, &tsk, &pid);
@@ -1334,4 +1378,10 @@ int aarch64_user_task_spawn(const struct aarch64_user_elf_source *catalog,
         return rc;
     }
     return pid;
+}
+
+int aarch64_user_task_spawn(const struct aarch64_user_elf_source *catalog,
+                            size_t count, size_t index, const char *name)
+{
+    return aarch64_user_task_spawn_on_cpu(catalog, count, index, name, 0);
 }

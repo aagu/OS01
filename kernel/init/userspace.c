@@ -14,9 +14,6 @@
 #include <sched/boot_stdio.h>
 #include <arch/boot.h>
 #include <arch/cpu.h>
-#ifdef __aarch64__
-#include <arch/aarch64/dtb.h>       /* dtb_cpu_count (multi-core fallback) */
-#endif
 #include <sync/futex.h>
 #include <tty/console.h>
 #include <core/boot_failure.h>
@@ -84,22 +81,6 @@ void kernel_start_userspace(void)
     int64_t init_pid = spawn_user_task(boot3_test_init_path(), NULL);
     boot3_test_spawn_leave();
     if (init_pid < 0) {
-#if defined(__aarch64__)
-        /* M4 scope (2026-11-19): the aarch64 user-mm runtime gate is
-         * single-core v1 (aarch64_user_mm_runtime_check refuses a
-         * multi-core configuration with -EOPNOTSUPP), and IRQ-driven
-         * EL0 preemption is still selftest-only.  A multi-core product
-         * boot therefore comes up KERNEL-ONLY instead of failing the
-         * boot; the "M4 剩余：SMP 用户调度与抢占" roadmap task lifts
-         * both.  A single-core boot reaching this line is a real spawn
-         * failure and still stops. */
-        if (init_pid == -EOPNOTSUPP && dtb_cpu_count() > 1) {
-            log_warn("init: /bin/init not spawnable on a multi-core "
-                     "boot (rc=%d) — continuing kernel-only\n",
-                     (int)init_pid);
-            goto no_init;
-        }
-#endif
         boot_failure_stop("init", "/bin/init", init_pid, -1, -1);
     }
     if (init_pid != 1) {
@@ -109,7 +90,6 @@ void kernel_start_userspace(void)
     log_info("[boot-5] init-created pid=1\n");
     boot5_test_after_init();
 
-no_init:
     // 6. Selftest probe & boot services prepare (net)
     selftest_boot_creation_probe();
     boot_services_prepare();

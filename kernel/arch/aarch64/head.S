@@ -210,6 +210,12 @@ _start:
     msr     sctlr_el1, x0
     isb
 
+    /* Switch BSP stack pointer from low identity VA to TTBR1 high-half VA
+     * before jumping to kernel_main, so installing the empty TTBR0 root
+     * during boot-5 does not unmap the active boot stack. */
+    movz    x0, #0xffff, lsl #48
+    add     sp, sp, x0
+
     ldr     x0, =percpu_data
     msr     tpidr_el1, x0
 

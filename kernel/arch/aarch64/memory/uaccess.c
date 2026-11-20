@@ -22,6 +22,7 @@
 
 #include <arch/aarch64/uaccess.h>
 #include <arch/aarch64/user_task.h>
+#include <arch/aarch64/user_mm.h>
 #include <arch/aarch64/user_vm.h>
 #include <arch/aarch64/vmm_gate.h>
 #include <arch/aarch64/page_table.h>
@@ -91,6 +92,19 @@ aarch64_user_range_precheck(uint64_t addr, size_t len,
     if (len > AARCH64_USER_LIMIT - addr)
         return AARCH64_RANGE_DENIED;
 
+    percpu_t *cpu = this_cpu();
+    if (!cpu || cpu->cpu_id >= NR_CPUS)
+        return AARCH64_RANGE_DENIED;
+    if (!__atomic_load_n(&cpu->online, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&cpu->ipi_ready, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&cpu->scheduler_ok, __ATOMIC_ACQUIRE))
+        return AARCH64_RANGE_DENIED;
+
+    task_t *t = arch_current_task();
+    if (!t || !(t->flags & PF_PROCESS) ||
+        t->cpu != cpu->cpu_id || t->allowed_cpus != (1ULL << cpu->cpu_id))
+        return AARCH64_RANGE_DENIED;
+
     struct mm_struct *mm = aarch64_user_current_mm();
     if (!mm || !mm->pgdir)
         return AARCH64_RANGE_DENIED;
@@ -99,9 +113,13 @@ aarch64_user_range_precheck(uint64_t addr, size_t len,
     if (!aarch64_pt_root_is_published(&root_pa))
         return AARCH64_RANGE_DENIED;
 
+    uint64_t expected_ttbr0 = aarch64_user_ttbr0_value(mm);
+    if (!expected_ttbr0 || (expected_ttbr0 & AARCH64_TTBR_BASE_MASK) != root_pa)
+        return AARCH64_RANGE_DENIED;
+
     uint64_t ttbr0;
     __asm__ __volatile__("mrs %0, ttbr0_el1" : "=r"(ttbr0));
-    if ((ttbr0 & AARCH64_TTBR_BASE_MASK) != root_pa)
+    if (ttbr0 != expected_ttbr0)
         return AARCH64_RANGE_DENIED;
 
     /* The M4 acceptance bypass skips ONLY this page-permission walk; the

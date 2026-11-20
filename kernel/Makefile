@@ -373,6 +373,9 @@ endif
 ifeq ($(ARCH),aarch64)
 ifneq ($(strip $(AARCH64_USER_RUNTIME_TEST)),)
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_runtime_image.o
+ifeq ($(AARCH64_USER_RUNTIME_TEST),smp)
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_runtime_comp_image.o
+endif
 endif
 endif
 
@@ -630,6 +633,7 @@ ifeq ($(ARCH),aarch64)
 ALL_CFLAGS += -DAARCH64_USER_RUNTIME_TEST=1
 ALL_CFLAGS += $(if $(filter irq,$(AARCH64_USER_RUNTIME_TEST)),-DAARCH64_USER_RUNTIME_CASE_IRQ=1)
 ALL_CFLAGS += $(if $(filter asid,$(AARCH64_USER_RUNTIME_TEST)),-DAARCH64_USER_RUNTIME_CASE_ASID=1)
+ALL_CFLAGS += $(if $(filter smp,$(AARCH64_USER_RUNTIME_TEST)),-DAARCH64_USER_RUNTIME_CASE_SMP=1)
 endif
 endif
 
@@ -1032,6 +1036,19 @@ $(BUILD_DIR)/generated/aarch64_user_runtime.elf: $(BUILD_DIR)/selftest/fixtures/
 
 $(BUILD_DIR)/generated/aarch64_user_runtime_image.o: $(BUILD_DIR)/generated/aarch64_user_runtime.elf
 	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+
+ifeq ($(AARCH64_USER_RUNTIME_TEST),smp)
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_runtime_comp.o: selftest/fixtures/aarch64_user_runtime.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(filter-out -mgeneral-regs-only,$(ALL_CFLAGS)) -DAARCH64_USER_RUNTIME_COMPANION=1 -MD -MP -c $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_runtime_comp.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_runtime_comp.o selftest/fixtures/aarch64_user_task.ld
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_runtime_comp_image.o: $(BUILD_DIR)/generated/aarch64_user_runtime_comp.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+endif
 endif
 endif
 

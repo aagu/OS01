@@ -377,7 +377,7 @@ _test-aarch64-run-sched-tick:
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched-tick/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 
 ifneq ($(filter test-aarch64,$(MAKECMDGOALS))$(findstring _test-aarch64-prep-user-runtime,$(MAKECMDGOALS))$(findstring _test-aarch64-run-user-runtime,$(MAKECMDGOALS)),)
-USER_RUNTIME_CASES_VALID := irq asid
+USER_RUNTIME_CASES_VALID := irq asid smp product
 ifeq ($(USER_RUNTIME_CASE),)
 USER_RUNTIME_CASE := irq
 endif
@@ -387,13 +387,17 @@ endif
 endif
 .PHONY: _test-aarch64-prep-user-runtime _test-aarch64-run-user-runtime
 _test-aarch64-prep-user-runtime:
+ifeq ($(USER_RUNTIME_CASE),product)
+	$(MAKE) aarch64-uefi
+else
 	$(MAKE) KERNEL_SELFTEST=1 AARCH64_USER_RUNTIME_TEST=$(USER_RUNTIME_CASE) aarch64-uefi
+endif
 _test-aarch64-run-user-runtime:
 	python3 qemutests/aarch64_user_runtime.py \
 	  --case "$(USER_RUNTIME_CASE)" \
-	  --image "$(call aarch64_variant_disk,user-runtime-$(USER_RUNTIME_CASE))" \
+	  --image "$(if $(filter product,$(USER_RUNTIME_CASE)),$(AARCH64_UEFI_DISK),$(call aarch64_variant_disk,user-runtime-$(USER_RUNTIME_CASE)))" \
 	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
-	  --elf "$(call aarch64_variant_kernel,user-runtime-$(USER_RUNTIME_CASE))" \
+	  --elf "$(if $(filter product,$(USER_RUNTIME_CASE)),$(BUILD_DIR)/artifacts/kernel.elf,$(call aarch64_variant_kernel,user-runtime-$(USER_RUNTIME_CASE)))" \
 	  --qemu "$(AARCH64_QEMU)" \
 	  --llvm-nm "$(AARCH64_NM)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \

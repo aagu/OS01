@@ -49,6 +49,35 @@ def _good_asid_trace():
     )
 
 
+def _good_smp_trace():
+    return (
+        "[TEST] START v=1 suite=kernel-selftest expected=1\n"
+        "[TEST] SELECT aarch64_user_runtime_smp required=1\n"
+        "[TEST] BEGIN aarch64_user_runtime_smp\n"
+        "[TEST] PASS aarch64_user_runtime_smp\n"
+        "[TEST] END suite=kernel-selftest total=1 passed=1 failed=0 skipped=0\n"
+        "[INFO] [user-runtime] smp-samples child_cpu=1 "
+        "cpu0_eoi=3 cpu1_eoi=3 cpu0_sw=2 cpu1_sw=2 "
+        "cow_last_free=1 waitpid_blocked=1 waitpid_exit=42 "
+        "leaked_roots=0 leaked_pages=0\n"
+        "[INFO] [user-runtime] PASS case=smp cpu_mask=3\n"
+        "[selftest] done (failed=0)\n"
+    )
+
+
+def _good_product_trace():
+    return (
+        "[INFO] [boot-5] init-created pid=1\n"
+        "[INFO] init: inittab loaded\n"
+        "OS01 Shell\n"
+        "$ echo hi\n"
+        "hi\n"
+        "$ exit\n"
+        "OS01 Shell\n"
+        "$ "
+    )
+
+
 class UserRuntimeEvidenceTests(unittest.TestCase):
     def test_valid_irq_trace_passes(self):
         ok, errors = runner.parse_user_runtime_evidence(_good_irq_trace(), "irq")
@@ -91,6 +120,36 @@ class UserRuntimeEvidenceTests(unittest.TestCase):
         ok, errors = runner.parse_user_runtime_evidence(text, "irq")
         self.assertFalse(ok)
         self.assertTrue(any("fatal" in e.lower() for e in errors), errors)
+
+    def test_valid_smp_trace_passes(self):
+        ok, errors = runner.parse_user_runtime_evidence(_good_smp_trace(), "smp")
+        self.assertTrue(ok, errors)
+        self.assertEqual(errors, [])
+
+    def test_smp_wrong_child_cpu_fails(self):
+        text = _good_smp_trace().replace("child_cpu=1", "child_cpu=0")
+        ok, errors = runner.parse_user_runtime_evidence(text, "smp")
+        self.assertFalse(ok)
+        self.assertTrue(any("child_cpu=1" in e for e in errors), errors)
+
+    def test_smp_cow_last_free_mismatch_fails(self):
+        text = _good_smp_trace().replace("cow_last_free=1", "cow_last_free=2")
+        ok, errors = runner.parse_user_runtime_evidence(text, "smp")
+        self.assertFalse(ok)
+        self.assertTrue(any("cow_last_free=1" in e for e in errors), errors)
+
+    def test_valid_product_trace_passes(self):
+        ok, errors = runner.parse_product_boot_evidence(
+            _good_product_trace(), check_shell_io=True
+        )
+        self.assertTrue(ok, errors)
+        self.assertEqual(errors, [])
+
+    def test_product_missing_hi_fails(self):
+        text = _good_product_trace().replace("hi\n", "")
+        ok, errors = runner.parse_product_boot_evidence(text, check_shell_io=True)
+        self.assertFalse(ok)
+        self.assertTrue(any("hi" in e for e in errors), errors)
 
 
 if __name__ == "__main__":

@@ -29,6 +29,9 @@ void aarch64_user_runtime_test_note_ttbr_switch(uint64_t old_ttbr0,
                                                 bool full_flush);
 void aarch64_user_runtime_test_note_asid_tlbi(uint8_t asid);
 void aarch64_user_runtime_test_note_asid_release(uint8_t asid);
+void aarch64_user_runtime_test_cow_barrier(uint64_t va, uint64_t old_pa);
+void aarch64_user_runtime_test_cow_last_free(uint64_t old_pa);
+void aarch64_user_runtime_test_before_exit(struct task_struct *tsk);
 #endif
 
 #endif /* _KERNEL_SELFTEST_AARCH64_USER_RUNTIME_H */

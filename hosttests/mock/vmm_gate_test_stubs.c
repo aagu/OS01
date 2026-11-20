@@ -63,6 +63,11 @@ __attribute__((weak)) int aarch64_user_mm_runtime_check(void)
     return 0;
 }
 
+__attribute__((weak)) bool sched_boot_creation_open(void)
+{
+    return false;
+}
+
 #define VMM_TEST_PMM_MAX 64
 static uint64_t g_test_pmm[VMM_TEST_PMM_MAX];
 static unsigned g_test_pmm_n;

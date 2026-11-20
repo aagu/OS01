@@ -39,6 +39,8 @@
 typedef struct percpu {
     uint64_t self;
     uint64_t need_resched;
+    uint32_t online;
+    uint32_t scheduler_ok;
     uint32_t ipi_ready;        /* published once via ipi_ready_publish_and_count */
     uint32_t tlb_ack_gen;
 } percpu_t;

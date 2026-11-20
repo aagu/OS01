@@ -16,6 +16,7 @@
 #include <arch/aarch64/task_arch.h>
 #include <arch/aarch64/smp.h>
 #include <arch/aarch64/sched_tick.h>  /* aarch64_sched_tick_start */
+#include <arch/aarch64/user_task.h>
 #include <arch/context.h>
 #include <sched/task.h>
 #include <sched/internal.h>
@@ -189,11 +190,10 @@ void aarch64_ap_idle_handoff(uint32_t cpu)
     if (!aarch64_sched_tick_start())
         ap_sched_fatal("handoff: local tick start failed", cpu);
 
-    /* Enable FP/SIMD for EL0 and EL1 on this AP (CPACR_EL1.FPEN = 0b11). */
-    uint64_t cpacr;
-    __asm__ __volatile__("mrs %0, cpacr_el1" : "=r"(cpacr));
-    cpacr |= (UINT64_C(3) << 20);
-    __asm__ __volatile__("msr cpacr_el1, %0\n\tisb" :: "r"(cpacr) : "memory");
+    /* Reuse the BSP-initialized shared empty TTBR0 root, invalidate
+     * local TLB, and enable FP/SIMD (CPACR_EL1.FPEN = 0b11) on this AP
+     * BEFORE scheduler_ok is published. */
+    aarch64_user_runtime_init_cpu();
 
     /* IRQs on (with the ordering barrier) BEFORE the readiness
      * publication: a pending SGI must be takeable the instant another

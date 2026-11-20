@@ -15,6 +15,7 @@
 #include <arch/aarch64/dtb.h>       /* dtb_cpu_count */
 #include <arch/spinlock.h>
 #include <percpu/percpu.h>          /* percpu_data[cpu].ipi_ready */
+#include <sched/boot.h>             /* sched_boot_creation_open */
 
 /* Fatal path. kpanic is not in the aarch64 kernel source whitelist
  * (pmm.c/slab.c convention); violations go through this weak hook —
@@ -153,23 +154,95 @@ void vmm_gate_check(void)
     }
 }
 
-/* ── M4 user-mm runtime gate ────────────────────────────────────── */
+/* ── User-mm runtime gate & CPU placement ──────────────────────── */
 
-/* Ordered per the M4 spec (运行期门控与检查顺序): bring-up, topology,
- * IPI readiness. Unlike vmm_gate_check this gate RETURNS errors
- * instead of raising a violation — user-root callers are expected to
- * handle a not-yet-ready system by refusing the operation. */
+/* Ordered per the C2 spec:
+ *   1. SMP bring-up started
+ *   2. All DTB target IPIs ready
+ *   3. Current CPU online / ipi_ready / scheduler_ok (with BSP boot
+ *      creation window special case). */
 int aarch64_user_mm_runtime_check(void)
 {
     if (__atomic_load_n(&smp_starting, __ATOMIC_ACQUIRE) == 0)
         return -EAGAIN;                     /* bring-up not started */
 
-    if (dtb_cpu_count() != 1)               /* single-core only (v1) */
-        return -EOPNOTSUPP;
-    if (cpu_id() != 0)                      /* BSP caller only */
+    uint32_t expected = dtb_cpu_count();
+    if (expected == 0 || expected > NR_CPUS)
         return -EOPNOTSUPP;
 
-    if (ipi_ready_count_get() != 1)         /* BSP published, no APs */
+    if (ipi_ready_count_get() < expected)
         return -EAGAIN;
+
+    uint32_t cpu = cpu_id();
+    if (cpu >= NR_CPUS || cpu >= expected)
+        return -EOPNOTSUPP;
+
+    if (!__atomic_load_n(&percpu_data[cpu].online, __ATOMIC_ACQUIRE) ||
+        !__atomic_load_n(&percpu_data[cpu].ipi_ready, __ATOMIC_ACQUIRE))
+        return -EAGAIN;
+
+    if (!__atomic_load_n(&percpu_data[cpu].scheduler_ok, __ATOMIC_ACQUIRE)) {
+        if (cpu == 0 && sched_boot_creation_open())
+            return 0;
+        return -EAGAIN;
+    }
+
     return 0;
+}
+
+static uint32_t user_pick_rr_cursor = 1;
+
+int aarch64_user_pick_cpu(void)
+{
+    if (__atomic_load_n(&smp_starting, __ATOMIC_ACQUIRE) == 0)
+        return -EAGAIN;
+
+    uint32_t ncpus = dtb_cpu_count();
+    if (ncpus == 0 || ncpus > NR_CPUS)
+        return -EOPNOTSUPP;
+
+    if (ipi_ready_count_get() < ncpus)
+        return -EAGAIN;
+
+    /* BSP boot-5 creation window: only CPU 0 is eligible. */
+    if (sched_boot_creation_open() &&
+        !__atomic_load_n(&percpu_data[0].scheduler_ok, __ATOMIC_ACQUIRE)) {
+        if (!__atomic_load_n(&percpu_data[0].online, __ATOMIC_ACQUIRE) ||
+            !__atomic_load_n(&percpu_data[0].ipi_ready, __ATOMIC_ACQUIRE))
+            return -EAGAIN;
+        return 0;
+    }
+
+    /* Take a ready snapshot across 0..ncpus-1. */
+    uint64_t ready_mask = 0;
+    for (uint32_t c = 0; c < ncpus; c++) {
+        if (__atomic_load_n(&percpu_data[c].online, __ATOMIC_ACQUIRE) &&
+            __atomic_load_n(&percpu_data[c].ipi_ready, __ATOMIC_ACQUIRE) &&
+            __atomic_load_n(&percpu_data[c].scheduler_ok, __ATOMIC_ACQUIRE)) {
+            ready_mask |= (1ULL << c);
+        }
+    }
+    if (!ready_mask)
+        return -EAGAIN;
+
+    for (;;) {
+        uint32_t cur = __atomic_load_n(&user_pick_rr_cursor, __ATOMIC_RELAXED);
+        uint32_t start = cur % ncpus;
+        int picked = -1;
+        for (uint32_t off = 0; off < ncpus; off++) {
+            uint32_t c = (start + off) % ncpus;
+            if ((ready_mask >> c) & 1ULL) {
+                picked = (int)c;
+                break;
+            }
+        }
+        if (picked < 0)
+            return -EAGAIN;
+
+        uint32_t next = ((uint32_t)picked + 1U) % ncpus;
+        if (__atomic_compare_exchange_n(&user_pick_rr_cursor, &cur, next, true,
+                                        __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+            return picked;
+        }
+    }
 }

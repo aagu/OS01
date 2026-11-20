@@ -34,7 +34,117 @@
 .section .text
 .global _start
 .type _start, @function
-#ifdef AARCH64_USER_RUNTIME_CASE_ASID
+#ifdef AARCH64_USER_RUNTIME_CASE_SMP
+#ifdef AARCH64_USER_RUNTIME_COMPANION
+_start:
+    /* Companion task: pure EL0 compute loop (no SVC) so timer IRQs
+     * switch between this companion and the primary task on its CPU. */
+    movz    x20, #0x0000
+    movk    x20, #0x0200, lsl #16   /* 33.5M iterations */
+.Lsmp_comp_loop:
+    sub     x20, x20, #1
+    cbnz    x20, .Lsmp_comp_loop
+    URT_EXIT 0x33
+#else /* !AARCH64_USER_RUNTIME_COMPANION */
+_start:
+    /* Map anonymous page at 0x40000000 and write initial sentinel. */
+    movz    x0, #0x4000, lsl #16
+    mov     x1, #4096
+    mov     x2, #3                  /* PROT_READ | PROT_WRITE */
+    mov     x3, #0x32               /* MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED */
+    mov     x4, #-1
+    mov     x5, #0
+    mov     x8, #SYS_mmap
+    svc     #0
+    movz    x19, #0x4000, lsl #16
+    cmp     x0, x19
+    b.ne    .Lsmp_mmap_fail
+
+    movz    x21, #0x4444
+    movk    x21, #0x3333, lsl #16
+    movk    x21, #0x2222, lsl #32
+    movk    x21, #0x1111, lsl #48
+    str     x21, [x19]
+
+    /* Fork: child must land on CPU 1 via aarch64_user_pick_cpu(). */
+    mov     x8, #SYS_fork
+    svc     #0
+    tbnz    x0, #63, .Lsmp_fork_fail
+    cbz     x0, .Lsmp_child
+
+    /* Parent (CPU 0): x27 = child pid */
+    mov     x27, x0
+    movz    x20, #0x0000
+    movk    x20, #0x0100, lsl #16   /* ~16.7M iterations */
+.Lsmp_parent_loop:
+    sub     x20, x20, #1
+    cbnz    x20, .Lsmp_parent_loop
+
+    ldr     x10, [x19]
+    cmp     x10, x21
+    b.ne    .Lsmp_cow_init_fail
+
+    movz    x22, #0x1111
+    movk    x22, #0xaaaa, lsl #16
+    movk    x22, #0x1111, lsl #32
+    movk    x22, #0xaaaa, lsl #48
+    str     x22, [x19]              /* COW write fault on CPU 0 */
+    ldr     x10, [x19]
+    cmp     x10, x22
+    b.ne    .Lsmp_cow_write_fail
+
+    sub     sp, sp, #16
+    str     xzr, [sp, #0]
+    mov     x0, x27
+    mov     x1, sp
+    mov     x2, #0
+    mov     x8, #SYS_waitpid
+    svc     #0
+    cmp     x0, x27
+    b.ne    .Lsmp_wait_fail
+    ldr     x9, [sp, #0]
+    add     sp, sp, #16
+    mov     x10, #(42 << 8)
+    cmp     x9, x10
+    b.ne    .Lsmp_status_fail
+    URT_EXIT 0x11
+
+.Lsmp_child:
+    /* Child (CPU 1) */
+    movz    x20, #0x0000
+    movk    x20, #0x0100, lsl #16   /* ~16.7M iterations */
+.Lsmp_child_loop:
+    sub     x20, x20, #1
+    cbnz    x20, .Lsmp_child_loop
+
+    ldr     x10, [x19]
+    cmp     x10, x21
+    b.ne    .Lsmp_cow_init_fail
+
+    movz    x22, #0x2222
+    movk    x22, #0xbbbb, lsl #16
+    movk    x22, #0x2222, lsl #32
+    movk    x22, #0xbbbb, lsl #48
+    str     x22, [x19]              /* COW write fault on CPU 1 */
+    ldr     x10, [x19]
+    cmp     x10, x22
+    b.ne    .Lsmp_cow_write_fail
+    URT_EXIT 42
+
+.Lsmp_mmap_fail:
+    URT_EXIT 0x61
+.Lsmp_fork_fail:
+    URT_EXIT 0x62
+.Lsmp_cow_init_fail:
+    URT_EXIT 0x63
+.Lsmp_cow_write_fail:
+    URT_EXIT 0x64
+.Lsmp_wait_fail:
+    URT_EXIT 0x65
+.Lsmp_status_fail:
+    URT_EXIT 0x66
+#endif /* AARCH64_USER_RUNTIME_COMPANION */
+#elif defined(AARCH64_USER_RUNTIME_CASE_ASID)
 #define ASID_FIXED_VA  0x40000000
 _start:
     /* Fork to create Task A (parent, x0 > 0) and Task B (child, x0 == 0). */

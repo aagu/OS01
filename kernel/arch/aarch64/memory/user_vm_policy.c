@@ -28,6 +28,9 @@
 #include <errno.h>
 #include <fs/file.h>                    /* files_get_file (mmap fd) */
 #include <kernel.h>             /* container_of */
+#ifdef AARCH64_USER_RUNTIME_TEST
+#include <selftest/aarch64_user_runtime.h>
+#endif
 #include <memory/memory.h>      /* Phy_To_Virt */
 #include <memory/pmm.h>         /* alloc_4k_page / free_4k_page / PAGE_4K_* */
 #include <memory/slab.h>        /* kmalloc / kfree */
@@ -311,14 +314,22 @@ static int cow_private_page(mm_t *mm, user_vm_page_t *r, uint64_t *root)
         return (rc == -ENOMEM) ? -ENOMEM : -EFAULT;
     }
 
+#ifdef AARCH64_USER_RUNTIME_TEST
+    aarch64_user_runtime_test_cow_barrier(r->va, old_pa);
+#endif
+
     /* Release the old PA only after the leaf swap and TLB invalidation
      * have completed; if a concurrent owner dropped its reference first,
      * this is the last reference and we free old_pa here. */
     bool last = false;
     if (pmm_cow_release(old_pa, &last) != 0)
         arch_user_vm_invariant("cow copy release mismatch");
-    if (last)
+    if (last) {
+#ifdef AARCH64_USER_RUNTIME_TEST
+        aarch64_user_runtime_test_cow_last_free(old_pa);
+#endif
         free_4k_page(old_pa);
+    }
 
     r->pa = new_pa;
     r->share = USER_VM_PAGE_PRIVATE;
