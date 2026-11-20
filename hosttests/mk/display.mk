@@ -377,7 +377,7 @@ $(TEST_BLD)/test_fb_writers.o: $(TEST_CASES)/test_fb_writers.c \
 	$(HOST_CC) $(FB_WRITERS_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
 
 $(TEST_BLD)/test_fb_writers.elf: $(TEST_BLD)/test_fb_writers.o $(TEST_BLD)/fb_state.o $(TEST_BLD)/fb_map.o $(TEST_BLD)/fb_resolution_runtime.o $(TEST_BLD)/fb_mode_fixture.o $(TEST_BLD)/gfx_production.o $(TEST_BLD)/fb_production.o $(TEST_BLD)/fb_copy_production.o $(TEST_BLD)/console_production.o
-	$(HOST_CC) -lpthread -o $@ $^
+	$(HOST_CC) -lpthread -Wl,--wrap=fb_is_raw_writable_allowed -o $@ $^
 
 test-fb-writers: $(TEST_BLD)/test_fb_writers.elf
 	$<
@@ -464,7 +464,7 @@ $(TEST_BLD)/test_fb_resolution_hooks.elf: $(TEST_BLD)/test_fb_resolution_hooks.o
 		$(TEST_BLD)/fb_resolution_runtime.o $(TEST_BLD)/fb_production.o \
 		$(TEST_BLD)/fb_copy_production.o $(TEST_BLD)/console_production.o \
 		$(TEST_BLD)/pci_match_production.o
-	$(HOST_CC) -lpthread -o $@ $^
+	$(HOST_CC) -lpthread -Wl,--wrap=fb_install_backend -o $@ $^
 
 test-fb-hooks: $(TEST_BLD)/test_fb_resolution_hooks.elf
 	$<

@@ -446,28 +446,4 @@ void dcache_test_set_gen(uint64_t gen)
     dcache_mut_gen = gen;
     spin_unlock(&dcache_lock);
 }
-
-uint64_t dcache_test_get_gen(void)
-{
-    spin_lock(&dcache_lock);
-    uint64_t g = dcache_mut_gen;
-    spin_unlock(&dcache_lock);
-    return g;
-}
-
-uint64_t dcache_test_get_wrap_epoch(void)
-{
-    spin_lock(&dcache_lock);
-    uint64_t e = dcache_wrap_epoch;
-    spin_unlock(&dcache_lock);
-    return e;
-}
-
-uint32_t dcache_test_get_count(void)
-{
-    spin_lock(&dcache_lock);
-    uint32_t c = dcache_count;
-    spin_unlock(&dcache_lock);
-    return c;
-}
 #endif

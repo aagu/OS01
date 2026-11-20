@@ -26,9 +26,6 @@ void             dcache_get_stats(uint64_t *hits, uint64_t *misses, uint64_t *ev
 
 #ifdef OS01_HOST_TEST
 void             dcache_test_set_gen(uint64_t gen);
-uint64_t         dcache_test_get_gen(void);
-uint64_t         dcache_test_get_wrap_epoch(void);
-uint32_t         dcache_test_get_count(void);
 #endif
 
 #endif /* _FS_DCACHE_H */

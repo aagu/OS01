@@ -89,6 +89,13 @@ static void reset_serial_capture(void)
 #define TEST_FB_BYTES (TEST_FB_PAGES * 4096)
 
 static uint32_t g_test_vram[TEST_FB_BYTES / 4] __attribute__((aligned(4096)));
+static bool g_allow_raw_writable;
+
+bool __real_fb_is_raw_writable_allowed(void);
+bool __wrap_fb_is_raw_writable_allowed(void)
+{
+    return g_allow_raw_writable || __real_fb_is_raw_writable_allowed();
+}
 
 /* ── Mock Page Table Tracking for mmap ── */
 #define MAX_TRACKED_PAGES 64
@@ -288,6 +295,7 @@ static void setup_test_environment(void)
     spin_init(&serial_lock);
     reset_serial_capture();
     g_glyph.count = 0;
+    g_allow_raw_writable = false;
 
     memset(g_test_vram, 0x55, sizeof(g_test_vram));
     g_installed_count = 0;
@@ -801,6 +809,7 @@ static void test_raw_mmap_ownership_boundaries(void)
     vma.vm_flags = VMA_SHARED | VMA_PROT_WRITE | VMA_PROT_READ;
     int rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(-EPERM, rc);
+    CHECK_EQ(0, g_mock_commit_calls);
     CHECK_EQ(false, fb_has_raw_writable_mmap_seen());
     CHECK_EQ(false, fb_has_raw_mmap_seen());
     CHECK_EQ(0, g_installed_count);
@@ -822,8 +831,7 @@ static void test_raw_mmap_ownership_boundaries(void)
 
     /* 3. Test mode writable mmap and ownership bidirectional EBUSY */
     setup_test_environment();
-    fb_set_raw_writable_allowed_for_test(true);
-    CHECK_EQ(true, fb_is_raw_writable_allowed());
+    g_allow_raw_writable = true;
 
     void *owner_cookie = (void *)0xCAFE;
 
@@ -861,7 +869,7 @@ static void test_raw_mmap_ownership_boundaries(void)
     /* 4. A failed commit (device-side prepare OOM) publishes no raw
      *    state: a rejected replace leaves old owners admissible. */
     setup_test_environment();
-    fb_set_raw_writable_allowed_for_test(true);
+    g_allow_raw_writable = true;
     g_mock_commit_rc = -ENOMEM;
     rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
     CHECK_EQ(-ENOMEM, rc);
@@ -906,7 +914,7 @@ static void test_raw_mmap_cache_policy(void)
     /* 2. Same policy, writable alias (test build only). */
     setup_test_environment();
     fb_cache_policy_set(FB_CACHE_POLICY_WRITEBACK);
-    fb_set_raw_writable_allowed_for_test(true);
+    g_allow_raw_writable = true;
 
     vma.vm_flags = VMA_SHARED | VMA_PROT_WRITE | VMA_PROT_READ;
     rc = fb_ops.mmap(NULL, (struct vma *)&vma, mock_commit, &vma);
@@ -929,7 +937,6 @@ static void test_raw_mmap_cache_policy(void)
 
     /* Restore the default policy for the remaining tests. */
     fb_cache_policy_set(FB_CACHE_POLICY_UNCACHEABLE);
-    fb_set_raw_writable_allowed_for_test(false);
 }
 
 /* ── Pitched framebuffer fixture (real-hardware geometry) ───────

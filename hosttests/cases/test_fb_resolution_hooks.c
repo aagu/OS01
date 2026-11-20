@@ -62,6 +62,15 @@ extern void _exit(int status) __attribute__((noreturn));
 static bool g_observe_cold_lock;
 static spinlock_T *g_initialized_lock;
 static unsigned g_lock_inits, g_lock_acquires, g_uninitialized_acquires;
+static bool g_fail_backend_install;
+
+int __real_fb_install_backend(const struct bga_caps *caps, uint32_t *addr, uint64_t mapped_size);
+int __wrap_fb_install_backend(const struct bga_caps *caps, uint32_t *addr, uint64_t mapped_size)
+{
+    if (g_fail_backend_install)
+        return -EINVAL;
+    return __real_fb_install_backend(caps, addr, mapped_size);
+}
 
 void fb_resolution_test_spin_init(spinlock_T *lock)
 {
@@ -918,14 +927,12 @@ static void test_probe_failure_keeps_policy_and_alias_consistent(void)
     CHECK_EQ(1, g_hook_commit_calls);
     CHECK_EQ(VM_DEVICE_CACHE_UC, g_hook_commit_cache);
 
-    fb_set_raw_writable_allowed_for_test(true);
     vma.vm_flags = VMA_SHARED | VMA_PROT_WRITE | VMA_PROT_READ;
     g_hook_commit_calls = 0;
     rc = fb_ops.mmap(NULL, (struct vma *)&vma, hook_commit, &vma);
     CHECK_EQ(0, rc);
     CHECK_EQ(1, g_hook_commit_calls);
     CHECK_EQ(VM_DEVICE_CACHE_UC, g_hook_commit_cache);
-    fb_set_raw_writable_allowed_for_test(false);
 
     /* 5. The same invariant for the SUCCESS path: a write-back mapping
      *    must come with a write-back alias (the negative case: if the
@@ -987,14 +994,12 @@ static void check_alias_cache(enum vm_device_cache expected_cache)
     CHECK_EQ(1, g_hook_commit_calls);
     CHECK_EQ(expected_cache, g_hook_commit_cache);
 
-    fb_set_raw_writable_allowed_for_test(true);
     vma.vm_flags = VMA_SHARED | VMA_PROT_WRITE | VMA_PROT_READ;
     g_hook_commit_calls = 0;
     rc = fb_ops.mmap(NULL, (struct vma *)&vma, hook_commit, &vma);
     CHECK_EQ(0, rc);
     CHECK_EQ(1, g_hook_commit_calls);
     CHECK_EQ(expected_cache, g_hook_commit_cache);
-    fb_set_raw_writable_allowed_for_test(false);
 }
 
 /* Build the fake PCI device the probe needs. */
@@ -1073,16 +1078,15 @@ static void test_probe_backend_install_failure_keeps_policy_and_alias_consistent
     CHECK_EQ(0, rc);
     CHECK_EQ(FB_CACHE_POLICY_UNCACHEABLE, fb_cache_policy_get());
 
-    /* The backend installation fails AFTER the mapping was committed. */
-    fb_set_backend_install_fail_for_test(true);
-
     struct pci_device pdev;
     struct pci_device_id id;
     fill_fake_bga_device(&pdev, &id);
 
+    /* The backend installation fails AFTER the mapping was committed. */
+    g_fail_backend_install = true;
     rc = bga_probe(&pdev, &id);
+    g_fail_backend_install = false;
     CHECK_EQ(-EINVAL, rc);
-    fb_set_backend_install_fail_for_test(false);
 
     /* The mapping is write-back and the published policy is write-back:
      * the mapper commits them together. */
