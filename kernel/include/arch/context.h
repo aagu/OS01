@@ -19,6 +19,7 @@
  * the SP there yields garbage, not a task (spec §6).
  */
 #define STACK_SIZE (32 * 1024)
+#define ARCH_CONTEXT_RETURN_FULL 0
 
 #ifndef __ASSEMBLER__
 #include <stddef.h>
@@ -47,6 +48,17 @@ void arch_dump_task_context(task_t *t);
 void arch_task_check_prev(task_t *t);
 void arch_task_prepare_first_switch(task_t *t, void (*idle_entry)(void));
 void arch_task_prepare_user_entry(task_t *task, struct pt_regs *frame);
+
+enum context_return_mode {
+    CONTEXT_RETURN_FULL = ARCH_CONTEXT_RETURN_FULL,
+    CONTEXT_RETURN_SIGNAL_ONLY = 1,
+};
+
+void context_run_return_work(struct pt_regs *frame, enum context_return_mode mode);
+void arch_context_run_deferred_work(void);
+bool arch_context_reschedule_return(struct pt_regs *frame);
+void arch_context_deliver_return_signals(struct pt_regs *frame,
+                                         enum context_return_mode mode);
 
 /* ── Kernel-thread constructor hooks (spec §8.1) ─────────────
  * The common constructor in kernel/sched/kthread.c owns allocation,

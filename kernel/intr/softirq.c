@@ -29,7 +29,7 @@ void unregister_softirq(int nr)
 	softirq_vector[nr].data = NULL;
 }
 
-void do_softirq()
+void do_softirq(void)
 {
 	int i;
 	for(i = 0; i < 64 && softirq_status; i++)

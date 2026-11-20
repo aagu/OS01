@@ -494,7 +494,7 @@ static void aarch64_user_first_entry(void)
     struct pt_regs *frame =
         (struct pt_regs *)(uintptr_t)aarch64_user_task_frame(t);
 
-    aarch64_do_signal_delivery(frame);
+    context_run_return_work(frame, CONTEXT_RETURN_SIGNAL_ONLY);
     aarch64_el0_restore(frame);
 }
 
@@ -504,39 +504,39 @@ void arch_task_prepare_user_entry(task_t *task, struct pt_regs *frame)
     task->thread->x30 = (uintptr_t)aarch64_user_first_entry;
 }
 
-void aarch64_user_irq_return(pt_regs_t *regs)
+bool arch_context_reschedule_return(struct pt_regs *frame)
 {
-    if (!aarch64_user_frame_is_valid(regs))
-        return;
+    if (!aarch64_user_frame_is_valid(frame))
+        return false;
 
     task_t *cur = arch_current_task();
     if (aarch64_vm_task_editing(cur))
-        return;
+        return false;
 
     percpu_t *cpu = this_cpu();
     if (!cpu || !__atomic_load_n(&cpu->scheduler_ok, __ATOMIC_ACQUIRE))
-        return;
+        return false;
 
     if (__atomic_load_n(&cpu->need_resched, __ATOMIC_ACQUIRE)) {
 #ifdef AARCH64_USER_RUNTIME_TEST
         uint64_t switches_before = 0;
         uint64_t elr_before = 0;
         aarch64_user_runtime_test_irq_sched_before(
-            cur, regs, &switches_before, &elr_before);
+            cur, frame, &switches_before, &elr_before);
 #endif
         schedule();
 #ifdef AARCH64_USER_RUNTIME_TEST
         aarch64_user_runtime_test_irq_sched_after(
-            cur, regs, switches_before, elr_before);
+            cur, frame, switches_before, elr_before);
 #endif
     }
 
     if (arch_current_task() != cur)
-        return;
-    if (!aarch64_user_frame_is_valid(regs))
-        return;
+        return false;
+    if (!aarch64_user_frame_is_valid(frame))
+        return false;
 
-    aarch64_do_signal_delivery(regs);
+    return true;
 }
 
 /* ── Low-EL synchronous routing ─────────────────────────────────
@@ -646,7 +646,7 @@ void aarch64_user_task_sync(pt_regs_t *regs, const struct intr_event *event)
          * success in x0.  Every other register keeps its value. */
         schedule();
         regs->x0 = 0;
-        aarch64_do_signal_delivery(regs);
+        context_run_return_work(regs, CONTEXT_RETURN_SIGNAL_ONLY);
 #if AARCH64_EL0_TEST
         if (g_arm_tick) {
             /* Re-arm the real CNTP for one tick in the IRQ-masked

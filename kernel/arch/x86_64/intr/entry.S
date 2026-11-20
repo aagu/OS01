@@ -74,73 +74,22 @@ ENTRY(ret_from_intr)
 	leaq	selftest_x86_intr_returns(%rip),	%rdx
 	incq	(%rdx,%rax,8)
 #endif
-	movq	$-1,	%rcx
-	testq	softirq_status(%rip),	%rcx
-	jnz	softirq_handler
-#define PERCPU_NEED_RESCHED  8   /* offsetof(percpu_t, need_resched) — keep in sync with percpu.h */
-
-check_resched:
-	# need_resched is per-CPU (percpu_t.need_resched at GS:8).
-	# GS base is set to &percpu_data[cpu] via IA32_GS_BASE MSR.
-	cmpq	$0,	%gs:PERCPU_NEED_RESCHED
-	jne	do_resched
-	jmp	check_signal
-
-softirq_handler:
-	callq	do_softirq
-	jmp	check_resched
-
-do_resched:
-	# Clear the per-CPU flag and invoke the scheduler
-	movq	$0,	%gs:PERCPU_NEED_RESCHED
-	callq	schedule
-	jmp	check_signal
-
-/* offsetof(task_t, signal): list 16 + state 8 + flags 8 + mm 8 +
- * thread 8 + addr_limit 8 + pid 8 + pgrp 4 + session 4 + counter 8
- * = 80.  The historical value 72 read `counter` and silently broke
- * IRQ-return signal delivery (unmap/TLB ownership plan Task 3). */
-#define TASK_SIGNAL_OFFSET  80
-
-check_signal:
-    # Deliver pending signals — arch_do_signal_delivery returns:
-    #   0 = nothing delivered (all pending blocked or CPL≠3)
-    #   !0 = at least one handler delivered or process killed
-    movq    $-32768,    %rbx
-    andq    %rsp,       %rbx
-    # current->signal == 0?  Skip if no pending signals.
-    cmpq    $0, TASK_SIGNAL_OFFSET(%rbx)
+	cld
+	movq	%rsp,	%rbx
+	movq	%rbx,	%rdi
+	movl	$ARCH_CONTEXT_RETURN_FULL,	%esi
+	andq	$-16,	%rsp
+	call	context_run_return_work
 #ifdef X86_BOOT_IRQ_TIME_TEST
-    je  boot2_test_restore
-#else
-    je  ARCH_CONTEXT_RESTORE_FRAME
-#endif
-    # Deliver pending signals.
-    movq    %rsp,   %rdi
-    call    arch_do_signal_delivery
-    testl   %eax,   %eax
-#ifdef X86_BOOT_IRQ_TIME_TEST
-    jz  boot2_test_restore    # nothing delivered → break loop
-#else
-    jz  ARCH_CONTEXT_RESTORE_FRAME           # nothing delivered → break loop
-#endif
-    jmp check_signal          # try next pending signal
-
-#ifdef X86_BOOT_IRQ_TIME_TEST
-/* BOOT-2 test tail: the two check_signal RESTORE_ALL exits land here.
- * %rsp still points at the saved frame (pt_regs).  Keep it in %rbx
- * (callee-saved across the C call), align the stack, count one paired
- * return for whichever handler token owns this exact frame, restore
- * %rsp and fall through to the normal RESTORE_ALL — every GPR is still
- * restored from the original frame. */
+/* BOOT-2 test tail: keep %rbx pointing at the saved frame across
+ * boot2_test_irq_return, then restore %rsp and jump to the native
+ * frame restore facade. */
 boot2_test_restore:
-    movq    %rsp,   %rbx
-    andq    $-16,   %rsp
-    movq    %rbx,   %rdi
-    call    boot2_test_irq_return
-    movq    %rbx,   %rsp
-    jmp     ARCH_CONTEXT_RESTORE_FRAME
+	movq	%rbx,	%rdi
+	call	boot2_test_irq_return
 #endif
+	movq	%rbx,	%rsp
+	jmp	ARCH_CONTEXT_RESTORE_FRAME
 
 ENTRY(divide_error)
 	pushq	$0

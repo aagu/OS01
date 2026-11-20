@@ -10,6 +10,7 @@
  */
 
 #include <arch/aarch64/syscall.h>
+#include <arch/context.h>
 #include <arch/aarch64/user_vm.h>
 #include <errno.h>
 #include <syscall/dispatch.h>
@@ -70,5 +71,5 @@ void aarch64_user_syscall(pt_regs_t *regs)
     if (!ctx.suppress_writeback)
         regs->x0 = (uint64_t)ret;
 
-    aarch64_do_signal_delivery(regs);
+    context_run_return_work(regs, CONTEXT_RETURN_SIGNAL_ONLY);
 }

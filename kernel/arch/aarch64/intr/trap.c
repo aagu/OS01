@@ -32,7 +32,9 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <arch/regs.h>
+#include <arch/context.h>
 #include <arch/intr.h>
+#include <arch/aarch64/syscall.h>
 #include <arch/aarch64/sync_fault.h>
 #include <arch/aarch64/uaccess.h>
 #include <arch/aarch64/user_vm.h>
@@ -103,7 +105,14 @@ void aarch64_el0_irq(pt_regs_t *regs)
         aarch64_user_task_test_pid() == pid_before,
         aarch64_user_task_test_mark() == switches_before);
 #endif
-    aarch64_user_irq_return(regs);
+    context_run_return_work(regs, CONTEXT_RETURN_FULL);
+}
+
+void arch_context_deliver_return_signals(struct pt_regs *frame,
+                                         enum context_return_mode mode)
+{
+    (void)mode;
+    aarch64_do_signal_delivery(frame);
 }
 
 /* entry.S el1_sync_entry 的 C 落点（sync 适配器，offset 0x200）。

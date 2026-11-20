@@ -1090,14 +1090,6 @@ void x86_handle_virtualization_exception(pt_regs_t * regs, uint64_t error_code)
 // Registered handlers clear the pending bit but don't yet
 // deliver to user space (future work).
 
-/* entry.S:check_signal reads current->signal from the stack-top
- * task pointer at TASK_SIGNAL_OFFSET (80).  The historical value 72
- * silently read `counter` instead, disabling ALL IRQ-return signal
- * delivery; this pin turns a future field insertion into a build
- * failure. */
-_Static_assert(__builtin_offsetof(task_t, signal) == 80,
-               "entry.S TASK_SIGNAL_OFFSET must match offsetof(task_t, signal)");
-
 int arch_do_signal_delivery(pt_regs_t *regs)
 {
     uint64_t pending = (uint64_t)__atomic_load_n(&current->signal,
@@ -1339,8 +1331,7 @@ void do_system_call(pt_regs_t *regs, uint64_t error_code __attribute__((unused))
     // Runs after every syscall that returns to user mode.
     // For signals that kill (SIG_DFL + fatal), do_exit() calls
     // switch_to() and never returns.
-    if (regs->cs & 3)
-        arch_do_signal_delivery(regs);
+    context_run_return_work(regs, CONTEXT_RETURN_SIGNAL_ONLY);
 }
 
 void sys_vector_install()

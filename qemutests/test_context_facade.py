@@ -7,6 +7,7 @@ from pathlib import Path
 import re
 import shutil
 import subprocess
+import tempfile
 import unittest
 
 TEST_MANIFEST = {
@@ -223,24 +224,13 @@ class ContextFacadeTests(unittest.TestCase):
         self.assertIn("#include <arch/context.h>", x86_entry)
         self.assertIn(".global ARCH_CONTEXT_RESTORE_FRAME", x86_entry)
         self.assertIn("ARCH_CONTEXT_RESTORE_FRAME:", x86_entry)
-        check_signal_block = re.search(
-            r"check_signal:.*?boot2_test_restore:", x86_entry, re.DOTALL
+        rfi_block = re.search(
+            r"ENTRY\(ret_from_intr\).*?ENTRY\(divide_error\)", x86_entry, re.DOTALL
         )
-        self.assertIsNotNone(check_signal_block)
-        assert check_signal_block is not None
+        self.assertIsNotNone(rfi_block)
+        assert rfi_block is not None
         self.assertRegex(
-            check_signal_block.group(0), r"\bje\s+ARCH_CONTEXT_RESTORE_FRAME\b"
-        )
-        self.assertRegex(
-            check_signal_block.group(0), r"\bjz\s+ARCH_CONTEXT_RESTORE_FRAME\b"
-        )
-        boot2_block = re.search(
-            r"boot2_test_restore:.*?#endif", x86_entry, re.DOTALL
-        )
-        self.assertIsNotNone(boot2_block)
-        assert boot2_block is not None
-        self.assertRegex(
-            boot2_block.group(0), r"\bjmp\s+ARCH_CONTEXT_RESTORE_FRAME\b"
+            rfi_block.group(0), r"\bjmp\s+ARCH_CONTEXT_RESTORE_FRAME\b"
         )
         ret_exc_block = re.search(
             r"ret_from_exception:.*?ENTRY\(ret_from_intr\)", x86_entry, re.DOTALL
@@ -294,6 +284,208 @@ class ContextFacadeTests(unittest.TestCase):
         assert el1_sync_block is not None
         self.assertRegex(el1_sync_block.group(0), r"\bb\s+restore_pt_regs\b")
         self.assertNotIn("ARCH_CONTEXT_RESTORE_FRAME", el1_sync_block.group(0))
+
+    def test_return_mode_constants(self) -> None:
+        asm_src = """
+        #include <arch/context.h>
+        .long ARCH_CONTEXT_RETURN_FULL
+        """
+        c_src = """
+        #include <arch/context.h>
+        _Static_assert(ARCH_CONTEXT_RETURN_FULL == 0,
+                       "ARCH_CONTEXT_RETURN_FULL must be 0");
+        _Static_assert(CONTEXT_RETURN_FULL == ARCH_CONTEXT_RETURN_FULL,
+                       "CONTEXT_RETURN_FULL must match ARCH_CONTEXT_RETURN_FULL");
+        _Static_assert(CONTEXT_RETURN_SIGNAL_ONLY == 1,
+                       "CONTEXT_RETURN_SIGNAL_ONLY must be 1");
+        int return_mode_probe(void) { return CONTEXT_RETURN_FULL; }
+        """
+        for target in ("x86_64-unknown-none", "aarch64-none-elf"):
+            with self.subTest(target=target, mode="asm"):
+                cmd = [
+                    self.clang,
+                    "-target",
+                    target,
+                    f"-I{INCLUDE_DIR}",
+                    "-E",
+                    "-P",
+                    "-x",
+                    "assembler-with-cpp",
+                    "-",
+                ]
+                res = subprocess.run(cmd, input=asm_src, text=True, capture_output=True)
+                self.assertEqual(res.returncode, 0, res.stderr)
+                self.assertRegex(res.stdout, r"\.long\s+0\b")
+            with self.subTest(target=target, mode="c"):
+                res = self._run_clang(target, c_src)
+                self.assertEqual(res.returncode, 0, res.stderr)
+
+    def test_return_work_link_selection(self) -> None:
+        context_return_c = ROOT / "kernel" / "sched" / "context_return.c"
+        self.assertTrue(
+            context_return_c.is_file(),
+            "kernel/sched/context_return.c must exist",
+        )
+        fixture_c = """
+        #include <stdio.h>
+        #include <string.h>
+        #include <arch/context.h>
+
+        struct pt_regs { int marker; };
+        struct task_struct { int dummy; };
+
+        static char g_log[256];
+        static bool g_resched_allow = true;
+
+        static void append_log(const char *entry) {
+            if (g_log[0]) strcat(g_log, " -> ");
+            strcat(g_log, entry);
+        }
+
+        #ifdef STRONG_DEFERRED
+        void arch_context_run_deferred_work(void) {
+            append_log("deferred");
+        }
+        #endif
+
+        #ifndef OMIT_RESCHEDULE
+        bool arch_context_reschedule_return(struct pt_regs *frame) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "reschedule(%d)", frame->marker);
+            append_log(buf);
+            return g_resched_allow;
+        }
+        #endif
+
+        #ifndef OMIT_SIGNAL
+        void arch_context_deliver_return_signals(struct pt_regs *frame,
+                                                 enum context_return_mode mode) {
+            char buf[64];
+            snprintf(buf, sizeof(buf), "signal(%d,%s)", frame->marker,
+                     mode == CONTEXT_RETURN_FULL ? "FULL" : "SIGNAL_ONLY");
+            append_log(buf);
+        }
+        #endif
+
+        int main(void) {
+            struct pt_regs f = { .marker = 42 };
+            g_log[0] = '\\0';
+            g_resched_allow = true;
+            context_run_return_work(&f, CONTEXT_RETURN_FULL);
+            printf("CASE1:%s\\n", g_log);
+
+            g_log[0] = '\\0';
+            g_resched_allow = false;
+            context_run_return_work(&f, CONTEXT_RETURN_FULL);
+            printf("CASE2:%s\\n", g_log);
+
+            g_log[0] = '\\0';
+            g_resched_allow = true;
+            context_run_return_work(&f, CONTEXT_RETURN_SIGNAL_ONLY);
+            printf("CASE3:%s\\n", g_log);
+            return 0;
+        }
+        """
+        with tempfile.TemporaryDirectory() as td:
+            tmp = Path(td)
+            ctx_obj = tmp / "context_return.o"
+            c_res = subprocess.run(
+                [
+                    self.clang,
+                    "-O2",
+                    "-Werror",
+                    "-ffreestanding",
+                    f"-I{INCLUDE_DIR}",
+                    "-c",
+                    str(context_return_c),
+                    "-o",
+                    str(ctx_obj),
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(c_res.returncode, 0, c_res.stderr)
+
+            fix_path = tmp / "fixture.c"
+            fix_path.write_text(fixture_c, encoding="utf-8")
+
+            # Strong override
+            strong_bin = tmp / "strong_bin"
+            l_res = subprocess.run(
+                [
+                    self.clang,
+                    "-O2",
+                    "-Werror",
+                    f"-I{INCLUDE_DIR}",
+                    "-DSTRONG_DEFERRED",
+                    str(fix_path),
+                    str(ctx_obj),
+                    "-o",
+                    str(strong_bin),
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(l_res.returncode, 0, l_res.stderr)
+            run_strong = subprocess.run([str(strong_bin)], text=True, capture_output=True)
+            self.assertEqual(run_strong.returncode, 0, run_strong.stderr)
+            self.assertEqual(
+                run_strong.stdout.splitlines(),
+                [
+                    "CASE1:deferred -> reschedule(42) -> signal(42,FULL)",
+                    "CASE2:deferred -> reschedule(42)",
+                    "CASE3:signal(42,SIGNAL_ONLY)",
+                ],
+            )
+
+            # Weak default
+            weak_bin = tmp / "weak_bin"
+            w_res = subprocess.run(
+                [
+                    self.clang,
+                    "-O2",
+                    "-Werror",
+                    f"-I{INCLUDE_DIR}",
+                    str(fix_path),
+                    str(ctx_obj),
+                    "-o",
+                    str(weak_bin),
+                ],
+                text=True,
+                capture_output=True,
+            )
+            self.assertEqual(w_res.returncode, 0, w_res.stderr)
+            run_weak = subprocess.run([str(weak_bin)], text=True, capture_output=True)
+            self.assertEqual(run_weak.returncode, 0, run_weak.stderr)
+            self.assertEqual(
+                run_weak.stdout.splitlines()[0],
+                "CASE1:reschedule(42) -> signal(42,FULL)",
+            )
+
+            # Missing required hooks must fail to link
+            for macro, sym in (
+                ("OMIT_RESCHEDULE", "arch_context_reschedule_return"),
+                ("OMIT_SIGNAL", "arch_context_deliver_return_signals"),
+            ):
+                with self.subTest(missing=sym):
+                    bad_bin = tmp / f"bad_{macro}"
+                    bad_res = subprocess.run(
+                        [
+                            self.clang,
+                            "-O2",
+                            "-Werror",
+                            f"-I{INCLUDE_DIR}",
+                            f"-D{macro}",
+                            str(fix_path),
+                            str(ctx_obj),
+                            "-o",
+                            str(bad_bin),
+                        ],
+                        text=True,
+                        capture_output=True,
+                    )
+                    self.assertNotEqual(bad_res.returncode, 0)
+                    self.assertIn(sym, bad_res.stderr)
 
 
 if __name__ == "__main__":

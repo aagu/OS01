@@ -21,6 +21,7 @@ void unregister_softirq(int32_t nr);
 void set_softirq_status(uint64_t status);
 uint64_t get_softirq_status();
 
+void do_softirq(void);
 void softirq_init();
 
 #endif

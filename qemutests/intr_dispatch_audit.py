@@ -510,7 +510,10 @@ _X86_EARLY_CHAIN = ("arch_intr_dispatch", "arch_intr_handle_sync",
 _X86_DISASM_SYMS = (
     list(_X86_SYNC_NAMES) + ["do_" + n for n in _X86_SYNC_NAMES]
     + ["error_code", "RESTORE_ALL", "x86_intr_restore_only",
-       "arch_context_restore_frame", "ret_from_exception"]
+       "arch_context_restore_frame", "ret_from_exception", "ret_from_intr",
+       "do_system_call", "context_run_return_work",
+       "arch_context_run_deferred_work", "arch_context_reschedule_return",
+       "arch_context_deliver_return_signals", "arch_do_signal_delivery"]
     + ["arch_task_prepare_user_entry", "spawn_user_task", "do_fork"]
     + [name for name, _ in _X86_IRQ.values()]
     + list(_X86_EARLY_CHAIN) + list(_X86_IRQ_BUSINESS)
@@ -534,7 +537,10 @@ _A64_DISASM_SYMS = (
      "arch_intr_handle_sync", "arch_intr_handle_irq",
      "arch_intr_bad_event",
      "restore_pt_regs", "arch_context_restore_frame", "aarch64_el0_restore",
-     "arch_task_prepare_user_entry", "aarch64_user_first_entry"]
+     "arch_task_prepare_user_entry", "aarch64_user_first_entry",
+     "context_run_return_work", "arch_context_run_deferred_work",
+     "arch_context_reschedule_return", "arch_context_deliver_return_signals",
+     "aarch64_vm_irq_enter", "aarch64_vm_irq_leave"]
     + ["el0_sync_entry", "el0_irq_entry",
        "aarch64_el0_sync_route", "aarch64_el0_irq"]
     + ["aarch64_uaccess_fixup", "aarch64_user_current_mm",
@@ -1007,6 +1013,44 @@ def _check_unique_global_text(symtab, name, errors, notes, label="context facade
     return strong[0][0]
 
 
+def _x86_call_index_for(ins, symtab, target: str) -> int:
+    target_addrs = {a for a, _ in symtab.strong_defs(target)}
+    last_movabs_reg: Optional[str] = None
+    last_movabs_matches = False
+    for idx, i in enumerate(ins):
+        if any(e.target == target and e.kind in ("call", "branch") for e in x86_edges([i], symtab)):
+            return idx
+        m_mov = re.match(r"^movabsq\s+\$[^,]+,\s+(%\w+)$", i.text)
+        if m_mov:
+            m_imm = re.search(r"(?:^|\b)imm\s*=\s*(0x[0-9a-fA-F]+)", i.comment or "")
+            addr = int(m_imm.group(1), 16) if m_imm else None
+            last_movabs_reg = m_mov.group(1)
+            last_movabs_matches = bool(addr is not None and addr in target_addrs)
+            continue
+        if i.text.startswith("call") and last_movabs_reg and f"*{last_movabs_reg}" in i.text:
+            if last_movabs_matches:
+                return idx
+            last_movabs_reg = None
+            last_movabs_matches = False
+        elif last_movabs_reg and i.text.endswith(f", {last_movabs_reg}"):
+            last_movabs_reg = None
+            last_movabs_matches = False
+    return -1
+
+
+def _x86_check_esi_arg(ins, call_idx: int, want: int) -> bool:
+    if call_idx < 0:
+        return False
+    if want == 0:
+        setups = {
+            "movl $0x0, %esi", "movq $0x0, %rsi",
+            "xorl %esi, %esi", "xorq %rsi, %rsi",
+        }
+    else:
+        setups = {f"movl $0x{want:x}, %esi", f"movq $0x{want:x}, %rsi"}
+    return _x86_value_survives(ins, setups, "rsi", call_idx)
+
+
 def _audit_x86_context_facade(symtab, blocks, errors, notes):
     _check_unique_global_text(symtab, "arch_task_prepare_user_entry", errors, notes)
     facade_addr = _check_unique_global_text(symtab, "arch_context_restore_frame", errors, notes)
@@ -1020,6 +1064,69 @@ def _audit_x86_context_facade(symtab, blocks, errors, notes):
                     f"context facade: arch_context_restore_frame (0x{facade_addr:x}) "
                     f"must match {alias} (0x{defs[0][0]:x})"
                 )
+
+    for sym in (
+        "context_run_return_work",
+        "arch_context_run_deferred_work",
+        "arch_context_reschedule_return",
+        "arch_context_deliver_return_signals",
+    ):
+        _check_unique_global_text(symtab, sym, errors, notes, label="return work")
+
+    orch = _block(blocks, "context_run_return_work", errors, "return work orchestrator")
+    if orch is not None:
+        es = x86_edges(orch, symtab)
+        got = {e.target for e in es if e.target}
+        for req in (
+            "arch_context_run_deferred_work",
+            "arch_context_reschedule_return",
+            "arch_context_deliver_return_signals",
+        ):
+            if req not in got:
+                errors.append(f"context_run_return_work: missing edge to {req}")
+
+    sig_hook = _block(blocks, "arch_context_deliver_return_signals", errors, "return signal hook")
+    if sig_hook is not None:
+        es = x86_edges(sig_hook, symtab)
+        if not any(e.target == "arch_do_signal_delivery" for e in es):
+            errors.append("arch_context_deliver_return_signals: missing edge to arch_do_signal_delivery")
+
+    rfi = _block(blocks, "ret_from_intr", errors, "x86 return work adapter")
+    if rfi is not None:
+        texts = [i.text for i in rfi]
+        if any(t in ("cli", "sti") for t in texts):
+            errors.append("ret_from_intr: forbidden cli/sti in return adapter")
+        es = x86_edges(rfi, symtab)
+        call_idx = _x86_call_index_for(rfi, symtab, "context_run_return_work")
+        if call_idx < 0:
+            errors.append("ret_from_intr: missing call to context_run_return_work")
+        else:
+            cld_idx = next((idx for idx, t in enumerate(texts) if t == "cld"), -1)
+            save_idx = next((idx for idx, t in enumerate(texts) if t == "movq %rsp, %rbx"), -1)
+            align_idx = next((idx for idx, t in enumerate(texts) if t == "andq $-0x10, %rsp"), -1)
+            if cld_idx < 0 or save_idx < 0 or align_idx < 0 or not (cld_idx < save_idx < call_idx and align_idx < call_idx):
+                errors.append("ret_from_intr: missing or misordered cld / frame save / 16-byte stack align before call")
+            if not _x86_value_survives(rfi, {"movq %rbx, %rdi", "movq %rsp, %rdi"}, "rdi", call_idx):
+                errors.append("ret_from_intr: RDI frame argument unproven or clobbered")
+            if not _x86_check_esi_arg(rfi, call_idx, 0):
+                errors.append("ret_from_intr: ESI must be 0 (ARCH_CONTEXT_RETURN_FULL)")
+            rest_idx = next(
+                (idx for idx in range(call_idx + 1, len(texts)) if texts[idx] == "movq %rbx, %rsp"),
+                -1,
+            )
+            if rest_idx < 0:
+                errors.append("ret_from_intr: missing 'movq %rbx, %rsp' after call")
+            if not _restore_edge(es, symtab):
+                errors.append("ret_from_intr: missing branch to arch_context_restore_frame")
+
+    sc = _block(blocks, "do_system_call", errors, "x86 syscall return")
+    if sc is not None:
+        es = x86_edges(sc, symtab)
+        call_idx = _x86_call_index_for(sc, symtab, "context_run_return_work")
+        if not any(e.target == "context_run_return_work" for e in es) or call_idx < 0:
+            errors.append("do_system_call: missing call to context_run_return_work")
+        elif not _x86_check_esi_arg(sc, call_idx, 1):
+            errors.append("do_system_call: ESI must be 1 (CONTEXT_RETURN_SIGNAL_ONLY)")
 
     ret_exc = _block(blocks, "ret_from_exception", errors, "x86 exception restore")
     if ret_exc is not None:
@@ -1462,8 +1569,8 @@ _A64_VM_EDGES = (
      "the shared kill handler must reach task_send_signal"),
     ("sys_native_sigreturn", "arch_syscall_sigreturn",
      "the shared sigreturn handler must reach the architecture sigreturn entry"),
-    ("aarch64_user_syscall", "aarch64_do_signal_delivery",
-     "the AArch64 native syscall exit path must deliver pending signals"),
+    ("aarch64_user_syscall", "context_run_return_work",
+     "the AArch64 native syscall exit path must invoke context_run_return_work"),
 )
 
 _A64_VM_FORBIDDEN_STRONG = ("do_futex_wait", "do_futex_wake")
@@ -1700,9 +1807,95 @@ def _audit_aarch64(symtab, blocks, order, repo: Path,
     _audit_aarch64_context_facade(symtab, blocks, errors, notes)
 
 
+def _a64_check_w1_before_call(instrs, call_idx: int, want: int) -> bool:
+    if call_idx <= 0:
+        return False
+    zero_pats = (r"^mov\s+w1,\s*wzr$", r"^mov\s+w1,\s*#(?:0x0|0)\b", r"^mov\s+x1,\s*xzr$", r"^mov\s+x1,\s*#(?:0x0|0)\b")
+    one_pats = (r"^mov\s+w1,\s*#(?:0x1|1)\b", r"^mov\s+x1,\s*#(?:0x1|1)\b")
+    want_pats = zero_pats if want == 0 else one_pats
+    clobber_re = re.compile(r"^[a-z0-9.]+\s+(?:w1|x1)\s*,")
+    last_set = False
+    for ins in instrs[:call_idx]:
+        t = ins.text.lower()
+        if any(re.match(p, t) for p in want_pats):
+            last_set = True
+        elif clobber_re.match(t) or t.startswith("bl "):
+            last_set = False
+    return last_set
+
+
 def _audit_aarch64_context_facade(symtab, blocks, errors, notes):
     _check_unique_global_text(symtab, "arch_task_prepare_user_entry", errors, notes)
     facade_addr = _check_unique_global_text(symtab, "arch_context_restore_frame", errors, notes)
+    for sym in (
+        "context_run_return_work",
+        "arch_context_reschedule_return",
+        "arch_context_deliver_return_signals",
+    ):
+        _check_unique_global_text(symtab, sym, errors, notes, label="return work")
+
+    def_strong = symtab.strong_defs("arch_context_run_deferred_work")
+    def_weak = symtab.weak_defs("arch_context_run_deferred_work")
+    if def_strong:
+        errors.append("return work: arch_context_run_deferred_work must be weak (W) on aarch64, found strong")
+    elif len(def_weak) != 1:
+        errors.append(f"return work: arch_context_run_deferred_work must have 1 weak definition on aarch64, found {len(def_weak)}")
+    else:
+        notes.append(f"return work: arch_context_run_deferred_work @ 0x{def_weak[0][0]:x} (W)")
+
+    orch = _block(blocks, "context_run_return_work", errors, "return work orchestrator")
+    if orch is not None:
+        es = a64_edges(orch, symtab)
+        got_strong = {e.target for e in es if e.kind in ("call", "branch") and e.target}
+        for req in ("arch_context_reschedule_return", "arch_context_deliver_return_signals"):
+            if req not in got_strong:
+                errors.append(f"context_run_return_work: missing edge to {req}")
+        if len(def_weak) == 1:
+            weak_hex = f"0x{def_weak[0][0]:x}"
+            if not any(e.kind in ("call", "branch") and (e.detail == weak_hex or e.target == "arch_context_run_deferred_work") for e in es):
+                errors.append("context_run_return_work: missing edge to weak arch_context_run_deferred_work")
+
+    sig_hook = _block(blocks, "arch_context_deliver_return_signals", errors, "return signal hook")
+    if sig_hook is not None:
+        es = a64_edges(sig_hook, symtab)
+        if not any(e.kind in ("call", "branch") and e.target == "aarch64_do_signal_delivery" for e in es):
+            errors.append("arch_context_deliver_return_signals: missing edge to aarch64_do_signal_delivery")
+
+    # Caller w1 checks and IRQ ordering
+    for caller, want in (
+        ("aarch64_user_first_entry", 1),
+        ("aarch64_user_syscall", 1),
+        ("aarch64_user_task_sync", 1),
+        ("aarch64_el0_irq", 0),
+    ):
+        ins = _block(blocks, caller, errors, "aarch64 return work caller")
+        if ins is None:
+            continue
+        call_indices = [
+            idx for idx, i in enumerate(ins)
+            if any(e.kind in ("call", "branch") and e.target == "context_run_return_work"
+                   for e in a64_edges([i], symtab))
+        ]
+        if not call_indices:
+            errors.append(f"{caller}: missing call/branch to context_run_return_work")
+        else:
+            if not any(_a64_check_w1_before_call(ins, cidx, want) for cidx in call_indices):
+                errors.append(f"{caller}: w1 must be {want} before context_run_return_work")
+            if caller == "aarch64_el0_irq":
+                disp_idx = next(
+                    (idx for idx, i in enumerate(ins)
+                     if any(e.kind == "call" and e.target == "arch_intr_dispatch"
+                            for e in a64_edges([i], symtab))),
+                    -1,
+                )
+                leave_idx = next(
+                    (idx for idx, i in enumerate(ins)
+                     if any(e.kind == "call" and e.target == "aarch64_vm_irq_leave"
+                            for e in a64_edges([i], symtab))),
+                    -1,
+                )
+                if disp_idx < 0 or leave_idx < 0 or not (disp_idx < leave_idx < call_indices[0]):
+                    errors.append("aarch64_el0_irq: must execute arch_intr_dispatch -> aarch64_vm_irq_leave -> context_run_return_work in order")
     restore_defs = symtab.strong_defs("restore_pt_regs")
     if not restore_defs:
         errors.append("context facade: restore_pt_regs missing from aarch64 ELF")

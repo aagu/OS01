@@ -409,6 +409,12 @@ ffff000040097c00 T sys_native_sigprocmask
 ffff000040097c40 T sys_native_sigreturn
 ffff000040097c80 T arch_syscall_sigreturn
 ffff000040097cc0 T aarch64_do_signal_delivery
+ffff0000400a4300 T context_run_return_work
+ffff0000400a4340 W arch_context_run_deferred_work
+ffff0000400a4380 T arch_context_reschedule_return
+ffff0000400a43c0 T arch_context_deliver_return_signals
+ffff0000400a4400 T aarch64_vm_irq_enter
+ffff0000400a4420 T aarch64_vm_irq_leave
 """
 
 # The 16 VBAR slots at 128-byte stride; slots 4 (+0x200, EL1h sync) and
@@ -476,7 +482,19 @@ ffff0000400a4180 <arch_task_prepare_user_entry>:
 ffff0000400a4180: d65f03c0     	ret
 
 ffff0000400a4200 <aarch64_user_first_entry>:
-ffff0000400a4200: 97fffdaa     	bl	0xffff0000400a38b8 <aarch64_el0_restore>
+ffff0000400a4200: 52800021     	mov	w1, #0x1
+ffff0000400a4204: 9400003f     	bl	0xffff0000400a4300 <context_run_return_work>
+ffff0000400a4208: 97fffdaa     	bl	0xffff0000400a38b8 <aarch64_el0_restore>
+
+ffff0000400a4300 <context_run_return_work>:
+ffff0000400a4300: 94000010     	bl	0xffff0000400a4340 <arch_context_run_deferred_work>
+ffff0000400a4304: 9400001f     	bl	0xffff0000400a4380 <arch_context_reschedule_return>
+ffff0000400a4308: 9400002e     	bl	0xffff0000400a43c0 <arch_context_deliver_return_signals>
+ffff0000400a430c: d65f03c0     	ret
+
+ffff0000400a43c0 <arch_context_deliver_return_signals>:
+ffff0000400a43c0: 97ffd640     	bl	0xffff000040097cc0 <aarch64_do_signal_delivery>
+ffff0000400a43c4: d65f03c0     	ret
 
 ffff0000400a3900 <el1_sync_entry>:
 ffff0000400a3900: d10443ff     	sub	sp, sp, #0x110
@@ -511,13 +529,16 @@ ffff000040097504: d65f03c0     	ret
 
 ffff000040097200 <aarch64_user_syscall>:
 ffff000040097230: 94000034     	bl	0xffff000040097300 <syscall_dispatch>
-ffff000040097234: 940002a3     	bl	0xffff000040097cc0 <aarch64_do_signal_delivery>
-ffff000040097238: d65f03c0     	ret
+ffff000040097234: 52800021     	mov	w1, #0x1
+ffff000040097238: 94003432     	bl	0xffff0000400a4300 <context_run_return_work>
+ffff00004009723c: d65f03c0     	ret
 
 ffff0000400a3e00 <aarch64_user_task_sync>:
 ffff0000400a3e38: 94000df2     	bl	0xffff000040097600 <aarch64_user_vm_fault>
-ffff0000400a3e40: 17fffff0     	b	0xffff000040097200 <aarch64_user_syscall>
-ffff0000400a3e44: d65f03c0     	ret
+ffff0000400a3e40: 52800021     	mov	w1, #0x1
+ffff0000400a3e44: 9400012f     	bl	0xffff0000400a4300 <context_run_return_work>
+ffff0000400a3e48: 17fffff0     	b	0xffff000040097200 <aarch64_user_syscall>
+ffff0000400a3e4c: d65f03c0     	ret
 
 ffff000040097600 <aarch64_user_vm_fault>:
 ffff000040097604: 94000047     	bl	0xffff000040097720 <user_vm_cow_fault>
@@ -651,8 +672,13 @@ ffff0000400a3c20: 52809008     	mov	w8, #0x480      // =1152
 ffff0000400a3c24: 910023e0     	add	x0, sp, #0x8
 ffff0000400a3c28: aa1303e1     	mov	x1, x19
 ffff0000400a3c2c: f90017e8     	str	x8, [sp, #0x28]
+ffff0000400a3c2e: 940001f4     	bl	0xffff0000400a4400 <aarch64_vm_irq_enter>
 ffff0000400a3c30: 97ffe506     	bl	0xffff000040094104 <arch_intr_dispatch>
-ffff0000400a3c34: a9447bfd     	ldp	x29, x30, [sp, #0x40]
+ffff0000400a3c34: 940001fb     	bl	0xffff0000400a4420 <aarch64_vm_irq_leave>
+ffff0000400a3c38: 2a1f03e1     	mov	w1, wzr
+ffff0000400a3c3c: aa1303e0     	mov	x0, x19
+ffff0000400a3c40: 940001b0     	bl	0xffff0000400a4300 <context_run_return_work>
+ffff0000400a3c44: a9447bfd     	ldp	x29, x30, [sp, #0x40]
 ffff0000400a3c38: f9402bf3     	ldr	x19, [sp, #0x50]
 ffff0000400a3c3c: 910183ff     	add	sp, sp, #0x60
 ffff0000400a3c40: d65f03c0     	ret
@@ -720,10 +746,36 @@ def _phase2_world():
     # Restore-only and facade label are identical-address aliases, not separate blocks.
     nm += f"{address('RESTORE_ALL'):x} T x86_intr_restore_only\n"
     nm += f"{address('RESTORE_ALL'):x} T arch_context_restore_frame\n"
+    addresses["arch_context_restore_frame"] = address("RESTORE_ALL")
     block("ret_from_exception", [branch("jmp", "RESTORE_ALL")])
     block("arch_task_prepare_user_entry", ["retq"])
     block("spawn_user_task", [branch("callq", "arch_task_prepare_user_entry"), "retq"])
     block("do_fork", [branch("callq", "arch_task_prepare_user_entry"), "retq"])
+    block("arch_context_run_deferred_work", ["retq"])
+    block("arch_context_reschedule_return", ["retq"])
+    block("arch_do_signal_delivery", ["retq"])
+    block("arch_context_deliver_return_signals", [branch("callq", "arch_do_signal_delivery"), "retq"])
+    block("context_run_return_work", [
+        branch("callq", "arch_context_run_deferred_work"),
+        branch("callq", "arch_context_reschedule_return"),
+        branch("callq", "arch_context_deliver_return_signals"),
+        "retq",
+    ])
+    block("ret_from_intr", [
+        "cld",
+        "movq %rsp, %rbx",
+        "movq %rbx, %rdi",
+        "movl $0x0, %esi",
+        "andq $-0x10, %rsp",
+        branch("callq", "context_run_return_work"),
+        "movq %rbx, %rsp",
+        branch("jmp", "arch_context_restore_frame"),
+    ])
+    block("do_system_call", [
+        "movl $0x1, %esi",
+        branch("callq", "context_run_return_work"),
+        "retq",
+    ])
     for vector in IRQ_VECTORS:
         name = f"IRQ{vector-32}_interrupt" if (vector < 0x38 or vector == 0x39 or (0x42 <= vector <= 0x7f)) else {0x38:"lapic_timer_stub", 0x40:"_intr_stub_tlb", 0x41:"_intr_stub_resched", 0xff:"lapic_spurious_stub"}[vector]
         target = "arch_irq_dispatch" if (vector < 0x38 or vector == 0x39 or (0x42 <= vector <= 0x7f)) else "generic_intr_dispatch" if vector in (0x40, 0x41) else "x86_irq_entry"
@@ -1519,7 +1571,7 @@ class IntrDispatchAuditEl0UserTaskTests(IntrDispatchAuditFixture):
     def test_native_syscall_edge_missing_fails(self):
         # The formal SVC handler no longer reaches the native entry.
         self.stage_a64(disasm_text=_mutate(
-            A64_DISASM, 0xFFFF0000400A3E40,
+            A64_DISASM, 0xFFFF0000400A3E48,
             "b\t0xffff000040097200 <aarch64_user_syscall>",
             "b\t0xffff0000400a2bd0 <aarch64_el1_sync_fatal>"))
         errors = self.audit()
@@ -1833,11 +1885,14 @@ class IntrDispatchAuditScenarioTests(IntrDispatchAuditFixture):
 
     def test_aarch64_user_syscall_missing_signal_delivery_edge_fails(self):
         self.stage_a64(disasm_text=_mutate(
-            A64_DISASM, 0xFFFF000040097234,
-            "bl\t0xffff000040097cc0 <aarch64_do_signal_delivery>",
+            A64_DISASM, 0xFFFF000040097238,
+            "bl\t0xffff0000400a4300 <context_run_return_work>",
             "nop"))
         errors = self.audit()
-        self.assertTrue(any("aarch64_do_signal_delivery" in e for e in errors), errors)
+        self.assertTrue(
+            any("aarch64_user_syscall" in e or "context_run_return_work" in e for e in errors),
+            errors,
+        )
 
     def test_missing_syscall_strnlen_user_fails(self):
         self.stage_a64(nm_text=A64_NM.replace(
@@ -2118,6 +2173,157 @@ class InstalledSurfaceTests(IntrDispatchAuditFixture):
             any("restore" in e for e in self.audit()),
             "aarch64 restore frame missing GPR ldp must fail",
         )
+
+    def test_return_work_binding_types(self):
+        # x86_64: deferred must be T (not W); required hooks must be T (not W)
+        for sym, from_t, to_t in (
+            ("arch_context_run_deferred_work", "T", "W"),
+            ("arch_context_reschedule_return", "T", "W"),
+            ("arch_context_deliver_return_signals", "T", "W"),
+        ):
+            with self.subTest(arch="x86_64", sym=sym):
+                bad_nm = X86_NM.replace(f" {from_t} {sym}\n", f" {to_t} {sym}\n")
+                self.assertNotEqual(bad_nm, X86_NM)
+                self.stage_x86(nm_text=bad_nm)
+                self.assertTrue(any(sym in e for e in self.audit()))
+
+        # aarch64: deferred must be W (not T); required hooks must be T (not W)
+        for sym, from_t, to_t in (
+            ("arch_context_run_deferred_work", "W", "T"),
+            ("arch_context_reschedule_return", "T", "W"),
+            ("arch_context_deliver_return_signals", "T", "W"),
+        ):
+            with self.subTest(arch="aarch64", sym=sym):
+                bad_nm = A64_NM.replace(f" {from_t} {sym}\n", f" {to_t} {sym}\n")
+                self.assertNotEqual(bad_nm, A64_NM)
+                self.stage_a64(nm_text=bad_nm)
+                self.assertTrue(any(sym in e for e in self.audit()))
+
+    def test_return_work_orchestrator_signal_edge_missing(self):
+        from qemutests.intr_dispatch_audit import Instr
+        self.check_mutation(
+            "context_run_return_work",
+            lambda b: b.__setitem__(slice(None), [i for i in b if "arch_context_deliver_return_signals" not in i.text]),
+            "arch_context_deliver_return_signals",
+        )
+
+        bad_a64 = A64_DISASM.replace(
+            "ffff0000400a4308: 9400002e     \tbl\t0xffff0000400a43c0 <arch_context_deliver_return_signals>\n",
+            "",
+        )
+        self.stage_a64(disasm_text=bad_a64)
+        self.assertTrue(any("arch_context_deliver_return_signals" in e for e in self.audit()))
+
+    def test_x86_ret_from_intr_adapter_mutations(self):
+        from qemutests.intr_dispatch_audit import Instr
+        # Missing cld
+        self.check_mutation(
+            "ret_from_intr",
+            lambda b: b.__setitem__(slice(None), [i for i in b if i.text != "cld"]),
+            "ret_from_intr",
+        )
+        # Missing RSP restore
+        self.check_mutation(
+            "ret_from_intr",
+            lambda b: b.__setitem__(slice(None), [i for i in b if i.text != "movq %rbx, %rsp"]),
+            "ret_from_intr",
+        )
+        # Wrong ESI (1 instead of 0)
+        self.check_mutation(
+            "ret_from_intr",
+            lambda b: b.__setitem__(slice(None), [
+                Instr(i.addr, "movl $0x1, %esi") if "%esi" in i.text else i
+                for i in b
+            ]),
+            "ret_from_intr",
+        )
+        # Wrong RDI
+        self.check_mutation(
+            "ret_from_intr",
+            lambda b: b.__setitem__(slice(None), [
+                Instr(i.addr, "movq $0x0, %rdi") if "%rdi" in i.text else i
+                for i in b
+            ]),
+            "ret_from_intr",
+        )
+        # Forbidden cli / sti
+        for op in ("cli", "sti"):
+            with self.subTest(op=op):
+                self.check_mutation(
+                    "ret_from_intr",
+                    lambda b, op=op: b.insert(1, Instr(0, op)),
+                    "ret_from_intr",
+                )
+
+    def test_x86_syscall_wrong_return_mode_fails(self):
+        from qemutests.intr_dispatch_audit import Instr
+        self.check_mutation(
+            "do_system_call",
+            lambda b: b.__setitem__(slice(None), [
+                Instr(i.addr, "movl $0x0, %esi") if "%esi" in i.text else i
+                for i in b
+            ]),
+            "do_system_call",
+        )
+
+    def test_aarch64_el0_irq_tail_and_mode_mutations(self):
+        # Missing context_run_return_work call
+        bad_missing = A64_DISASM.replace(
+            "ffff0000400a3c40: 940001b0     \tbl\t0xffff0000400a4300 <context_run_return_work>\n",
+            "",
+        )
+        self.stage_a64(disasm_text=bad_missing)
+        self.assertTrue(any("aarch64_el0_irq" in e for e in self.audit()))
+
+        # Wrong mode (1 instead of 0)
+        bad_mode = A64_DISASM.replace(
+            "ffff0000400a3c38: 2a1f03e1     \tmov\tw1, wzr",
+            "ffff0000400a3c38: 52800021     \tmov\tw1, #0x1",
+        )
+        self.stage_a64(disasm_text=bad_mode)
+        self.assertTrue(any("aarch64_el0_irq" in e for e in self.audit()))
+
+    def test_el0_irq_work_before_dispatch(self):
+        bad = A64_DISASM.replace(
+            "ffff0000400a3c30: 97ffe506     \tbl\t0xffff000040094104 <arch_intr_dispatch>\n"
+            "ffff0000400a3c34: 940001fb     \tbl\t0xffff0000400a4420 <aarch64_vm_irq_leave>\n"
+            "ffff0000400a3c38: 2a1f03e1     \tmov\tw1, wzr\n"
+            "ffff0000400a3c3c: aa1303e0     \tmov\tx0, x19\n"
+            "ffff0000400a3c40: 940001b0     \tbl\t0xffff0000400a4300 <context_run_return_work>",
+            "ffff0000400a3c30: 2a1f03e1     \tmov\tw1, wzr\n"
+            "ffff0000400a3c34: aa1303e0     \tmov\tx0, x19\n"
+            "ffff0000400a3c38: 940001b0     \tbl\t0xffff0000400a4300 <context_run_return_work>\n"
+            "ffff0000400a3c3c: 97ffe506     \tbl\t0xffff000040094104 <arch_intr_dispatch>\n"
+            "ffff0000400a3c40: 940001fb     \tbl\t0xffff0000400a4420 <aarch64_vm_irq_leave>",
+        )
+        self.stage_a64(disasm_text=bad)
+        self.assertTrue(any("aarch64_el0_irq" in e for e in self.audit()))
+
+    def test_el0_irq_work_before_vm_leave(self):
+        bad = A64_DISASM.replace(
+            "ffff0000400a3c34: 940001fb     \tbl\t0xffff0000400a4420 <aarch64_vm_irq_leave>\n"
+            "ffff0000400a3c38: 2a1f03e1     \tmov\tw1, wzr\n"
+            "ffff0000400a3c3c: aa1303e0     \tmov\tx0, x19\n"
+            "ffff0000400a3c40: 940001b0     \tbl\t0xffff0000400a4300 <context_run_return_work>",
+            "ffff0000400a3c34: 2a1f03e1     \tmov\tw1, wzr\n"
+            "ffff0000400a3c38: aa1303e0     \tmov\tx0, x19\n"
+            "ffff0000400a3c3c: 940001b0     \tbl\t0xffff0000400a4300 <context_run_return_work>\n"
+            "ffff0000400a3c40: 940001fb     \tbl\t0xffff0000400a4420 <aarch64_vm_irq_leave>",
+        )
+        self.stage_a64(disasm_text=bad)
+        self.assertTrue(any("aarch64_el0_irq" in e for e in self.audit()))
+
+    def test_aarch64_signal_only_callers_wrong_mode_fails(self):
+        for label, addr, line in (
+            ("aarch64_user_first_entry", 0xFFFF0000400A4200, "ffff0000400a4200: 52800021     \tmov\tw1, #0x1"),
+            ("aarch64_user_syscall", 0xFFFF000040097234, "ffff000040097234: 52800021     \tmov\tw1, #0x1"),
+            ("aarch64_user_task_sync", 0xFFFF0000400A3E40, "ffff0000400a3e40: 52800021     \tmov\tw1, #0x1"),
+        ):
+            with self.subTest(caller=label):
+                bad = A64_DISASM.replace(line, f"{addr:x}: 2a1f03e1     \tmov\tw1, wzr")
+                self.assertNotEqual(bad, A64_DISASM)
+                self.stage_a64(disasm_text=bad)
+                self.assertTrue(any(label in e for e in self.audit()))
 
 
 if __name__ == "__main__":

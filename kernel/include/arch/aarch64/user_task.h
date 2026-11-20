@@ -167,11 +167,6 @@ uint64_t aarch64_user_task_frame(const struct task_struct *tsk);
  * no TLS, so every user entry starts from a clean slate. */
 void aarch64_user_clear_tls(void);
 
-/* Formal EL0 IRQ return tail: checks owned frame and local schedulable
- * condition, services need_resched via schedule() once, re-verifies
- * current task/frame/root, and delivers pending user signals. */
-void aarch64_user_irq_return(struct pt_regs *regs);
-
 /* The M4 internal SVC selector.  The immediate travels in
  * ESR_EL1.ISS[15:0] for an SVC taken from AArch64 EL0. */
 #define AARCH64_USER_SVC_YIELD 0x4d40
