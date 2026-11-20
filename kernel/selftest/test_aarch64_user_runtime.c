@@ -12,6 +12,7 @@
 
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/user_image.h>
+#include <arch/aarch64/user_mm.h>
 #include <arch/aarch64/user_task.h>
 #include <arch/aarch64/user_vm.h>
 #include <arch/aarch64/vmm_gate.h>
@@ -58,6 +59,15 @@ static int g_reap_count;
 static int g_reap_pid[URT_MAX_REAPS];
 static uint64_t g_reap_status[URT_MAX_REAPS];
 
+static uint8_t g_asid_a;
+static uint8_t g_asid_b;
+static uint64_t g_clean_switches;
+static uint64_t g_full_flushes;
+static uint64_t g_event_seq;
+static uint64_t g_uninstall_seq[256];
+static uint64_t g_tlbi_seq[256];
+static uint64_t g_release_seq[256];
+
 static int urt_role_index(const task_t *tsk)
 {
     if (!tsk || !aarch64_user_task_is_user(tsk))
@@ -71,11 +81,13 @@ static int urt_role_index(const task_t *tsk)
     return -1;
 }
 
+#ifdef AARCH64_USER_RUNTIME_CASE_IRQ
 static bool urt_a_resume_cond(struct task_struct *t)
 {
     (void)t;
     return __atomic_load_n(&g_b_sigreturn_done, __ATOMIC_ACQUIRE) != 0;
 }
+#endif
 
 void aarch64_user_runtime_test_note_switch(const struct task_struct *prev,
                                            const struct task_struct *next)
@@ -83,6 +95,52 @@ void aarch64_user_runtime_test_note_switch(const struct task_struct *prev,
     if (!g_urt_active || prev == next)
         return;
     __atomic_fetch_add(&g_switch_seq, 1, __ATOMIC_RELEASE);
+}
+
+void aarch64_user_runtime_test_note_ttbr_switch(uint64_t old_ttbr0,
+                                                uint64_t new_ttbr0,
+                                                bool full_flush)
+{
+    if (!g_urt_active)
+        return;
+
+    uint8_t old_asid = (uint8_t)(old_ttbr0 >> 48);
+    uint8_t new_asid = (uint8_t)(new_ttbr0 >> 48);
+
+    if (old_asid != 0 && old_asid != new_asid) {
+        uint64_t seq = __atomic_add_fetch(&g_event_seq, 1, __ATOMIC_ACQ_REL);
+        __atomic_store_n(&g_uninstall_seq[old_asid], seq, __ATOMIC_RELEASE);
+    }
+
+    if (new_asid != 0) {
+        task_t *cur = arch_current_task();
+        int idx = urt_role_index(cur);
+        if (idx == 0 && g_asid_a == 0)
+            g_asid_a = new_asid;
+        else if (idx == 1 && g_asid_b == 0)
+            g_asid_b = new_asid;
+    }
+
+    if (full_flush)
+        __atomic_fetch_add(&g_full_flushes, 1, __ATOMIC_RELAXED);
+    else if (old_asid != 0 || new_asid != 0)
+        __atomic_fetch_add(&g_clean_switches, 1, __ATOMIC_RELAXED);
+}
+
+void aarch64_user_runtime_test_note_asid_tlbi(uint8_t asid)
+{
+    if (!g_urt_active || asid == 0)
+        return;
+    uint64_t seq = __atomic_add_fetch(&g_event_seq, 1, __ATOMIC_ACQ_REL);
+    __atomic_store_n(&g_tlbi_seq[asid], seq, __ATOMIC_RELEASE);
+}
+
+void aarch64_user_runtime_test_note_asid_release(uint8_t asid)
+{
+    if (!g_urt_active || asid == 0)
+        return;
+    uint64_t seq = __atomic_add_fetch(&g_event_seq, 1, __ATOMIC_ACQ_REL);
+    __atomic_store_n(&g_release_seq[asid], seq, __ATOMIC_RELEASE);
 }
 
 void aarch64_user_runtime_test_timer_eoi(uint32_t intid, struct pt_regs *regs)
@@ -99,12 +157,14 @@ void aarch64_user_runtime_test_timer_eoi(uint32_t intid, struct pt_regs *regs)
 
     __atomic_fetch_add(&g_eoi_samples[idx], 1, __ATOMIC_RELAXED);
 
+#ifdef AARCH64_USER_RUNTIME_CASE_IRQ
     if (idx == 1 &&
         __atomic_load_n(&g_a_edit_paused, __ATOMIC_ACQUIRE) != 0 &&
         __atomic_load_n(&g_b_sig_injected, __ATOMIC_ACQUIRE) == 0) {
         __atomic_store_n(&g_b_sig_injected, 1, __ATOMIC_RELEASE);
         __atomic_fetch_or(&cur->signal, (1ULL << URT_SIGUSR1), __ATOMIC_RELEASE);
     }
+#endif
 }
 
 void aarch64_user_runtime_test_irq_sched_before(struct task_struct *tsk,
@@ -144,6 +204,7 @@ void aarch64_user_runtime_test_irq_sched_after(struct task_struct *tsk,
 void aarch64_user_runtime_test_vm_edit_pause(struct mm_struct *mm)
 {
     (void)mm;
+#ifdef AARCH64_USER_RUNTIME_CASE_IRQ
     if (!g_urt_active)
         return;
 
@@ -171,6 +232,7 @@ void aarch64_user_runtime_test_vm_edit_pause(struct mm_struct *mm)
         owner->vm.edit_active && tpidr == 0) {
         g_a_paused_root_ok = true;
     }
+#endif
 }
 
 void aarch64_user_runtime_test_vm_edit_after(struct mm_struct *mm)
@@ -257,16 +319,26 @@ static uint64_t urt_worker(uint64_t arg)
     __atomic_store_n(&g_a_edit_paused, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&g_b_sig_injected, 0, __ATOMIC_RELEASE);
     __atomic_store_n(&g_b_sigreturn_done, 0, __ATOMIC_RELEASE);
+#ifdef AARCH64_USER_RUNTIME_CASE_IRQ
     g_vm_pause_done = false;
     g_a_paused_root_ok = false;
     g_a_post_edit_checked = false;
     g_a_post_edit_ok = false;
+#endif
     g_a_paused_task = NULL;
     g_a_saved_root_pa = 0;
     g_a_saved_tpidr = 0;
     __atomic_store_n(&g_reap_count, 0, __ATOMIC_RELEASE);
     memset(g_reap_pid, 0, sizeof(g_reap_pid));
     memset(g_reap_status, 0, sizeof(g_reap_status));
+    g_asid_a = 0;
+    g_asid_b = 0;
+    __atomic_store_n(&g_clean_switches, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_full_flushes, 0, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_event_seq, 0, __ATOMIC_RELEASE);
+    memset(g_uninstall_seq, 0, sizeof(g_uninstall_seq));
+    memset(g_tlbi_seq, 0, sizeof(g_tlbi_seq));
+    memset(g_release_seq, 0, sizeof(g_release_seq));
 
     uint64_t alloc_before = pmm_probe_4k_allocated_count();
     aarch64_sched_observer_begin(0, URT_OBS_GEN);
@@ -278,11 +350,17 @@ static uint64_t urt_worker(uint64_t arg)
     aarch64_sched_set_reap_observer(urt_reap_observe);
     g_urt_active = true;
 
+#ifdef AARCH64_USER_RUNTIME_CASE_ASID
+#define URT_CASE_NAME "asid"
+#else
+#define URT_CASE_NAME "irq"
+#endif
+
     int rc = 1;
     g_pid_a = aarch64_user_task_spawn(catalog, 1, 0, "user_rt_a");
     if (g_pid_a < 0) {
-        log_err("[user-runtime] FAIL case=irq reason=spawn_failed rc=%d\n",
-                g_pid_a);
+        log_err("[user-runtime] FAIL case=%s reason=spawn_failed rc=%d\n",
+                URT_CASE_NAME, g_pid_a);
         goto out;
     }
 
@@ -311,20 +389,86 @@ static uint64_t urt_worker(uint64_t arg)
     uint64_t roots = aarch64_pt_published_root_count();
 
     if (s_rel != 2 || t_rel != 2 || obs_rc != 0) {
-        log_err("[user-runtime] FAIL case=irq reason=resource_mismatch "
+        log_err("[user-runtime] FAIL case=%s reason=resource_mismatch "
                 "s_rel=%lu t_rel=%lu obs_rc=%d\n",
+                URT_CASE_NAME,
                 (unsigned long)s_rel, (unsigned long)t_rel, obs_rc);
         goto out;
     }
     if (!urt_saw_status(0x11ULL << 8) || !urt_saw_status(0x22ULL << 8)) {
-        log_err("[user-runtime] FAIL case=irq reason=exit_status_mismatch "
-                "reaps=%d\n", g_reap_count);
+        log_err("[user-runtime] FAIL case=%s reason=exit_status_mismatch "
+                "reaps=%d\n", URT_CASE_NAME, g_reap_count);
         for (int i = 0; i < g_reap_count && i < URT_MAX_REAPS; i++) {
             log_err("[user-runtime] reap[%d] pid=%d status=0x%lx\n",
                     i, g_reap_pid[i], (unsigned long)g_reap_status[i]);
         }
         goto out;
     }
+#ifdef AARCH64_USER_RUNTIME_CASE_ASID
+    if (g_asid_a == 0 || g_asid_b == 0 || g_asid_a == g_asid_b) {
+        log_err("[user-runtime] FAIL case=asid reason=bad_asids "
+                "asid_a=%u asid_b=%u\n", g_asid_a, g_asid_b);
+        goto out;
+    }
+    if (g_clean_switches < 2 || g_full_flushes != 0) {
+        log_err("[user-runtime] FAIL case=asid reason=switch_flush "
+                "clean=%lu full=%lu\n",
+                (unsigned long)g_clean_switches,
+                (unsigned long)g_full_flushes);
+        goto out;
+    }
+    if (!(g_uninstall_seq[g_asid_a] > 0 &&
+          g_uninstall_seq[g_asid_a] < g_tlbi_seq[g_asid_a] &&
+          g_tlbi_seq[g_asid_a] < g_release_seq[g_asid_a]) ||
+        !(g_uninstall_seq[g_asid_b] > 0 &&
+          g_uninstall_seq[g_asid_b] < g_tlbi_seq[g_asid_b] &&
+          g_tlbi_seq[g_asid_b] < g_release_seq[g_asid_b])) {
+        log_err("[user-runtime] FAIL case=asid reason=destroy_order "
+                "a=(%lu,%lu,%lu) b=(%lu,%lu,%lu)\n",
+                (unsigned long)g_uninstall_seq[g_asid_a],
+                (unsigned long)g_tlbi_seq[g_asid_a],
+                (unsigned long)g_release_seq[g_asid_a],
+                (unsigned long)g_uninstall_seq[g_asid_b],
+                (unsigned long)g_tlbi_seq[g_asid_b],
+                (unsigned long)g_release_seq[g_asid_b]);
+        goto out;
+    }
+
+    mm_t *probe_mm = NULL;
+    if (aarch64_user_mm_create(&probe_mm) != 0 || !probe_mm) {
+        log_err("[user-runtime] FAIL case=asid reason=reuse_create_failed\n");
+        goto out;
+    }
+    uint8_t reused_asid = (uint8_t)(aarch64_user_ttbr0_value(probe_mm) >> 48);
+    if (aarch64_user_mm_destroy(probe_mm) != 0) {
+        log_err("[user-runtime] FAIL case=asid reason=reuse_destroy_failed\n");
+        goto out;
+    }
+    if (reused_asid == 0 ||
+        (reused_asid != g_asid_a && reused_asid != g_asid_b)) {
+        log_err("[user-runtime] FAIL case=asid reason=not_reused "
+                "reused=%u asid_a=%u asid_b=%u\n",
+                reused_asid, g_asid_a, g_asid_b);
+        goto out;
+    }
+    alloc_after = pmm_probe_4k_allocated_count();
+    if (roots != 1 || alloc_after != alloc_before) {
+        log_err("[user-runtime] FAIL case=asid reason=leak roots=%lu "
+                "alloc_before=%lu alloc_after=%lu\n",
+                (unsigned long)roots,
+                (unsigned long)alloc_before,
+                (unsigned long)alloc_after);
+        goto out;
+    }
+
+    log_info("[user-runtime] asid-samples asid_a=%u asid_b=%u "
+             "clean_switches=%lu full_flushes=%lu reused=%u\n",
+             g_asid_a, g_asid_b,
+             (unsigned long)g_clean_switches,
+             (unsigned long)g_full_flushes,
+             reused_asid);
+    log_info("[user-runtime] PASS case=asid cpu_mask=1\n");
+#else
     if (g_eoi_samples[0] == 0 || g_eoi_samples[1] == 0 ||
         g_irq_switch_resume_samples[0] == 0 ||
         g_irq_switch_resume_samples[1] == 0) {
@@ -361,6 +505,7 @@ static uint64_t urt_worker(uint64_t arg)
              (unsigned long)g_irq_switch_resume_samples[0],
              (unsigned long)g_irq_switch_resume_samples[1]);
     log_info("[user-runtime] PASS case=irq cpu_mask=1\n");
+#endif
     rc = 0;
 
 out:
@@ -382,7 +527,11 @@ void test_aarch64_user_runtime_run(void)
         kthread_yield();
 
     int rc = g_urt_done ? g_urt_rc : 1;
+#ifdef AARCH64_USER_RUNTIME_CASE_ASID
+    selftest_record_late("aarch64_user_runtime_asid", rc);
+#else
     selftest_record_late("aarch64_user_runtime_irq", rc);
+#endif
 }
 
 #endif /* AARCH64_USER_RUNTIME_TEST */

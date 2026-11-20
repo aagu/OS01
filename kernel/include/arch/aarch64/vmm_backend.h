@@ -22,6 +22,7 @@
 #define AARCH64_PT_AP_USER      UINT64_C(0x040)   /* AP[1] bit 6: EL0 access */
 #define AARCH64_PT_AP_RO        UINT64_C(0x080)   /* AP[2] bit 7: read-only */
 #define AARCH64_PT_DESC_AF      UINT64_C(0x400)   /* bit 10 */
+#define AARCH64_PT_DESC_NG      UINT64_C(0x800)   /* bit 11: non-global */
 #define AARCH64_PT_DESC_PXN     UINT64_C(0x20000000000000)  /* bit 53 */
 #define AARCH64_PT_DESC_UXN     UINT64_C(0x40000000000000)  /* bit 54 */
 

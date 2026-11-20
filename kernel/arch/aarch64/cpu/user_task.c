@@ -29,6 +29,7 @@
 #include <arch/aarch64/task_arch.h>
 #include <arch/aarch64/fp.h>
 #include <arch/aarch64/user_image.h>
+#include <arch/aarch64/user_mm.h>
 #include <arch/aarch64/user_task.h>
 #include <arch/aarch64/exec.h>
 #include <arch/aarch64/user_vm.h>
@@ -43,6 +44,8 @@
 #include <intr/dispatch.h>
 #include <kernel.h>               /* container_of */
 #include <log/log.h>
+#include <memory/memory.h>
+#include <memory/pmm.h>
 #include <memory/slab.h>
 #include <memory/uaccess.h>
 #include <percpu/percpu.h>
@@ -128,11 +131,14 @@ void aarch64_user_task_test_note_image(bool ok)
 }
 #endif /* AARCH64_EL0_TEST */
 
-/* The root the BSP booted with: the kernel root a kernel task or the
- * idle task gets back when a user task gives the CPU up. */
+/* Shared immutable zero-entry runtime ASID-0 TTBR0 root installed by
+ * aarch64_user_runtime_init(). */
 static uint64_t g_kernel_root_pa;
-/* The root currently installed in TTBR0_EL1. */
+/* Full TTBR0_EL1 value (PA | (ASID << 48)) and split fields currently
+ * live in TTBR0_EL1. */
+static uint64_t g_live_ttbr0;
 static uint64_t g_live_root_pa;
+static uint8_t  g_live_asid;
 /* Whether g_live_root_pa is a user root: only a user root is published
  * in the M3 registry and only a user root is revocable. */
 static bool g_live_root_is_user;
@@ -244,11 +250,31 @@ struct mm_struct *aarch64_user_current_mm(void)
 
 void aarch64_user_runtime_init(void)
 {
-    uint64_t ttbr0;
-    __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
-    g_kernel_root_pa = ttbr0 & AARCH64_TTBR_BASE_MASK;
-    g_live_root_pa = g_kernel_root_pa;
+    uint64_t empty_pa = alloc_4k_page();
+    if (!empty_pa) {
+        log_err("[user-task] FATAL: failed to allocate empty TTBR0 root\n");
+        for (;;)
+            arch_cpu_halt();
+    }
+    __builtin_memset((void *)Phy_To_Virt(empty_pa), 0, PAGE_4K_SIZE);
+
+    g_kernel_root_pa = empty_pa;
+    g_live_ttbr0 = empty_pa;
+    g_live_root_pa = empty_pa;
+    g_live_asid = 0;
     g_live_root_is_user = false;
+
+    /* Install the shared immutable empty ASID-0 TTBR0 root with a local
+     * full TLB invalidation on first install; all subsequent kernel and
+     * device accesses must route via TTBR1. */
+    __asm__ volatile(
+        "dsb ishst\n\t"
+        "msr ttbr0_el1, %0\n\t"
+        "isb\n\t"
+        "tlbi vmalle1\n\t"
+        "dsb ish\n\t"
+        "isb"
+        :: "r"(g_kernel_root_pa) : "memory");
 
     /* Enable FP/SIMD for EL0 and EL1 (CPACR_EL1.FPEN = 0b11).  The
      * kernel is compiled with -mgeneral-regs-only so it never touches
@@ -293,43 +319,86 @@ void aarch64_user_vm_restore_tls(uint64_t tpidr_el0, uint64_t tpidrro_el0)
                      :: "r"(tpidrro_el0) : "memory");
 }
 
-void aarch64_user_install_root(uint64_t root_pa)
+void aarch64_user_install_mm(const struct mm_struct *mm)
 {
-    if (!root_pa || root_pa == g_live_root_pa)
+    if (!mm || !mm->pgdir)
+        return;
+
+    uint64_t target_ttbr0 = aarch64_user_ttbr0_value(mm);
+    if (!target_ttbr0)
+        vmm_gate_violation("aarch64_user_install_mm: unregistered mm");
+
+    uint64_t target_pa = target_ttbr0 & AARCH64_TTBR_BASE_MASK;
+    uint8_t target_asid = (uint8_t)(target_ttbr0 >> 48);
+
+    if (g_live_root_is_user && g_live_ttbr0 == target_ttbr0)
         return;
 
     /* Publish BEFORE the install: a root that is not published may not
      * be installed. */
-    if (!aarch64_pt_root_publish(root_pa))
-        vmm_gate_violation("aarch64_user_install_root: root publish failed");
+    if (!aarch64_pt_root_publish(target_pa))
+        vmm_gate_violation("aarch64_user_install_mm: root publish failed");
 
-    __asm__ volatile("dsb ishst\n\tmsr ttbr0_el1, %0\n\tisb\n\t"
-                     "tlbi vmalle1\n\tdsb ish\n\tisb"
-                     :: "r"(root_pa) : "memory");
+    bool need_full_flush =
+        (target_asid == 0) || (g_live_root_is_user && g_live_asid == 0);
+
+    if (need_full_flush) {
+        __asm__ volatile("dsb ishst\n\tmsr ttbr0_el1, %0\n\tisb\n\t"
+                         "tlbi vmalle1\n\tdsb ish\n\tisb"
+                         :: "r"(target_ttbr0) : "memory");
+    } else {
+        __asm__ volatile("dsb ishst\n\tmsr ttbr0_el1, %0\n\tisb"
+                         :: "r"(target_ttbr0) : "memory");
+    }
+
+#ifdef AARCH64_USER_RUNTIME_TEST
+    extern void aarch64_user_runtime_test_note_ttbr_switch(
+        uint64_t old_ttbr0, uint64_t new_ttbr0, bool full_flush);
+    aarch64_user_runtime_test_note_ttbr_switch(g_live_ttbr0, target_ttbr0,
+                                               need_full_flush);
+#endif
 
     /* The old user root is revoked only AFTER the new one is
      * installed: a normal single-core switch keeps at most two user
      * roots published at a time. */
-    if (g_live_root_is_user)
+    if (g_live_root_is_user && g_live_root_pa != target_pa)
         aarch64_pt_root_unpublish_local(g_live_root_pa);
 
-    g_live_root_pa = root_pa;
+    g_live_ttbr0 = target_ttbr0;
+    g_live_root_pa = target_pa;
+    g_live_asid = target_asid;
     g_live_root_is_user = true;
 }
 
 void aarch64_user_restore_kernel_root(void)
 {
-    if (g_live_root_pa == g_kernel_root_pa && !g_live_root_is_user)
+    if (!g_live_root_is_user && g_live_ttbr0 == g_kernel_root_pa)
         return;
 
-    __asm__ volatile("dsb ishst\n\tmsr ttbr0_el1, %0\n\tisb\n\t"
-                     "tlbi vmalle1\n\tdsb ish\n\tisb"
-                     :: "r"(g_kernel_root_pa) : "memory");
+    bool need_full_flush = (g_live_root_is_user && g_live_asid == 0);
+
+    if (need_full_flush) {
+        __asm__ volatile("dsb ishst\n\tmsr ttbr0_el1, %0\n\tisb\n\t"
+                         "tlbi vmalle1\n\tdsb ish\n\tisb"
+                         :: "r"(g_kernel_root_pa) : "memory");
+    } else {
+        __asm__ volatile("dsb ishst\n\tmsr ttbr0_el1, %0\n\tisb"
+                         :: "r"(g_kernel_root_pa) : "memory");
+    }
+
+#ifdef AARCH64_USER_RUNTIME_TEST
+    extern void aarch64_user_runtime_test_note_ttbr_switch(
+        uint64_t old_ttbr0, uint64_t new_ttbr0, bool full_flush);
+    aarch64_user_runtime_test_note_ttbr_switch(g_live_ttbr0, g_kernel_root_pa,
+                                               need_full_flush);
+#endif
 
     if (g_live_root_is_user)
         aarch64_pt_root_unpublish_local(g_live_root_pa);
 
+    g_live_ttbr0 = g_kernel_root_pa;
     g_live_root_pa = g_kernel_root_pa;
+    g_live_asid = 0;
     g_live_root_is_user = false;
 }
 
@@ -351,17 +420,15 @@ void aarch64_user_switch_mm(struct task_struct *prev,
 
     /* 2. Switch TTBR0 root.  Paused-edit tasks run on the kernel root
      *    until their original edit_end restores their user root. */
-    uint64_t next_root = g_kernel_root_pa;
+    uint64_t next_ttbr0 = g_kernel_root_pa;
     bool next_user_active = aarch64_user_task_is_user(next) &&
                             !aarch64_vm_task_editing(next);
-    if (next_user_active) {
-        const struct aarch64_user_task *owner = next->thread->user_task;
-        next_root = aarch64_user_image_root_pa(owner->image);
-    }
+    if (next_user_active)
+        next_ttbr0 = aarch64_user_ttbr0_value(next->mm);
 
-    if (next_root != g_live_root_pa) {
+    if (next_ttbr0 != g_live_ttbr0) {
         if (next_user_active)
-            aarch64_user_install_root(next_root);
+            aarch64_user_install_mm(next->mm);
         else
             aarch64_user_restore_kernel_root();
     }
@@ -615,7 +682,7 @@ static void aarch64_user_task_exec(pt_regs_t *regs)
     uint64_t old_root_pa = aarch64_user_image_root_pa(old_image);
 #endif
 
-    aarch64_user_install_root(aarch64_user_image_root_pa(image));
+    aarch64_user_install_mm(aarch64_user_image_mm(image));
 
     owner->image = image;
     owner->catalog_index = index;
@@ -753,7 +820,7 @@ int64_t arch_syscall_exec(void *arch_frame, const char *path,
     uint64_t old_root_pa = aarch64_user_image_root_pa(old_image);
 #endif
 
-    aarch64_user_install_root(aarch64_user_image_root_pa(image));
+    aarch64_user_install_mm(aarch64_user_image_mm(image));
 
     owner->image = image;
     owner->catalog_index = index;

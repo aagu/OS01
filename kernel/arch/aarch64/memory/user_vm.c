@@ -10,6 +10,7 @@
  */
 
 #include <arch/aarch64/page_table.h>
+#include <arch/aarch64/user_mm.h>
 #include <arch/aarch64/user_task.h>
 #include <arch/aarch64/user_vm.h>
 #include <arch/aarch64/user_vm_policy.h>  /* policy entry points */
@@ -140,6 +141,7 @@ int aarch64_vm_edit_begin(mm_t *mm)
     aarch64_user_vm_save_tls(&owner->vm.edit_tpidr_el0,
                              &owner->vm.edit_tpidrro_el0);
     aarch64_user_restore_kernel_root();
+    aarch64_user_mm_quiesce(mm);
     aarch64_user_clear_tls();
     owner->vm.edit_active = true;         /* mark before IRQs on */
     arch_local_irq_enable();              /* policy runs with IRQs */
@@ -155,7 +157,7 @@ void aarch64_vm_edit_end(void)
         return;
 
     arch_local_irq_disable();
-    aarch64_user_install_root(owner->vm.edit_root_pa); /* publish + install */
+    aarch64_user_install_mm(owner->vm.auth_mm); /* publish + install */
     aarch64_user_vm_restore_tls(owner->vm.edit_tpidr_el0,
                                 owner->vm.edit_tpidrro_el0);
     owner->vm.edit_active = false;

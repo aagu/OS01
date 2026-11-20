@@ -377,7 +377,7 @@ _test-aarch64-run-sched-tick:
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched-tick/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 
 ifneq ($(filter test-aarch64,$(MAKECMDGOALS))$(findstring _test-aarch64-prep-user-runtime,$(MAKECMDGOALS))$(findstring _test-aarch64-run-user-runtime,$(MAKECMDGOALS)),)
-USER_RUNTIME_CASES_VALID := irq
+USER_RUNTIME_CASES_VALID := irq asid
 ifeq ($(USER_RUNTIME_CASE),)
 USER_RUNTIME_CASE := irq
 endif

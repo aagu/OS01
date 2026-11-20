@@ -18,6 +18,7 @@
 #include <arch/mmu.h>                     /* Phy_To_Virt, ARCH_PAGE_OFFSET */
 #include <arch/spinlock.h>                /* IRQ-safe registration lock */
 #include <arch/aarch64/page_table.h>      /* AARCH64_TTBR_BASE_MASK */
+#include <arch/aarch64/user_asid.h>
 #include <arch/aarch64/vmm_backend.h>     /* AARCH64_PT_DESC_{VALID,TABLE} */
 #include <arch/aarch64/vmm_gate.h>        /* is_published, runtime gate */
 #include <arch/aarch64/user_mm.h>
@@ -31,6 +32,7 @@
 typedef struct user_mm_record {
     mm_t *mm;
     uint64_t root_pa;
+    uint8_t asid;
     struct user_mm_record *next;
 } user_mm_record_t;
 
@@ -164,6 +166,7 @@ int aarch64_user_mm_create(mm_t **out)
     }
     rec->mm = mm;
     rec->root_pa = root_pa;
+    rec->asid = aarch64_asid_alloc();
     rec->next = NULL;
 
     uint64_t daif = spin_lock_irqsave(&user_mm_records_lock);
@@ -219,7 +222,14 @@ int aarch64_user_mm_destroy(mm_t *mm)
     if (user_vm_has_metadata(mm))
         return -EBUSY;
 
-    /* Scan passed: revoke the registration. */
+    /* Scan passed: invalidate translations first, then unpublish/unregister,
+     * reclaim page tables, and return the ASID tag. */
+    uint8_t asid = rec->asid;
+    if (asid != 0)
+        aarch64_asid_release(asid);
+    else
+        aarch64_asid_tlbi(0);
+
     daif = spin_lock_irqsave(&user_mm_records_lock);
     user_mm_record_t **p = &user_mm_records;
     while (*p && *p != rec)
@@ -233,5 +243,56 @@ int aarch64_user_mm_destroy(mm_t *mm)
     user_mm_free_tables(root, 0);
 
     kfree(mm);
+    return 0;
+}
+
+uint64_t aarch64_user_ttbr0_value(const struct mm_struct *mm)
+{
+    if (!mm || !mm->pgdir)
+        return 0;
+
+    uint64_t ttbr0 = 0;
+    uint64_t daif = spin_lock_irqsave(&user_mm_records_lock);
+    for (user_mm_record_t *r = user_mm_records; r; r = r->next) {
+        if (r->mm == mm) {
+            ttbr0 = (r->root_pa & AARCH64_TTBR_BASE_MASK) |
+                    ((uint64_t)r->asid << 48);
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&user_mm_records_lock, daif);
+    return ttbr0;
+}
+
+int aarch64_user_mm_quiesce(struct mm_struct *mm)
+{
+    if (!mm || mm == &init_mm)
+        return -EINVAL;
+
+    int rc = aarch64_user_mm_runtime_check();
+    if (rc)
+        return rc;
+
+    uint64_t root_pa = 0;
+    uint8_t asid = 0;
+    bool found = false;
+    uint64_t daif = spin_lock_irqsave(&user_mm_records_lock);
+    for (user_mm_record_t *r = user_mm_records; r; r = r->next) {
+        if (r->mm == mm) {
+            root_pa = r->root_pa;
+            asid = r->asid;
+            found = true;
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&user_mm_records_lock, daif);
+    if (!found)
+        return -EINVAL;
+
+    const uint64_t *root = (const uint64_t *)Phy_To_Virt(root_pa);
+    if (aarch64_user_mm_root_busy(root))
+        return -EBUSY;
+
+    aarch64_asid_tlbi(asid);
     return 0;
 }

@@ -211,9 +211,9 @@ struct user_task_prepare_ctx;
 int user_task_prepare(struct task_struct *tsk, void *arg);
 void user_task_discard(struct task_struct *tsk, void *arg);
 
-/* Publish, install and track a user root.  The previous user root is
- * revoked only after the new one is installed. */
-void aarch64_user_install_root(uint64_t root_pa);
+/* Publish, install and track a user mm (PA + ASID).  The previous user
+ * root is revoked only after the new one is installed. */
+void aarch64_user_install_mm(const struct mm_struct *mm);
 
 /* Install the kernel root again and revoke the live user root. */
 void aarch64_user_restore_kernel_root(void);

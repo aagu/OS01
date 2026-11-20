@@ -34,6 +34,135 @@
 .section .text
 .global _start
 .type _start, @function
+#ifdef AARCH64_USER_RUNTIME_CASE_ASID
+#define ASID_FIXED_VA  0x40000000
+_start:
+    /* Fork to create Task A (parent, x0 > 0) and Task B (child, x0 == 0). */
+    mov     x8, #SYS_fork
+    svc     #0
+    tbnz    x0, #63, .Lasid_fork_fail
+    cbz     x0, .Lasid_is_b
+
+    mov     x27, x0                 /* child pid (B) */
+    mov     x28, #ROLE_A
+    b       .Lasid_map
+
+.Lasid_is_b:
+    mov     x27, #0
+    mov     x28, #ROLE_B
+
+.Lasid_map:
+    /* Map 0x40000000 (in old boot identity range) with MAP_FIXED. */
+    movz    x0, #0x4000, lsl #16    /* 0x40000000 */
+    mov     x1, #4096
+    mov     x2, #3                  /* PROT_READ | PROT_WRITE */
+    mov     x3, #0x32               /* MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED */
+    mov     x4, #-1
+    mov     x5, #0
+    mov     x8, #SYS_mmap
+    svc     #0
+    movz    x9, #0x4000, lsl #16
+    cmp     x0, x9
+    b.ne    .Lasid_mmap_fail
+
+    /* Set role-specific pattern in x21 and write to [0x40000000]. */
+    cmp     x28, #ROLE_A
+    b.ne    1f
+    movz    x21, #0x1111
+    movk    x21, #0xaaaa, lsl #16
+    movk    x21, #0x1111, lsl #32
+    movk    x21, #0xaaaa, lsl #48
+    b       2f
+1:
+    movz    x21, #0x2222
+    movk    x21, #0xbbbb, lsl #16
+    movk    x21, #0x2222, lsl #32
+    movk    x21, #0xbbbb, lsl #48
+2:
+    mov     x19, x9                 /* x19 = 0x40000000 */
+    str     x21, [x19]
+
+    /* Warm up with SYS_getpid so both tasks are runnable. */
+    mov     x8, #SYS_getpid
+    svc     #0
+
+    /* Pure compute loop (~64M iterations, no SVC) verifying [0x40000000]
+     * stays isolated across timer IRQ switches. */
+    movz    x20, #0x0000
+    movk    x20, #0x0400, lsl #16
+.Lasid_loop:
+    ldr     x10, [x19]
+    cmp     x10, x21
+    b.ne    .Lasid_data_fail
+    sub     x20, x20, #1
+    cbnz    x20, .Lasid_loop
+
+    cmp     x28, #ROLE_B
+    b.eq    .Lasid_b_done
+
+    /* Task A: same-VA MAP_FIXED replacement at 0x40000000 -> must see zero
+     * (new anonymous backing, no stale TLB entry). */
+    mov     x0, x19
+    mov     x1, #4096
+    mov     x2, #3
+    mov     x3, #0x32
+    mov     x4, #-1
+    mov     x5, #0
+    mov     x8, #SYS_mmap
+    svc     #0
+    cmp     x0, x19
+    b.ne    .Lasid_mmap_fail
+
+    ldr     x10, [x19]
+    cbnz    x10, .Lasid_replace_stale
+
+    /* Write new content and read it back. */
+    movz    x22, #0x3333
+    movk    x22, #0xcccc, lsl #16
+    movk    x22, #0x3333, lsl #32
+    movk    x22, #0xcccc, lsl #48
+    str     x22, [x19]
+    ldr     x10, [x19]
+    cmp     x10, x22
+    b.ne    .Lasid_replace_fail
+
+    /* Wait for Task B to exit 0x22. */
+    sub     sp, sp, #16
+    str     xzr, [sp, #0]
+    mov     x0, x27
+    mov     x1, sp
+    mov     x2, #0
+    mov     x8, #SYS_waitpid
+    svc     #0
+    cmp     x0, x27
+    b.ne    .Lasid_wait_fail
+    ldr     x9, [sp, #0]
+    add     sp, sp, #16
+    mov     x10, #(0x22 << 8)
+    cmp     x9, x10
+    b.ne    .Lasid_wait_fail
+
+    URT_EXIT 0x11
+
+.Lasid_b_done:
+    ldr     x10, [x19]
+    cmp     x10, x21
+    b.ne    .Lasid_data_fail
+    URT_EXIT 0x22
+
+.Lasid_fork_fail:
+    URT_EXIT 0x01
+.Lasid_mmap_fail:
+    URT_EXIT 0x41
+.Lasid_data_fail:
+    URT_EXIT 0x42
+.Lasid_replace_stale:
+    URT_EXIT 0x43
+.Lasid_replace_fail:
+    URT_EXIT 0x44
+.Lasid_wait_fail:
+    URT_EXIT 0x45
+#else
 _start:
     /* Fork to create Task A (parent, x0 > 0) and Task B (child, x0 == 0). */
     mov     x8, #SYS_fork
@@ -352,3 +481,4 @@ g_role_sentinel:
     .quad 0
 g_b_sig_handled:
     .quad 0
+#endif /* AARCH64_USER_RUNTIME_CASE_ASID */

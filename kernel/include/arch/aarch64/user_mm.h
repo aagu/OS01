@@ -54,4 +54,14 @@ bool aarch64_user_mm_owns_root(const uint64_t *root);
  * context) — it never enters a page-table primitive. */
 bool aarch64_user_mm_root_busy(const uint64_t *root);
 
+/* Encode the full TTBR0_EL1 value (PA in [47:12] | ASID in [55:48],
+ * CnP=0) from the formal user_mm record for `mm`.  Returns 0 if `mm`
+ * is NULL or not registered. */
+uint64_t aarch64_user_ttbr0_value(const struct mm_struct *mm);
+
+/* Verify `mm`'s root is uninstalled/unpublished and complete ASID TLB
+ * invalidation (ASIDE1IS, or VMALLE1IS for ASID 0) before offline page
+ * teardown.  Returns 0, -EINVAL, -EBUSY, or runtime-gate errno. */
+int aarch64_user_mm_quiesce(struct mm_struct *mm);
+
 #endif /* OS01_AARCH64_USER_MM_H */

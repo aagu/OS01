@@ -53,8 +53,13 @@ IRQ_SAMPLES_RE = re.compile(
     r"\[user-runtime\] irq-samples eoi_a=(\d+) eoi_b=(\d+) "
     r"switch_resume_a=(\d+) switch_resume_b=(\d+)\b"
 )
+ASID_SAMPLES_RE = re.compile(
+    r"\[user-runtime\] asid-samples asid_a=(\d+) asid_b=(\d+) "
+    r"clean_switches=(\d+) full_flushes=(\d+) reused=(\d+)\b"
+)
 PASS_SUMMARY_RE = {
     "irq": re.compile(r"\[user-runtime\] PASS case=irq cpu_mask=1\b"),
+    "asid": re.compile(r"\[user-runtime\] PASS case=asid cpu_mask=1\b"),
 }
 SELFTEST_DONE_RE = re.compile(r"^\[selftest\] done \(failed=(\d+)\)$")
 
@@ -124,12 +129,16 @@ def parse_user_runtime_evidence(text, case="irq"):
             errors.append(f"missing [TEST] terminal record for {case_id}")
 
     sample_matches = []
+    asid_matches = []
     pass_matches = []
     done_matches = []
     for line in lines:
         m = IRQ_SAMPLES_RE.search(line)
         if m:
             sample_matches.append(tuple(int(g) for g in m.groups()))
+        am = ASID_SAMPLES_RE.search(line)
+        if am:
+            asid_matches.append(tuple(int(g) for g in am.groups()))
         if PASS_SUMMARY_RE[case].search(line):
             pass_matches.append(line)
         dm = SELFTEST_DONE_RE.match(line.strip())
@@ -148,6 +157,19 @@ def parse_user_runtime_evidence(text, case="irq"):
                     f"insufficient irq samples: eoi_a={eoi_a} eoi_b={eoi_b} "
                     f"sw_a={sw_a} sw_b={sw_b}"
                 )
+    elif case == "asid":
+        if len(asid_matches) == 0:
+            errors.append("missing [user-runtime] asid-samples line")
+        elif len(asid_matches) > 1:
+            errors.append(f"duplicate [user-runtime] asid-samples line ({len(asid_matches)})")
+        else:
+            asid_a, asid_b, clean_sw, full_fl, reused = asid_matches[0]
+            if asid_a < 1 or asid_b < 1 or asid_a == asid_b:
+                errors.append(f"invalid ASIDs: asid_a={asid_a} asid_b={asid_b}")
+            if clean_sw < 2 or full_fl != 0:
+                errors.append(f"unexpected flush stats: clean={clean_sw} full={full_fl}")
+            if reused < 1:
+                errors.append(f"ASID reuse not observed: reused={reused}")
 
     if len(pass_matches) == 0:
         errors.append(f"missing [user-runtime] PASS case={case} summary")
@@ -364,7 +386,7 @@ def run_boot(args, deadline_s=None, dtb_factory=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", default="irq", choices=("irq",))
+    parser.add_argument("--case", default="irq", choices=("irq", "asid"))
     parser.add_argument("--image", required=True)
     parser.add_argument("--firmware", required=True)
     parser.add_argument("--elf", required=True)

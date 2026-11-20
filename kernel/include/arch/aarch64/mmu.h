@@ -31,7 +31,18 @@ static inline void arch_switch_mm(uint64_t *pgtbl)
 
 static inline void arch_flush_tlb_page(uintptr_t vaddr)
 {
-    __asm__ __volatile__("tlbi vae1, %0 \n\t dsb sy \n\t isb" :: "r"(vaddr >> 12) : "memory");
+    if (vaddr < AARCH64_USER_LIMIT) {
+        __asm__ __volatile__(
+            "dsb ishst\n\t"
+            "tlbi vaae1is, %0\n\t"
+            "dsb ish\n\t"
+            "isb"
+            :: "r"((vaddr >> 12) & UINT64_C(0xfffffffff)) : "memory");
+    } else {
+        __asm__ __volatile__(
+            "tlbi vae1, %0 \n\t dsb sy \n\t isb"
+            :: "r"(vaddr >> 12) : "memory");
+    }
 }
 
 /* Snapshot of a lower-address range in a direct-mapped AArch64 root.

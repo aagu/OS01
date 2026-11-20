@@ -1366,6 +1366,19 @@
       }
     },
     {
+      "id": "test_aarch64_user_asid",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [
+        "memory.asid.pool_reclaim"
+      ],
+      "link": "aarch64-user-asid",
+      "source": "hosttests/cases/test_aarch64_user_asid.c"
+    },
+    {
       "kind": "host_test",
       "id": "test_ahci_lifecycle",
       "layer": "host",

@@ -513,11 +513,18 @@ void aarch64_user_restore_kernel_root(void)
     g_ttbr0 = 0;
 }
 
-void aarch64_user_install_root(uint64_t root_pa)
+void aarch64_user_install_mm(const struct mm_struct *mm)
 {
+    uint64_t root_pa = mm ? (uint64_t)(uintptr_t)mm->pgdir : 0;
     g_root_installs++;
     g_installed_root = root_pa;
     g_ttbr0 = root_pa;
+}
+
+int aarch64_user_mm_quiesce(struct mm_struct *mm)
+{
+    (void)mm;
+    return 0;
 }
 
 /* The AArch64 subset's served numbers: the four shared natives plus

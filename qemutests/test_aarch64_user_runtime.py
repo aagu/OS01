@@ -35,11 +35,40 @@ def _good_irq_trace():
     )
 
 
+def _good_asid_trace():
+    return (
+        "[TEST] START v=1 suite=kernel-selftest expected=1\n"
+        "[TEST] SELECT aarch64_user_runtime_asid required=1\n"
+        "[TEST] BEGIN aarch64_user_runtime_asid\n"
+        "[TEST] PASS aarch64_user_runtime_asid\n"
+        "[TEST] END suite=kernel-selftest total=1 passed=1 failed=0 skipped=0\n"
+        "[INFO] [user-runtime] asid-samples asid_a=1 asid_b=2 "
+        "clean_switches=4 full_flushes=0 reused=1\n"
+        "[INFO] [user-runtime] PASS case=asid cpu_mask=1\n"
+        "[selftest] done (failed=0)\n"
+    )
+
+
 class UserRuntimeEvidenceTests(unittest.TestCase):
     def test_valid_irq_trace_passes(self):
         ok, errors = runner.parse_user_runtime_evidence(_good_irq_trace(), "irq")
         self.assertTrue(ok, errors)
         self.assertEqual(errors, [])
+
+    def test_valid_asid_trace_passes(self):
+        ok, errors = runner.parse_user_runtime_evidence(_good_asid_trace(), "asid")
+        self.assertTrue(ok, errors)
+        self.assertEqual(errors, [])
+
+    def test_missing_asid_samples_fails(self):
+        text = _good_asid_trace().replace(
+            "[INFO] [user-runtime] asid-samples asid_a=1 asid_b=2 "
+            "clean_switches=4 full_flushes=0 reused=1\n",
+            "",
+        )
+        ok, errors = runner.parse_user_runtime_evidence(text, "asid")
+        self.assertFalse(ok)
+        self.assertTrue(any("asid-samples" in e for e in errors), errors)
 
     def test_duplicate_required_record_fails(self):
         dup = _good_irq_trace() + "[INFO] [user-runtime] PASS case=irq cpu_mask=1\n"

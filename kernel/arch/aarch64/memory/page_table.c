@@ -270,11 +270,21 @@ static int is_active_root(const uint64_t *root)
 static void tlb_invalidate_local(uint64_t va)
 {
 #ifdef __aarch64__
-    __asm__ __volatile__(
-        "tlbi vae1, %0\n\t"
-        "dsb ish\n\t"
-        "isb"
-        :: "r"(va >> AARCH64_PT_L3_SHIFT) : "memory");
+    if (va < AARCH64_PT_VA_LIMIT_LO) {
+        __asm__ __volatile__(
+            "dsb ishst\n\t"
+            "tlbi vaae1is, %0\n\t"
+            "dsb ish\n\t"
+            "isb"
+            :: "r"((va >> AARCH64_PT_L3_SHIFT) & UINT64_C(0xfffffffff))
+            : "memory");
+    } else {
+        __asm__ __volatile__(
+            "tlbi vae1, %0\n\t"
+            "dsb ish\n\t"
+            "isb"
+            :: "r"(va >> AARCH64_PT_L3_SHIFT) : "memory");
+    }
 #else
     (void)va;
 #endif
@@ -355,8 +365,10 @@ static int encode_perm(uint32_t perm, uint64_t *desc_out)
         else           uxn = 0;
     }
 
+    uint64_t ng = is_kernel ? 0 : AARCH64_PT_DESC_NG;
+
     *desc_out = AARCH64_PT_DESC_VALID | AARCH64_PT_DESC_TABLE |
-                AARCH64_PT_DESC_AF | attr | sh | ap | pxn | uxn;
+                AARCH64_PT_DESC_AF | ng | attr | sh | ap | pxn | uxn;
     return AARCH64_PT_OK;
 }
 

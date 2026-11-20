@@ -24,6 +24,11 @@ void aarch64_user_runtime_test_irq_sched_after(struct task_struct *tsk,
 void aarch64_user_runtime_test_vm_edit_pause(struct mm_struct *mm);
 void aarch64_user_runtime_test_vm_edit_after(struct mm_struct *mm);
 void aarch64_user_runtime_test_sigreturn(struct task_struct *tsk);
+void aarch64_user_runtime_test_note_ttbr_switch(uint64_t old_ttbr0,
+                                                uint64_t new_ttbr0,
+                                                bool full_flush);
+void aarch64_user_runtime_test_note_asid_tlbi(uint8_t asid);
+void aarch64_user_runtime_test_note_asid_release(uint8_t asid);
 #endif
 
 #endif /* _KERNEL_SELFTEST_AARCH64_USER_RUNTIME_H */

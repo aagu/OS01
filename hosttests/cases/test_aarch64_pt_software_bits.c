@@ -478,6 +478,75 @@ TEST_FUNC(test_replace_classifies_pa_change_and_protnone_flip_as_bbm)
     }
 }
 
+#ifndef AARCH64_PT_DESC_NG
+#define AARCH64_PT_DESC_NG UINT64_C(0x800)
+#endif
+
+static uint64_t read_l3_desc(const uint64_t *root, uint64_t va)
+{
+    uint64_t l0 = root[(va >> 39) & 0x1ffULL];
+    assert_true((l0 & (AARCH64_PT_DESC_VALID | AARCH64_PT_DESC_TABLE)) ==
+                (AARCH64_PT_DESC_VALID | AARCH64_PT_DESC_TABLE));
+    const uint64_t *l1_tbl =
+        (const uint64_t *)(uintptr_t)((l0 & UINT64_C(0xffffffffff000)) +
+                                       ARCH_PAGE_OFFSET);
+    uint64_t l1 = l1_tbl[(va >> 30) & 0x1ffULL];
+    assert_true((l1 & (AARCH64_PT_DESC_VALID | AARCH64_PT_DESC_TABLE)) ==
+                (AARCH64_PT_DESC_VALID | AARCH64_PT_DESC_TABLE));
+    const uint64_t *l2_tbl =
+        (const uint64_t *)(uintptr_t)((l1 & UINT64_C(0xffffffffff000)) +
+                                       ARCH_PAGE_OFFSET);
+    uint64_t l2 = l2_tbl[(va >> 21) & 0x1ffULL];
+    assert_true((l2 & (AARCH64_PT_DESC_VALID | AARCH64_PT_DESC_TABLE)) ==
+                (AARCH64_PT_DESC_VALID | AARCH64_PT_DESC_TABLE));
+    const uint64_t *l3_tbl =
+        (const uint64_t *)(uintptr_t)((l2 & UINT64_C(0xffffffffff000)) +
+                                       ARCH_PAGE_OFFSET);
+    return l3_tbl[(va >> 12) & 0x1ffULL];
+}
+
+TEST_FUNC(test_user_leaf_sets_ng_and_kernel_leaf_stays_global)
+{
+    mock_pool_reset();
+    uint64_t root_pa;
+    uint64_t *root = fresh_root_va(&root_pa);
+    assert_not_null(root);
+
+    uint64_t va_kern = TEST_VA_BASE;
+    uint64_t va_user_norm = TEST_VA_BASE + 0x1000ULL;
+    uint64_t va_user_dev  = TEST_VA_BASE + 0x2000ULL;
+    uint64_t va_user_cow  = TEST_VA_BASE + 0x3000ULL;
+
+    /* Kernel leaf keeps nG == 0 (global). */
+    assert_eq(0, aarch64_pt_map_4k_ext(root, va_kern, 0x10000ULL,
+                                       AARCH64_PT_KERNEL_RW, 0));
+    uint64_t kdesc = read_l3_desc(root, va_kern);
+    assert_eq(0ULL, kdesc & AARCH64_PT_DESC_NG);
+
+    /* User normal leaf sets nG (bit 11). */
+    assert_eq(0, aarch64_pt_map_4k_ext(root, va_user_norm, 0x11000ULL,
+                                       AARCH64_PT_USER_RW, 0));
+    uint64_t udesc = read_l3_desc(root, va_user_norm);
+    assert_true((udesc & AARCH64_PT_DESC_NG) != 0);
+
+    /* User device leaf sets nG (bit 11). */
+    assert_eq(0, aarch64_pt_map_4k_ext(root, va_user_dev, 0x09000000ULL,
+                                       AARCH64_PT_USER_RO | AARCH64_PT_DEVICE, 0));
+    uint64_t ddesc = read_l3_desc(root, va_user_dev);
+    assert_true((ddesc & AARCH64_PT_DESC_NG) != 0);
+
+    /* User PROT_NONE -> restore -> COW leaf keeps nG (bit 11). */
+    assert_eq(0, aarch64_pt_map_4k_ext(root, va_user_cow, 0x12000ULL,
+                                       AARCH64_PT_USER_RO,
+                                       AARCH64_PT_SOFTWARE_PROTNONE));
+    assert_eq(0, aarch64_pt_replace_4k(root, va_user_cow, 0x12000ULL,
+                                       AARCH64_PT_USER_RO,
+                                       AARCH64_PT_SOFTWARE_COW,
+                                       NULL, NULL, NULL));
+    uint64_t cdesc = read_l3_desc(root, va_user_cow);
+    assert_true((cdesc & AARCH64_PT_DESC_NG) != 0);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_map_protnone_query_returns_e_prot_none_with_pa),
     TEST_ENTRY(test_unmap_protnone_returns_pa_does_not_free),
@@ -487,6 +556,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_encode_block_desc_produces_correct_bit_layout),
     TEST_ENTRY(test_replace_returns_correct_old_perm_for_perm_only_update),
     TEST_ENTRY(test_replace_classifies_pa_change_and_protnone_flip_as_bbm),
+    TEST_ENTRY(test_user_leaf_sets_ng_and_kernel_leaf_stays_global),
 TEST_LIST_END
 
 int main(void)

@@ -965,6 +965,17 @@ $(TEST_BLD)/test_aarch64_arch_vmm_init.elf: \
 test_aarch64_arch_vmm_init: $(TEST_BLD)/test_aarch64_arch_vmm_init.elf
 	$<
 
+# aarch64 user ASID pool
+$(TEST_BLD)/aarch64_user_asid_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/memory/user_asid.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/user_asid.h \
+		$(TESTS_DIR)/kernel/include/arch/spinlock.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) -c $< -o $@
+
+LINK_CFLAGS_aarch64-user-asid = $(AARCH64_PT_SW_HOST_CFLAGS) $(FRAMEWORK_INC)
+LINK_GROUP_aarch64-user-asid := $(TEST_BLD)/aarch64_user_asid_production.o
+
 # Shootdown probe logic
 SHOOTDOWN_PROBE_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) \
                         -I$(TEST_MOCK)/page_table_aarch64_include \

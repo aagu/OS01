@@ -261,12 +261,11 @@ void aarch64_user_image_destroy(struct aarch64_user_image *image)
 
     mm_t *mm = image->mm;
     if (mm) {
-        uint64_t *root = (uint64_t *)Phy_To_Virt(image->root_pa);
-
-        /* The root must be detached before any page is released: a
-         * published or still-installed root means the leaves may be
-         * reachable and freeing them would corrupt a live mapping. */
-        if (aarch64_user_mm_root_busy(root)) {
+        /* The root must be detached and ASID-invalidated before any
+         * page is released: a published or still-installed root means
+         * the leaves may be reachable and freeing them would corrupt
+         * a live mapping. */
+        if (aarch64_user_mm_quiesce(mm) != 0) {
             vmm_gate_violation("user image root is still busy");
             return;
         }
