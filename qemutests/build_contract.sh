@@ -193,7 +193,17 @@ EOF
             rm -f "$log"
             echo "  [uefi-contract] $label invalidated the runtime receipt"
         }
-        recopy_case 'UEFI_RUNTIME_CFLAGS'         UEFI_RUNTIME_CFLAGS='-DUEFI_NO_UTF8 -DFIXTURE'
+        # The fixture value must stay BUILDABLE: recopy_case runs a real
+        # build of $uefi_artifact with it. posix-uefi's own -I/usr/include
+        # picks up glibc's stdint.h, which on Ubuntu's multiarch layout
+        # needs bits/libc-header-start.h from
+        # /usr/include/x86_64-linux-gnu/bits/ — a path clang does not
+        # search — so the build dies with "bits/libc-header-start.h file
+        # not found" unless OS01's freestanding headers come first.
+        # Keep the default's -D__need_wchar_t and -I<root>/libc/include
+        # (mk/components/uefi.mk) and let -DFIXTURE be the only delta, so
+        # the receipt still changes but the UEFI runtime still compiles.
+        recopy_case 'UEFI_RUNTIME_CFLAGS'         UEFI_RUNTIME_CFLAGS="-DUEFI_NO_UTF8 -DFIXTURE -D__need_wchar_t -I$(pwd)/libc/include"
         recopy_case 'UEFI_RUNTIME_MAKE'           UEFI_RUNTIME_MAKE='make OUTDIR= FIXTURE=1'
         recopy_case 'UEFI_RUNTIME_ADAPTER_INPUT'  UEFI_RUNTIME_ADAPTER_INPUT="$fixture_adapter"
         recopy_case 'UEFI_RUNTIME_WRAPPER_INPUT'  UEFI_RUNTIME_WRAPPER_INPUT="$fixture_wrapper"
