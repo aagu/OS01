@@ -264,6 +264,13 @@ RNDR/RNDRRS 早在 2026-09-25 已接线（`kernel/arch/aarch64/cpu/random.c:30-6
 [plan](superpowers/plans/2026-11-17-aarch64-kernel-lma.md)；剩余项见
 [roadmap.md](roadmap.md) P2 §真机适配审计。
 
+## AArch64 SError 与 GICv2 Phase 2（2026-11-21）
+
+- **SError 入口与停驻**：正式 EL1 VBAR `+0x180`（EL1t）、`+0x380`（EL1h）、`+0x580`（EL0）分支到 `el1t_serror_entry` / `el1_serror_entry`（`kernel/arch/aarch64/intr/entry.S`）。EL1t 在首个栈访问前 `msr spsel, #1`，三条路径屏蔽 DAIF、保存 272 字节 `pt_regs` 后读取 `ESR_EL1`，经 `aarch64_serror_fatal()`（`kernel/arch/aarch64/intr/trap.c`）与 EL1h sync 共用 `first_fault` 原子首错仲裁和无锁早期 UART，输出 `[aarch64-serror] FATAL origin=<el1t|el1h|el0t> mpidr=0x... ec=0x... esr=0x... elr=0x... spsr=0x... far=n/a` 后进入 `aarch64_serror_park`（全屏蔽 `wfi` 循环，永不 `eret`）。
+- **启用点与 EL0 PSTATE**：BSP 在 `arch_boot_controllers()` 的运行时 `pl011_init()` 之后、AP 在 `arch_smp_ap_cpu_init()` 开头执行 `msr daifclr, #4; isb`。正式 EL0 初始帧（含 `exec` 与 `sigreturn` 校验）统一使用 `AARCH64_USER_TASK_PSTATE = 0x240`（`A=0, I=0, D=1, F=1`）。
+- **GICv2 Non-secure 交接与路由**：`gic_dev_init()` 缓存 `GICD_TYPER.SecurityExtn`（bit 10）与 `nr_cpu_interfaces`（`CPUNumber[7:5]+1`）。`SecurityExtn=1` 时视为 Non-secure EL1：跳过 `IGROUPR` 读写，保留 `GICD_CTLR=1` / `GICC_CTLR=1`（`EOImodeNS=0`）、`SGIR NSATT=0`，并在 `gic_dev_cpu_enable()` 写 `GICC_PMR=0xff` 后读回低 8 位校验（全零则失败，`gic_cpu_init()` 记录 `MPIDR_EL1` 并全屏蔽停驻）。`gic_dev_dispatch()` 在 `intid >= 1020`（1020–1023）时立即返回，不查表也不写 `EOIR`；合法 INTID 覆盖到 `min((ITLinesNumber+1)*32, 1020)`。`gic_cpu_target_mask()` 从 `gicd+0x800` 折叠 8 个 32 位 banked `ITARGETSR` 字（忽略 0、拒绝非 one-hot 或不一致值；仅在 DT 单核且 TYPER 单接口且全零时回退为 `1`），`ipi.c` 原子 claim 到全局位图并在 BSP `gic_init()` 与 AP `arch_smp_ap_cpu_init()` 发布，PL011 console / SPI test / unexpected probe / IPI reply 统一消费 `gic_target_bit_get(0)`。
+- **软件验收与真机取证模板**：软件侧已由宿主测试、`aarch64_smp_test.py` ELF 审计及 QEMU `MODE=serror` / `gic-spi` / `smp` / `sched-tick` / `user-runtime`（`product` 1/2/4/8 核）验证；**真机 IRQ 覆盖与真实物理 SError 递送仍待目标硬件就位后补采**。真机固件须满足：为 OS-owned SPI 及各核 banked SGI/PPI 配好 Group 1、初始化 Non-secure 可写的 `GICC_PMR`、将物理 SError 路由到 EL1，且满足首次早期 PL011 C 初始化前提与既有 DTB/PSCI 约束（仍不支持 GICv3 / 非 `psci` 多核 / 3-cell 以外的 PL011 interrupts）。板级证据模板应记录：板型、固件版本/安全配置、DTB、生产镜像（`make PROFILE=aarch64-clang aarch64-uefi`）与 `kernel.elf` SHA-256、CPU 数与每核 `gic_target_bit`；在生产镜像用调试器或独立板级诊断镜像观察各核 `cntp_tick_handler` 命中、通过 `ipi_broadcast(IPI_VECTOR_RESCHED, 1ULL << dst)` 在已接纳核间双向定向触发并记录目的核 handler 与完整 `IAR`/`EOIR`、输入两次独立串口数据确认 PL011 RX 清源/EOI 及两次 TTY 消费（禁用 QEMU 固定 SPI40 注入与 `FILTER_OTHERS` 广播探针）；若板卡支持文档化 SError 注入，记录异常路由、来源、fatal 行与停驻 PC，并用匹配 ELF 执行 `llvm-addr2line -f -e <kernel.elf> <ELR>` 定位接收点。
+
 ---
 
 ## 启动阶段契约（BOOT-4，2026-11-08 闭环）

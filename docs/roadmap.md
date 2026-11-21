@@ -73,7 +73,7 @@ aarch64 已有 EL0 用户态，但 ASLR 本项先不扩大到 aarch64。
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| GICv2 Phase 2 | SError/真机覆盖率（**SError 三个向量槽目前是自跳，无保存/诊断/恢复路径**——`kernel/arch/aarch64/intr/entry.S:62`（SP_EL0）、`:90`（SP_ELx）、`:106`（EL0）均为 `b .`）；handler 表扩容（生产路径只注册 SGI 3/4、CNTP PPI 与 PL011 console RX SPI（`kernel/arch/aarch64/intr/gic.c:75`/`:83`、`kernel/arch/aarch64/platform/time.c:333`、`kernel/arch/aarch64/platform/console.c:59`），SGI 0~2 仅自测用，SGI 5-15 与 PPI 16-29、31 未注册） | GICv2 Phase 1 ✅；`dtb_gicd_base` 解耦 ✅（2026-11-18） | |
+| GICv2 Phase 2 | **软件实现与 QEMU 验收已完成（2026-11-21）**：正式 EL1 VBAR `+0x180`/`+0x380`/`+0x580` SError 入口→`aarch64_serror_fatal` 首错诊断→`aarch64_serror_park`、`AARCH64_USER_TASK_PSTATE=0x240`、GICv2 `SecurityExtn` Non-secure Group 1 交接契约与 PMR 校验、1020 INTID 边界与 1020–1023 跳过、`gic_cpu_target_mask` 折叠与每核原子 claim；**真机待验证**：实机 IRQ 覆盖（CNTP/定向 SGI/PL011 RX→TTY）与物理 SError 注入待目标板卡就位后按 [`arch.md`](arch.md#aarch64-serror-与-gicv2-phase-22026-11-21) 模板取证 | GICv2 Phase 1 ✅；`dtb_gicd_base` 解耦 ✅（2026-11-18） | |
 
 **距离「用户态就绪的统一内核」还差多远（粗估，一个人全职）**：剩余差距集中在跨进程 inode 级 `MAP_SHARED` 与 x86_64 signal 帧 FPU 区（见 P5）；aarch64 的 EL0 FP/SIMD 已于 2026-11-21 闭环。详见 `docs/arch.md` §aarch64 用户态现状与末段、统一 kernel_main spec/plan。
 
@@ -98,7 +98,7 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 
 | 问题 | 位置 | 真机影响 | 状态 / 剩余解法 |
 |------|------|----------|----------|
-| GICv2 按 Group 0 编程（IGROUPR 清位，CTLR 只写 bit0） | `kernel/arch/aarch64/intr/gic_driver.c:103-105`（注释自认"QEMU 无 EL3"）、`:76`（`GICD_CTLR=1u`）、`:135`（`GICC_CTLR=1u`） | 经 TF-A 启动的真机上 IRQ 被路由为 Group 1，Group 0 中断以 FIQ 信号出现 → 内核在 EL1 的 IRQ 入口永远收不到，**所有 IRQ 静默丢失** | ❌ **仍开放**：真机写 IGROUPR=1 + GICD_CTLR/GICC_CTLR 的 EnableGrp1（bit1），或按 GICD_IIDR/板型检测分组模式 |
+| GICv2 Group 0 / Non-secure Group 1 交接 | `kernel/arch/aarch64/intr/gic_driver.c` | 无 Security Extensions 时配置 Group 0；有 `SecurityExtn` 时假定固件已为 OS-owned SPI 及各核 SGI/PPI 配置 Group 1 与 NS-accessible PMR（跳过 IGROUPR 并校验 PMR 读回非零） | ✅ **软件侧已就绪**（2026-11-21）；真机 TF-A Group 1 实测待板卡验证 |
 | 非 BSP CPU 强制 enable-method=psci | `kernel/arch/aarch64/platform/dtb_parse.c:108`（`exact(n->enable,"psci")`）、`:361-362`（非 BSP 无 psci → -3 FATAL） | spin-table 平台（老 RPi 固件、`cpu-release-addr`）全部 AP 拒启（-3 FATAL） | ❌ **仍开放**：若目标板需要，加 spin-table 等待路径 |
 | timer 中断形状校验偏脆（要求 interrupts 第二项 = PPI 14） | `kernel/arch/aarch64/platform/dtb_parse.c:200-207`（`len < 24 \|\| len % 12 \|\| data+12 != 1 \|\| data+16 != 14`；`cntp_ppi` 写死 30 = 16+14，GICv2 架构定值本身正确） | 真机 DT 省略 secure timer 项时条目位移被 -4 拒 | ❌ **仍开放**：改为按"non-secure physical timer 的 PPI 30"匹配而非固定槽位 |
 

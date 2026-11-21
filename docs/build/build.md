@@ -55,7 +55,7 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 | `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network\|gfx\|resolution\|driver-model\|monitor\|terminal-present\|gui\|intr-x86\|boot-lifecycle\|boot-irq-time\|boot-failure\|boot-contract\|boot-services\|usb-boot\|arch10-capacity\|arch6-fsstress\|doom` | QEMU E2E against the matching variant image (or the normal image for `gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui`/`usb-boot`; `intr-x86`/`boot-lifecycle`/`boot-irq-time`/`boot-failure`/`boot-contract`/`boot-services`/`doom` build their own isolated fault/test variants). | `phase-0` |
 | `make test-host` | hosttests + PMM boot reservation | — |
 | `make test-static` | runtime / layout / canary / link-order audits (16 audits) | — |
-| `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault\|m3-probe\|sched\|sched-ap\|sched-wake\|sched-tick\|boot-contract\|m1-*\|lma-layout` | AArch64 PSCI / GIC / sync-fault / scheduler / boot-contract acceptance harness | `smp` |
+| `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault\|serror\|m3-probe\|sched\|sched-ap\|sched-wake\|sched-tick\|boot-contract\|m1-*\|lma-layout` | AArch64 PSCI / GIC / sync-fault / serror / scheduler / boot-contract acceptance harness | `smp` |
 | `make test-contract PROFILE=x86_64-clang\|aarch64-clang` | CI build-contract check | `x86_64-clang` |
 | `make test-kernel-selftest` | Boot selftest image + parse `[selftest]` markers | — |
 | `make test-harness` | Python unittest framework regression (no QEMU, never discovers QEMU scripts) | — |
@@ -566,7 +566,7 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 | --- | --- | --- | --- |
 | `test-qemu` | `SUITE=` | `phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`、`intr-x86`、`boot-lifecycle`、`boot-irq-time`、`boot-failure`、`boot-contract`、`boot-services`、`arch10-capacity`、`arch6-fsstress`、`doom` | `qemutests/run_test.py <SUITE>` 对匹配的 variant 镜像（`gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui` 用普通镜像；`resolution`/`monitor`/`terminal-present`/`gui`/`doom` 各自拉私有 QEMU 进程）；`intr-x86` 走专属目标 `test-qemu-intr-x86` → `qemutests/x86_intr_fault.py`，自建隔离 fault 变体 |
 | `test-qemu-usb-boot` | `USB_BOOT_CASE=` | `readonly`（默认）/ `dual` / `ahci` / `persistence` / `superspeed` / `hub` / `firmware`（过期的预期失败断言，仅 opt-in） | 运行器经共享构造器 `qemutests/harness/qemu_cmd.py::build_qemu_x86(storage="usb")` 生成 USB-only 拓扑；不经 `run_test.py`（它总会追加 AHCI 根盘）。已登记生成的 suite catalog 与 nightly bucket |
-| `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`sched`、`m1-ram`、`m1-sparse`、`m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` | `qemutests/aarch64_*.py` 之一 |
+| `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault`、`serror`、`m3-probe`、`sched`、`m1-ram`、`m1-sparse`、`m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` | `qemutests/aarch64_*.py` 之一 |
 | `test-contract` | `PROFILE=` | `x86_64-clang`、`aarch64-clang` | `qemutests/build_contract.sh <PROFILE> <mode>` 按 profile mode 列表 |
 | `test-host` | — | — | `os01_submake hosttests` + `pmm_boot_reservation_test.py` |
 | `test-static` | — | — | 16 项静态审计（runtime-audit、stack-canary-audit、validate-kernel、runtime-link-order、kernel-runtime-link、syscall-boundary、kernel-layout、kernel-canary-contract、header-object-audit、stack-frame-audit、driver-model-boundary、gui-build-audit、intr-dispatch-audit、arch10-capacity-audit、assertion-policy、user-canary） |
@@ -866,7 +866,7 @@ make PROFILE=aarch64-clang aarch64-uefi-kernel  # aarch64 内核 ELF
 | `PROFILE=<name>` | 选择 profile（默认 `x86_64-clang`） |
 | `SUITE=<name>` | `test-qemu` 的 variant（`phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`、`doom`） |
 | `USB_BOOT_CASE=<name>` | `test-qemu-usb-boot` 的 case（`readonly` / `dual` / `ahci` / `persistence` / `superspeed` / `hub` / `firmware`，默认 `readonly`；`firmware` 是过期的预期失败断言，仅可显式 opt-in） |
-| `MODE=<name>` | `test-aarch64` 的 variant（`smp`、`no-ack`、`gic-spi`、`sync-fault`、`m3-probe`、`sched`、`sched-ap`、`sched-wake`、`sched-tick`、`m1-*`） |
+| `MODE=<name>` | `test-aarch64` 的 variant（`smp`、`no-ack`、`gic-spi`、`sync-fault`、`serror`、`m3-probe`、`sched`、`sched-ap`、`sched-wake`、`sched-tick`、`m1-*`） |
 | `AP_SCHED_CASE=<name>` | `MODE=sched-ap` 的用例选择（`positive`、`fatal-owner`，默认 `positive`） |
 | `SCHED_CASE=<name>` | `MODE=sched` 的用例选择（`positive`、`sp-top`、`sp-low`、`pc-low`、`pc-data`、`all`，默认 `all`） |
 | `OS01_SYSTEST=1` | 启用 systest variant（影响编译旗标） |
