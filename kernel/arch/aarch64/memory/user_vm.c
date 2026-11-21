@@ -156,6 +156,9 @@ int aarch64_vm_edit_begin(mm_t *mm)
         return -EPERM;
 
     owner->vm.edit_root_pa = live;
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+    aarch64_user_mig_note_vm_begin(aarch64_user_current_task());
+#endif
     owner->vm.edit_irq = (uint64_t)arch_local_irq_save(); /* save + mask */
     aarch64_user_vm_save_tls(&owner->vm.edit_tpidr_el0,
                              &owner->vm.edit_tpidrro_el0);
@@ -242,10 +245,12 @@ int64_t arch_syscall_user_vm(uint64_t nr, const uint64_t args[6])
     }
 
 #ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
-    bool new_absent = false;
-    uint64_t new_pte = user_vm_mig_query_pte(mm, args[0], &new_absent);
-    aarch64_user_mig_note_vm_edit(aarch64_user_current_task(), nr, args[0],
-                                  false, old_pte, new_pte, new_absent);
+    if (ret >= 0) {
+        bool new_absent = false;
+        uint64_t new_pte = user_vm_mig_query_pte(mm, args[0], &new_absent);
+        aarch64_user_mig_note_vm_edit(aarch64_user_current_task(), nr, args[0],
+                                      false, old_pte, new_pte, new_absent);
+    }
 #endif
     aarch64_vm_edit_end();
 #ifdef AARCH64_USER_RUNTIME_TEST

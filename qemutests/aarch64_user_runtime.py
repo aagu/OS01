@@ -82,6 +82,9 @@ FORBIDDEN_PRODUCT_PREFIXES = (
     "aarch64_user_runtime_test_",
     "test_aarch64_user_runtime_",
     "test_aarch64_user_migration_",
+    "aarch64_user_mig_",
+    "aarch64_sched_tick_mig_",
+    "aarch64_asid_test_",
 )
 
 
@@ -318,14 +321,39 @@ def _validate_migration_events(lines):
     rem_p, _, rem_ev = by_kind["remap"][0]
     new_p, _, new_ev = by_kind["new_load"][0]
     abt_p, _, abt_ev = by_kind["permission_abort"][0]
-    if not (old_p < move_pos[1]["irq_save"] and move_pos[1]["el0_after"] < rem_p < move_pos[2]["irq_save"] < move_pos[2]["el0_after"] < new_p < abt_p):
-        errors.append("old_load/remap/new_load/permission_abort ordering invalid")
+    par_p, _, par_ev = by_kind["parent_check"][0]
+    cow_p, _, cow_ev = by_kind["cow_check"][0]
+    if not (cow_p < old_p < move_pos[1]["irq_save"] and move_pos[1]["el0_after"] < rem_p < move_pos[2]["irq_save"] < move_pos[2]["el0_after"] < new_p < abt_p < par_p):
+        errors.append("old_load/remap/new_load/permission_abort/parent_check ordering invalid")
     if old_ev.get("pa") == new_ev.get("pa"):
         errors.append("old_load and new_load PA must differ")
-    if old_ev.get("data") == new_ev.get("data"):
-        errors.append("old_load and new_load data must differ")
+    if _as_int(par_ev.get("pa"), 0) != _as_int(old_ev.get("pa"), -1):
+        errors.append(f"parent_check PA {par_ev.get('pa')} != old_load PA {old_ev.get('pa')}")
+    if _as_int(rem_ev.get("pa"), 0) != _as_int(new_ev.get("pa"), -1):
+        errors.append(f"remap PA {rem_ev.get('pa')} != new_load PA {new_ev.get('pa')}")
+    if (_as_int(old_ev.get("data"), -1) != 0x1111 or
+        _as_int(par_ev.get("data"), -1) != 0x1111 or
+        _as_int(par_ev.get("cow_val"), -1) != 0x1111 or
+        _as_int(cow_ev.get("cow_val"), -1) != 0x2222 or
+        _as_int(rem_ev.get("data"), -1) != 0x3333 or
+        _as_int(new_ev.get("data"), -1) != 0x3333):
+        errors.append("unexpected data/cow_val pattern in VM/COW checks")
     if _as_int(old_ev.get("asid"), 0) <= 0 or old_ev.get("asid") != new_ev.get("asid"):
         errors.append("main child ASID must stay nonzero and constant")
+    expected_el0 = {
+        1: (0xCAFE0001, 0xBEEF1234),
+        2: (0xCAFE0002, 0xBEEF1234),
+        3: (0xCAFE0003, 0xBEEF5678),
+    }
+    for _p, _s, ev in by_kind.get("el0_after", []):
+        mid = _as_int(ev.get("move_id"), 0)
+        if mid in expected_el0 and "x13" in ev and "tpidr" in ev:
+            exp_x13, exp_tp = expected_el0[mid]
+            if _as_int(ev.get("x13"), -1) != exp_x13 or _as_int(ev.get("tpidr"), -1) != exp_tp:
+                errors.append(f"move {mid} el0_after sentinel mismatch: {ev}")
+    for _p, _s, ev in by_kind.get("hw_detach", []):
+        if "ttbr0" in ev and _as_int(ev.get("ttbr0"), 0) == _as_int(ev.get("root"), -1):
+            errors.append(f"hw_detach ttbr0 still equals user root: {ev}")
     if (_as_int(abt_ev.get("ec")), _as_int(abt_ev.get("fsc")),
         _as_int(abt_ev.get("far")), _as_int(abt_ev.get("wnr"))) != (0x24, 0x0f, 0x40000000, 1):
         errors.append(f"unexpected permission_abort ESR/FAR fields: {abt_ev}")
@@ -345,7 +373,7 @@ def _validate_migration_events(lines):
             errors.append("mmap edit_vma must have leaf_absent=1")
 
     for _p, _s, ttag in by_kind.get("tlbi_tag", []):
-        if _as_int(ttag.get("tx")) not in expected_ops:
+        if _as_int(ttag.get("tx")) not in (1, 2, 3, 4, 5):
             errors.append(f"unexpected unrelated same-tag TLBI: {ttag}")
 
     # Copy, exec, wait_status

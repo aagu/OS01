@@ -218,6 +218,9 @@ void gic_dev_dispatch(struct gic_dev *dev, struct pt_regs *regs)
     uint32_t iar = gic_ack(dev);
     uint32_t intid = iar & 0x3ffu;
     if (intid == GIC_INTID_SPURIOUS) return;          /* 绝不写 EOIR */
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+    aarch64_user_mig_note_irq(intid);
+#endif
 #if defined(AARCH64_AP_SCHED_WAKE_TEST) || defined(AARCH64_SCHED_TICK_TEST)
     if (intid == 4u) {
         extern uint32_t gic_trace_cpu(void);

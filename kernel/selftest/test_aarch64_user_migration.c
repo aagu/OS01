@@ -2,6 +2,8 @@
  * acceptance selftest (USER_RUNTIME_CASE=migration).
  */
 
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+
 #include <arch/aarch64/ap_work.h>
 #include <arch/cpu.h>
 #include <arch/aarch64/page_table.h>
@@ -124,6 +126,15 @@ static int g_parent_pid = -1;
 static int g_main_pid = -1;
 static int g_child2_pid = -1;
 static volatile int g_active_move_id;
+static task_t * volatile g_mig_worker_task;
+static spinlock_T g_mig_lock = { .lock = 1UL };
+
+static uint32_t g_sgi_cnt[NR_CPUS];
+static uint32_t g_other_irq_cnt[NR_CPUS];
+static uint32_t g_ap_work_cnt[NR_CPUS];
+static uint32_t g_direct_sched_cnt[NR_CPUS];
+static uint32_t g_last_irq_intid[NR_CPUS];
+static volatile uint32_t g_bsp_tick_req_seen;
 
 static wait_queue_t g_helper_wq[2];
 static wait_queue_t g_worker_wq;
@@ -161,7 +172,23 @@ struct irq_snap {
 static struct irq_snap g_irq_snap[4];
 
 static uint32_t g_vm_tx_counter;
+static volatile uint32_t g_active_vm_tx;
+static struct mig_event * volatile g_active_vm_eb;
+static struct mig_event * volatile g_active_vm_td;
+static volatile bool g_active_vm_tlbi_done;
 static volatile bool g_vm_window_active;
+
+static void mig_reset_window_counters(uint32_t cpu)
+{
+    if (cpu < NR_CPUS) {
+        __atomic_store_n(&g_sgi_cnt[cpu], 0U, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_other_irq_cnt[cpu], 0U, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_ap_work_cnt[cpu], 0U, __ATOMIC_RELEASE);
+        __atomic_store_n(&g_direct_sched_cnt[cpu], 0U, __ATOMIC_RELEASE);
+    }
+    if (cpu == 0)
+        __atomic_store_n(&g_bsp_tick_req_seen, 0U, __ATOMIC_RELEASE);
+}
 
 static inline uint64_t mig_cntpct(void)
 {
@@ -302,7 +329,6 @@ void aarch64_user_mig_note_hw_detach(const struct task_struct *tsk,
         return;
     uint64_t ttbr0 = 0;
     __asm__ volatile("mrs %0, ttbr0_el1" : "=r"(ttbr0));
-    (void)ttbr0;
     struct mig_event *ev = mig_reserve(ME_HW_DETACH, NULL);
     if (ev) {
         ev->a = mid;
@@ -310,6 +336,7 @@ void aarch64_user_mig_note_hw_detach(const struct task_struct *tsk,
         ev->c = cpu_id();
         ev->u0 = root_pa;
         ev->u1 = asid;
+        ev->u2 = ttbr0;
     }
 }
 
@@ -363,8 +390,11 @@ void aarch64_user_mig_note_commit(const struct task_struct *tsk,
         struct mig_event *bev = mig_reserve(ME_BSP_TICK_SCHED, NULL);
         if (bev) {
             bev->a = mid;
-            bev->b = 0;
-            bev->c = 1;
+            bev->b = dst_cpu;
+            bev->c = __atomic_load_n(&g_bsp_tick_req_seen, __ATOMIC_ACQUIRE);
+            bev->u0 = __atomic_load_n(&g_sgi_cnt[0], __ATOMIC_ACQUIRE);
+            bev->u1 = __atomic_load_n(&g_ap_work_cnt[0], __ATOMIC_ACQUIRE);
+            bev->u2 = __atomic_load_n(&g_direct_sched_cnt[0], __ATOMIC_ACQUIRE);
         }
     }
     struct mig_event *ev = mig_reserve(ME_COMMIT, NULL);
@@ -472,6 +502,7 @@ void aarch64_user_mig_idle_pre_wfi(uint32_t cpu, uint32_t rq_nr)
         aarch64_sched_tick_mig_pending(1)) {
         return;
     }
+    mig_reset_window_counters(1);
     __atomic_store_n(&g_move1_wfi_ready, true, __ATOMIC_RELEASE);
     struct mig_event *iz = mig_reserve(ME_IDLE_ZERO, NULL);
     if (iz) {
@@ -485,10 +516,46 @@ void aarch64_user_mig_idle_pre_wfi(uint32_t cpu, uint32_t rq_nr)
         wf->a = cpu;
 }
 
+void aarch64_user_mig_note_irq(uint32_t intid)
+{
+    uint32_t cpu = cpu_id();
+    if (!g_mig_active || cpu >= NR_CPUS)
+        return;
+    __atomic_store_n(&g_last_irq_intid[cpu], intid, __ATOMIC_RELAXED);
+    if (intid < 16U)
+        __atomic_fetch_add(&g_sgi_cnt[cpu], 1U, __ATOMIC_RELAXED);
+    else if (intid != 30U)
+        __atomic_fetch_add(&g_other_irq_cnt[cpu], 1U, __ATOMIC_RELAXED);
+}
+
+void aarch64_user_mig_note_ap_work(uint32_t cpu, uint32_t slot_state)
+{
+    if (!g_mig_active || cpu >= NR_CPUS)
+        return;
+    if (slot_state != 0)
+        __atomic_fetch_add(&g_ap_work_cnt[cpu], 1U, __ATOMIC_RELAXED);
+}
+
+void aarch64_user_mig_note_sched_entry(uint32_t cpu, bool is_idle,
+                                       uint32_t need_resched)
+{
+    if (!g_mig_active || cpu >= NR_CPUS)
+        return;
+    if (cpu == 0 && is_idle && need_resched)
+        __atomic_fetch_add(&g_bsp_tick_req_seen, 1U, __ATOMIC_RELEASE);
+    int mid = __atomic_load_n(&g_active_move_id, __ATOMIC_ACQUIRE);
+    if (!is_idle && arch_current_task() != g_mig_worker_task &&
+        ((mid == 1 && cpu == 1) || ((mid == 2 || mid == 3) && cpu == 0)))
+        __atomic_fetch_add(&g_direct_sched_cnt[cpu], 1U, __ATOMIC_RELAXED);
+}
+
 void aarch64_user_mig_idle_tick(uint32_t cpu, uint32_t intid)
 {
-    if (!g_mig_active)
+    if (!g_mig_active || cpu >= NR_CPUS)
         return;
+    uint32_t real_intid = __atomic_load_n(&g_last_irq_intid[cpu], __ATOMIC_RELAXED);
+    if (real_intid == 0)
+        real_intid = intid;
     int mid = __atomic_load_n(&g_active_move_id, __ATOMIC_ACQUIRE);
     if (mid == 1 && cpu == 1 && g_move1_wfi_ready && !g_move1_took &&
         g_move1_tick_idx < 8) {
@@ -496,33 +563,17 @@ void aarch64_user_mig_idle_tick(uint32_t cpu, uint32_t intid)
         struct mig_event *ev = mig_reserve(ME_IDLE_TICK, NULL);
         if (ev) {
             ev->a = cpu;
-            ev->b = intid;
+            ev->b = real_intid;
             ev->c = idx;
         }
         return;
     }
 
-    /* On source CPU, wake the pinned helper when target exhausts its slice. */
-    task_t *cur = arch_current_task();
-    if (!cur)
-        return;
     if (cpu == 0) {
         static uint32_t bsp_div;
-        if ((++bsp_div & 3U) == 0 && !((mid == 2 || mid == 3) && g_move_tail_seen[mid] && !g_move_committed[mid]))
+        if ((++bsp_div & 3U) == 0 &&
+            !((mid == 2 || mid == 3) && g_move_tail_seen[mid] && !g_move_committed[mid]))
             wait_queue_wake_one(&g_worker_wq);
-    }
-    if (mid == 1 && cpu == 0 && (int)cur->pid == g_main_pid &&
-        __atomic_load_n(&g_move_window_open[1], __ATOMIC_ACQUIRE) &&
-        cur->vruntime >= cur->deadline) {
-        wait_queue_wake_one(&g_helper_wq[0]);
-    } else if (mid == 2 && cpu == 1 && (int)cur->pid == g_main_pid &&
-               __atomic_load_n(&g_move_window_open[2], __ATOMIC_ACQUIRE) &&
-               cur->vruntime >= cur->deadline) {
-        wait_queue_wake_one(&g_helper_wq[1]);
-    } else if (mid == 3 && cpu == 1 && (int)cur->pid == g_child2_pid &&
-               __atomic_load_n(&g_move_window_open[3], __ATOMIC_ACQUIRE) &&
-               cur->vruntime >= cur->deadline) {
-        wait_queue_wake_one(&g_helper_wq[1]);
     }
 }
 
@@ -531,18 +582,102 @@ void aarch64_user_mig_idle_after_check(uint32_t cpu, bool took_balance,
 {
     if (!g_mig_active || cpu != 1 || !g_move1_wfi_ready || g_move1_took)
         return;
+    uint32_t sgi = __atomic_load_n(&g_sgi_cnt[1], __ATOMIC_RELAXED);
+    uint32_t oirq = __atomic_load_n(&g_other_irq_cnt[1], __ATOMIC_RELAXED);
+    uint32_t apw = __atomic_load_n(&g_ap_work_cnt[1], __ATOMIC_RELAXED);
+    uint32_t dsch = __atomic_load_n(&g_direct_sched_cnt[1], __ATOMIC_RELAXED);
     if (took_balance) {
         g_move1_took = true;
         struct mig_event *ev = mig_reserve(ME_IDLE_TAKE, NULL);
-        if (ev)
+        if (ev) {
             ev->a = cpu;
+            ev->u0 = sgi;
+            ev->u1 = oirq;
+            ev->u2 = apw;
+            ev->u3 = dsch;
+        }
     } else if (entered_wfi && g_move1_tick_idx >= 1 && g_move1_tick_idx <= 7) {
         struct mig_event *ev = mig_reserve(ME_IDLE_CHECK, NULL);
         if (ev) {
             ev->a = cpu;
             ev->b = g_move1_tick_idx;
             ev->c = 1;
+            ev->u0 = sgi;
+            ev->u1 = oirq;
+            ev->u2 = apw;
+            ev->u3 = dsch;
         }
+    }
+}
+
+static const char *mig_vm_op_name(uint64_t nr, bool is_fault,
+                                  enum mig_ev_kind *leaf_kind_out)
+{
+    if (is_fault) {
+        if (leaf_kind_out)
+            *leaf_kind_out = ME_EDIT_LEAF;
+        return "fault";
+    }
+    if (nr == SYS_munmap) {
+        if (leaf_kind_out)
+            *leaf_kind_out = ME_EDIT_LEAF;
+        return "munmap";
+    }
+    if (nr == SYS_mmap) {
+        if (leaf_kind_out)
+            *leaf_kind_out = ME_EDIT_VMA;
+        return "mmap";
+    }
+    if (nr == SYS_mprotect) {
+        if (leaf_kind_out)
+            *leaf_kind_out = ME_EDIT_LEAF;
+        return "mprotect";
+    }
+    return NULL;
+}
+
+void aarch64_user_mig_note_vm_begin(const struct task_struct *tsk)
+{
+    if (!g_mig_active || !tsk || (int)tsk->pid != g_main_pid || !g_vm_window_active)
+        return;
+
+    uint32_t tx = ++g_vm_tx_counter;
+    g_active_vm_tx = tx;
+    g_active_vm_tlbi_done = false;
+    g_active_vm_eb = NULL;
+    g_active_vm_td = NULL;
+
+    struct mig_event *eb = mig_reserve(ME_EDIT_BEGIN, NULL);
+    if (eb) {
+        eb->a = tsk->pid;
+        eb->b = cpu_id();
+        eb->c = tx;
+        eb->u0 = mig_task_root_pa(tsk);
+        eb->u1 = mig_task_asid(tsk);
+        __builtin_memcpy(eb->op, "vm", 3);
+        g_active_vm_eb = eb;
+    }
+}
+
+void aarch64_user_mig_note_va_tlbi(uint64_t va)
+{
+    if (!g_mig_active || !g_vm_window_active || va != MIG_DATA_VA)
+        return;
+    uint32_t tx = g_active_vm_tx;
+    if (!tx || g_active_vm_tlbi_done)
+        return;
+    g_active_vm_tlbi_done = true;
+
+    task_t *tsk = arch_current_task();
+    struct mig_event *td = mig_reserve(ME_TLBI_DONE, NULL);
+    if (td) {
+        td->a = tsk ? tsk->pid : g_main_pid;
+        td->b = cpu_id();
+        td->c = tx;
+        td->u0 = mig_task_root_pa(tsk);
+        td->u1 = mig_task_asid(tsk);
+        __builtin_memcpy(td->op, "vm", 3);
+        g_active_vm_td = td;
     }
 }
 
@@ -551,50 +686,37 @@ void aarch64_user_mig_note_vm_edit(const struct task_struct *tsk,
                                    uint64_t old_pte, uint64_t new_pte,
                                    bool leaf_absent)
 {
-    if (!g_mig_active || !tsk || (int)tsk->pid != g_main_pid || !g_vm_window_active)
-        return;
-    if (!is_fault && va != MIG_DATA_VA)
-        return;
-    if (is_fault && va != MIG_DATA_VA)
+    if (!g_mig_active || !tsk || (int)tsk->pid != g_main_pid ||
+        !g_vm_window_active || va != MIG_DATA_VA)
         return;
 
-    const char *op = "fault";
     enum mig_ev_kind leaf_kind = ME_EDIT_LEAF;
-    if (!is_fault) {
-        if (nr == SYS_munmap)
-            op = "munmap";
-        else if (nr == SYS_mmap) {
-            op = "mmap";
-            leaf_kind = ME_EDIT_VMA;
-        } else if (nr == SYS_mprotect)
-            op = "mprotect";
-        else
-            return;
-    }
+    const char *op = mig_vm_op_name(nr, is_fault, &leaf_kind);
+    uint32_t tx = g_active_vm_tx;
+    if (!op || !tx)
+        return;
 
-    uint32_t tx = ++g_vm_tx_counter;
+    if (g_active_vm_eb)
+        __builtin_memcpy(g_active_vm_eb->op, op, sizeof(g_active_vm_eb->op));
+    if (g_active_vm_td)
+        __builtin_memcpy(g_active_vm_td->op, op, sizeof(g_active_vm_td->op));
 
     uint64_t root = mig_task_root_pa(tsk);
     uint8_t asid = mig_task_asid(tsk);
 
-    struct mig_event *eb = mig_reserve(ME_EDIT_BEGIN, NULL);
-    if (eb) {
-        eb->a = tsk->pid;
-        eb->b = cpu_id();
-        eb->c = tx;
-        eb->u0 = root;
-        eb->u1 = asid;
-        __builtin_memcpy(eb->op, op, sizeof(eb->op));
+    if (!g_active_vm_tlbi_done && (nr == SYS_mmap || is_fault)) {
+        g_active_vm_tlbi_done = true;
+        struct mig_event *td = mig_reserve(ME_TLBI_DONE, NULL);
+        if (td) {
+            td->a = tsk->pid;
+            td->b = cpu_id();
+            td->c = tx;
+            td->u0 = root;
+            td->u1 = asid;
+            __builtin_memcpy(td->op, op, sizeof(td->op));
+        }
     }
-    struct mig_event *td = mig_reserve(ME_TLBI_DONE, NULL);
-    if (td) {
-        td->a = tsk->pid;
-        td->b = cpu_id();
-        td->c = tx;
-        td->u0 = root;
-        td->u1 = asid;
-        __builtin_memcpy(td->op, op, sizeof(td->op));
-    }
+
     struct mig_event *el = mig_reserve(leaf_kind, NULL);
     if (el) {
         el->a = tsk->pid;
@@ -607,6 +729,9 @@ void aarch64_user_mig_note_vm_edit(const struct task_struct *tsk,
         el->u3 = new_pte;
         __builtin_memcpy(el->op, op, sizeof(el->op));
     }
+    g_active_vm_tx = 0;
+    g_active_vm_eb = NULL;
+    g_active_vm_td = NULL;
 }
 
 void aarch64_user_mig_note_tlbi(uint8_t asid, bool is_full_flush)
@@ -620,6 +745,29 @@ void aarch64_user_mig_note_tlbi(uint8_t asid, bool is_full_flush)
             ev->b = cpu_id();
             ev->u1 = asid;
         }
+    } else {
+        uint32_t tx = g_active_vm_tx;
+        if (tx && !g_active_vm_tlbi_done) {
+            g_active_vm_tlbi_done = true;
+            task_t *tsk = arch_current_task();
+            struct mig_event *td = mig_reserve(ME_TLBI_DONE, NULL);
+            if (td) {
+                td->a = tsk ? tsk->pid : g_main_pid;
+                td->b = cpu_id();
+                td->c = tx;
+                td->u0 = mig_task_root_pa(tsk);
+                td->u1 = asid;
+                __builtin_memcpy(td->op, "vm", 3);
+                g_active_vm_td = td;
+            }
+        }
+        struct mig_event *ev = mig_reserve(ME_TLBI_TAG, NULL);
+        if (ev) {
+            ev->a = g_main_pid;
+            ev->b = cpu_id();
+            ev->c = tx;
+            ev->u1 = asid;
+        }
     }
 }
 
@@ -630,6 +778,7 @@ void aarch64_user_mig_note_el0_svc(const struct task_struct *tsk,
         return;
     int pid = (int)tsk->pid;
 
+    uint64_t mf = spin_lock_irqsave(&g_mig_lock);
     if (g_main_pid < 0 && g_parent_pid > 0 && pid != g_parent_pid &&
         tsk->parent && (int)tsk->parent->pid == g_parent_pid) {
         g_main_pid = pid;
@@ -650,6 +799,7 @@ void aarch64_user_mig_note_el0_svc(const struct task_struct *tsk,
             fev->u0 = tsk->allowed_cpus;
         }
     }
+    spin_unlock_irqrestore(&g_mig_lock, mf);
 
     if (pid == g_parent_pid && !g_parent_checked && g_ctrl_pa) {
         g_parent_checked = true;
@@ -703,6 +853,8 @@ void aarch64_user_mig_note_el0_svc(const struct task_struct *tsk,
         }
         if (g_move_resumed[1] && !g_move_el0_seen[1]) {
             g_move_el0_seen[1] = true;
+            uint64_t t0 = 0, t1 = 0;
+            aarch64_user_vm_save_tls(&t0, &t1);
             struct mig_event *ev = mig_reserve(ME_EL0_AFTER, NULL);
             if (ev) {
                 ev->a = 1;
@@ -710,6 +862,8 @@ void aarch64_user_mig_note_el0_svc(const struct task_struct *tsk,
                 ev->c = cpu_id();
                 ev->u0 = mig_task_root_pa(tsk);
                 ev->u1 = mig_task_asid(tsk);
+                ev->u2 = frame->x13;
+                ev->u3 = t0;
             }
             return;
         }
@@ -731,6 +885,8 @@ void aarch64_user_mig_note_el0_svc(const struct task_struct *tsk,
         }
         if (g_move_resumed[2] && !g_move_el0_seen[2]) {
             g_move_el0_seen[2] = true;
+            uint64_t t0 = 0, t1 = 0;
+            aarch64_user_vm_save_tls(&t0, &t1);
             struct mig_event *ev = mig_reserve(ME_EL0_AFTER, NULL);
             if (ev) {
                 ev->a = 2;
@@ -738,6 +894,8 @@ void aarch64_user_mig_note_el0_svc(const struct task_struct *tsk,
                 ev->c = cpu_id();
                 ev->u0 = mig_task_root_pa(tsk);
                 ev->u1 = mig_task_asid(tsk);
+                ev->u2 = frame->x13;
+                ev->u3 = t0;
             }
             return;
         }
@@ -748,6 +906,8 @@ void aarch64_user_mig_note_el0_svc(const struct task_struct *tsk,
 
     if (pid == g_child2_pid && g_move_resumed[3] && !g_move_el0_seen[3]) {
         g_move_el0_seen[3] = true;
+        uint64_t t0 = 0, t1 = 0;
+        aarch64_user_vm_save_tls(&t0, &t1);
         struct mig_event *ev = mig_reserve(ME_EL0_AFTER, NULL);
         if (ev) {
             ev->a = 3;
@@ -755,6 +915,8 @@ void aarch64_user_mig_note_el0_svc(const struct task_struct *tsk,
             ev->c = cpu_id();
             ev->u0 = mig_task_root_pa(tsk);
             ev->u1 = mig_task_asid(tsk);
+            ev->u2 = frame->x13;
+            ev->u3 = t0;
         }
     }
 }
@@ -791,15 +953,33 @@ void aarch64_user_mig_note_sync_fault(const struct task_struct *tsk,
     g_vm_window_active = false;
 }
 
-void aarch64_user_mig_note_copy(const struct task_struct *tsk, int64_t ret)
+void aarch64_user_mig_note_copy(const struct task_struct *tsk, bool write,
+                                uint64_t user_addr, int64_t ret)
 {
-    if (!g_mig_active || !tsk || (int)tsk->pid != g_child2_pid)
+    if (!g_mig_active || !tsk || (int)tsk->pid != g_child2_pid || write)
+        return;
+    if (user_addr != 0x40002040ULL && user_addr != 0x40003000ULL)
         return;
     struct mig_event *ev = mig_reserve(ret >= 0 ? ME_COPY_OK : ME_COPY_DENIED, NULL);
     if (ev) {
         ev->a = tsk->pid;
         ev->b = cpu_id();
         ev->c = ret;
+    }
+}
+
+void aarch64_user_mig_note_wait_status(int req_pid, int child_pid,
+                                       int exit_code, int copy_rc)
+{
+    if (!g_mig_active)
+        return;
+    if (child_pid != g_main_pid && child_pid != g_child2_pid)
+        return;
+    struct mig_event *ev = mig_reserve(ME_WAIT_STATUS, NULL);
+    if (ev) {
+        ev->a = req_pid > 0 ? req_pid : child_pid;
+        ev->b = child_pid;
+        ev->c = (copy_rc < 0) ? copy_rc : exit_code;
     }
 }
 
@@ -839,7 +1019,30 @@ void aarch64_user_mig_note_exec_el0(const struct task_struct *tsk)
 void aarch64_user_mig_note_bsp_sched(uint32_t cpu) { (void)cpu; }
 
 void aarch64_user_runtime_test_timer_eoi(uint32_t intid, struct pt_regs *regs)
-{ (void)intid; (void)regs; }
+{
+    (void)intid;
+    (void)regs;
+    if (!g_mig_active)
+        return;
+    task_t *cur = arch_current_task();
+    if (!cur)
+        return;
+    uint32_t cpu = cpu_id();
+    int mid = __atomic_load_n(&g_active_move_id, __ATOMIC_ACQUIRE);
+    if (mid == 1 && cpu == 0 && (int)cur->pid == g_main_pid &&
+        __atomic_load_n(&g_move_window_open[1], __ATOMIC_ACQUIRE) &&
+        cur->vruntime >= cur->deadline) {
+        wait_queue_wake_one(&g_helper_wq[0]);
+    } else if (mid == 2 && cpu == 1 && (int)cur->pid == g_main_pid &&
+               __atomic_load_n(&g_move_window_open[2], __ATOMIC_ACQUIRE) &&
+               cur->vruntime >= cur->deadline) {
+        wait_queue_wake_one(&g_helper_wq[1]);
+    } else if (mid == 3 && cpu == 1 && (int)cur->pid == g_child2_pid &&
+               __atomic_load_n(&g_move_window_open[3], __ATOMIC_ACQUIRE) &&
+               cur->vruntime >= cur->deadline) {
+        wait_queue_wake_one(&g_helper_wq[1]);
+    }
+}
 void aarch64_user_runtime_test_irq_sched_before(struct task_struct *tsk,
     const struct pt_regs *regs, uint64_t *switches_out, uint64_t *elr_out)
 { (void)tsk; (void)regs; if (switches_out) *switches_out = 0; if (elr_out) *elr_out = 0; }
@@ -852,7 +1055,19 @@ void aarch64_user_runtime_test_sigreturn(struct task_struct *tsk) { (void)tsk; }
 void aarch64_user_runtime_test_note_switch(const struct task_struct *prev,
     const struct task_struct *next) { (void)prev; (void)next; }
 void aarch64_user_runtime_test_note_ttbr_switch(uint64_t old_ttbr0,
-    uint64_t new_ttbr0, bool full_flush) { (void)old_ttbr0; (void)new_ttbr0; (void)full_flush; }
+    uint64_t new_ttbr0, bool full_flush)
+{
+    (void)old_ttbr0;
+    (void)new_ttbr0;
+    if (!g_mig_active || !g_vm_window_active || !full_flush)
+        return;
+    struct mig_event *ev = mig_reserve(ME_FULL_FLUSH, NULL);
+    if (ev) {
+        ev->a = g_main_pid;
+        ev->b = cpu_id();
+        ev->u1 = (uint8_t)(new_ttbr0 >> 48);
+    }
+}
 void aarch64_user_runtime_test_note_asid_tlbi(uint8_t asid) { (void)asid; }
 void aarch64_user_runtime_test_note_asid_release(uint8_t asid) { (void)asid; }
 void aarch64_user_runtime_test_cow_barrier(uint64_t va, uint64_t old_pa) { (void)va; (void)old_pa; }
@@ -880,15 +1095,8 @@ static uint64_t mig_helper_fn(uint64_t arg)
     uint32_t cpu = (uint32_t)arg;
     while (!__atomic_load_n(&g_helper_stop, __ATOMIC_ACQUIRE)) {
         __atomic_store_n(&g_helper_waiting[cpu], true, __ATOMIC_RELEASE);
-        while (!mig_wait_helper_pred((void *)(uintptr_t)cpu)) {
-            wait_queue_arm(&g_helper_wq[cpu]);
-            if (mig_wait_helper_pred((void *)(uintptr_t)cpu)) {
-                wait_queue_disarm();
-                break;
-            }
-            schedule();
-            wait_queue_disarm();
-        }
+        while (!mig_wait_helper_pred((void *)(uintptr_t)cpu))
+            wait_queue_sleep(&g_helper_wq[cpu]);
         __atomic_store_n(&g_helper_waiting[cpu], false, __ATOMIC_RELEASE);
         if (__atomic_load_n(&g_helper_stop, __ATOMIC_ACQUIRE))
             break;
@@ -1019,6 +1227,11 @@ static void mig_dump_events(void)
                      (unsigned long long)ev->u0, (unsigned long long)ev->u1,
                      (int)ev->c, ev->op, (int)ev->d);
             break;
+        case ME_TLBI_TAG:
+            log_info("[user-runtime] migration-event seq=%u kind=tlbi_tag pid=%d cpu=%d tx=%d asid=%lu\n",
+                     s, (int)ev->a, (int)ev->b, (int)ev->c,
+                     (unsigned long long)ev->u1);
+            break;
         case ME_FULL_FLUSH:
             log_info("[user-runtime] migration-event seq=%u kind=full_flush pid=%d cpu=%d asid=%lu\n",
                      s, (int)ev->a, (int)ev->b, (unsigned long long)ev->u1);
@@ -1030,9 +1243,10 @@ static void mig_dump_events(void)
                      (unsigned long long)ev->u2);
             break;
         case ME_HW_DETACH:
-            log_info("[user-runtime] migration-event seq=%u kind=hw_detach move_id=%d pid=%d cpu=%d root=%lx asid=%lu\n",
+            log_info("[user-runtime] migration-event seq=%u kind=hw_detach move_id=%d pid=%d cpu=%d root=%lx asid=%lu ttbr0=%lx\n",
                      s, (int)ev->a, (int)ev->b, (int)ev->c,
-                     (unsigned long long)ev->u0, (unsigned long long)ev->u1);
+                     (unsigned long long)ev->u0, (unsigned long long)ev->u1,
+                     (unsigned long long)ev->u2);
             break;
         case ME_ROOT_UNPUBLISH:
             log_info("[user-runtime] migration-event seq=%u kind=root_unpublish move_id=%d pid=%d cpu=%d root=%lx asid=%lu\n",
@@ -1069,9 +1283,10 @@ static void mig_dump_events(void)
                      (unsigned long long)ev->u2, (int)ev->d);
             break;
         case ME_EL0_AFTER:
-            log_info("[user-runtime] migration-event seq=%u kind=el0_after move_id=%d pid=%d cpu=%d root=%lx asid=%lu\n",
+            log_info("[user-runtime] migration-event seq=%u kind=el0_after move_id=%d pid=%d cpu=%d root=%lx asid=%lu x13=%lx tpidr=%lx\n",
                      s, (int)ev->a, (int)ev->b, (int)ev->c,
-                     (unsigned long long)ev->u0, (unsigned long long)ev->u1);
+                     (unsigned long long)ev->u0, (unsigned long long)ev->u1,
+                     (unsigned long long)ev->u2, (unsigned long long)ev->u3);
             break;
         case ME_IDLE_ZERO:
             log_info("[user-runtime] migration-event seq=%u kind=idle_zero cpu=%d rq_nr=%d pending=%d cadence=%d\n",
@@ -1086,16 +1301,22 @@ static void mig_dump_events(void)
                      s, (int)ev->a, (int)ev->b, (int)ev->c);
             break;
         case ME_IDLE_CHECK:
-            log_info("[user-runtime] migration-event seq=%u kind=idle_check cpu=%d idx=%d wfi=%d sgi=0 other_irq=0 ap_work=0 direct_sched=0\n",
-                     s, (int)ev->a, (int)ev->b, (int)ev->c);
+            log_info("[user-runtime] migration-event seq=%u kind=idle_check cpu=%d idx=%d wfi=%d sgi=%lu other_irq=%lu ap_work=%lu direct_sched=%lu\n",
+                     s, (int)ev->a, (int)ev->b, (int)ev->c,
+                     (unsigned long long)ev->u0, (unsigned long long)ev->u1,
+                     (unsigned long long)ev->u2, (unsigned long long)ev->u3);
             break;
         case ME_IDLE_TAKE:
-            log_info("[user-runtime] migration-event seq=%u kind=idle_take cpu=%d sgi=0 other_irq=0 ap_work=0 direct_sched=0\n",
-                     s, (int)ev->a);
+            log_info("[user-runtime] migration-event seq=%u kind=idle_take cpu=%d sgi=%lu other_irq=%lu ap_work=%lu direct_sched=%lu\n",
+                     s, (int)ev->a,
+                     (unsigned long long)ev->u0, (unsigned long long)ev->u1,
+                     (unsigned long long)ev->u2, (unsigned long long)ev->u3);
             break;
         case ME_BSP_TICK_SCHED:
-            log_info("[user-runtime] migration-event seq=%u kind=bsp_tick_schedule move_id=%d cpu=%d bsp_req=%d sgi=0 ap_work=0 direct_sched=0\n",
-                     s, (int)ev->a, (int)ev->b, (int)ev->c);
+            log_info("[user-runtime] migration-event seq=%u kind=bsp_tick_schedule move_id=%d cpu=%d bsp_req=%d sgi=%lu ap_work=%lu direct_sched=%lu\n",
+                     s, (int)ev->a, (int)ev->b, (int)ev->c,
+                     (unsigned long long)ev->u0, (unsigned long long)ev->u1,
+                     (unsigned long long)ev->u2);
             break;
         case ME_COPY_OK:
             log_info("[user-runtime] migration-event seq=%u kind=copy_ok pid=%d cpu=%d ret=%d\n",
@@ -1136,18 +1357,11 @@ static void mig_reap_observer(struct task_struct *t)
         return;
     int pid = (int)t->pid;
     uint64_t status = (uint64_t)t->exit_code;
-    int i = __atomic_fetch_add(&mig_reap_idx, 1, __ATOMIC_RELAXED);
+    int i = __atomic_load_n(&mig_reap_idx, __ATOMIC_RELAXED);
     if (i < 8) {
         mig_reap_pid_seen[i] = (uint64_t)pid;
         mig_reap_status_seen[i] = status;
-    }
-    if (pid == g_main_pid || pid == g_child2_pid) {
-        struct mig_event *ev = mig_reserve(ME_WAIT_STATUS, NULL);
-        if (ev) {
-            ev->a = pid;
-            ev->b = pid;
-            ev->c = (int64_t)status;
-        }
+        __atomic_store_n(&mig_reap_idx, i + 1, __ATOMIC_RELEASE);
     }
     if (pid == g_parent_pid || pid == g_main_pid || pid == g_child2_pid)
         wait_queue_wake_one(&g_worker_wq);
@@ -1156,6 +1370,7 @@ static void mig_reap_observer(struct task_struct *t)
 static uint64_t mig_worker(uint64_t arg)
 {
     (void)arg;
+    g_mig_worker_task = current;
     int rc = 1;
     uint64_t roots_before = aarch64_pt_published_root_count();
     uint64_t pages_before = pmm_probe_4k_allocated_count();
@@ -1217,11 +1432,26 @@ static uint64_t mig_worker(uint64_t arg)
                 g_parent_pid);
         goto out_stop;
     }
+    uint32_t spawn_cpu = 0;
+    uint64_t spawn_mask = 0;
+    {
+        uint64_t tf = spin_lock_irqsave(&task_list_lock);
+        for (list_t *p = init_task_union.task.list.next;
+             p != &init_task_union.task.list; p = p->next) {
+            task_t *t = container_of(p, task_t, list);
+            if ((int)t->pid == g_parent_pid) {
+                spawn_cpu = t->cpu;
+                spawn_mask = t->allowed_cpus;
+                break;
+            }
+        }
+        spin_unlock_irqrestore(&task_list_lock, tf);
+    }
     struct mig_event *sev = mig_reserve(ME_SPAWN, NULL);
     if (sev) {
         sev->a = g_parent_pid;
-        sev->b = 1;
-        sev->u0 = 3;
+        sev->b = spawn_cpu;
+        sev->u0 = spawn_mask;
     }
 
     /* Wait for parent + child1 + child2 to finish all stages. */
@@ -1230,6 +1460,7 @@ static uint64_t mig_worker(uint64_t arg)
         if (g_main_pid < 0 || g_child2_pid < 0) {
             /* Discover forked children from task_list_lock. */
             uint64_t tf = spin_lock_irqsave(&task_list_lock);
+            uint64_t mf = spin_lock_irqsave(&g_mig_lock);
             for (list_t *p = init_task_union.task.list.next;
                  p != &init_task_union.task.list; p = p->next) {
                 task_t *t = container_of(p, task_t, list);
@@ -1253,6 +1484,7 @@ static uint64_t mig_worker(uint64_t arg)
                     }
                 }
             }
+            spin_unlock_irqrestore(&g_mig_lock, mf);
             spin_unlock_irqrestore(&task_list_lock, tf);
         }
 
@@ -1264,18 +1496,21 @@ static uint64_t mig_worker(uint64_t arg)
         } else if (__atomic_load_n(&g_active_move_id, __ATOMIC_ACQUIRE) == 1 &&
                    g_remap_checked && mig_read_ctrl(MIG_CTRL_C1) == 3) {
             __atomic_store_n(&g_move_window_open[1], false, __ATOMIC_RELEASE);
+            mig_reset_window_counters(0);
             __atomic_store_n(&g_active_move_id, 2, __ATOMIC_RELEASE);
             __atomic_store_n(&g_move_window_open[2], true, __ATOMIC_RELEASE);
         } else if (__atomic_load_n(&g_active_move_id, __ATOMIC_ACQUIRE) == 2 &&
                    g_child2_pid > 0 && mig_read_ctrl(MIG_CTRL_C2) == 1) {
             __atomic_store_n(&g_move_window_open[2], false, __ATOMIC_RELEASE);
+            mig_reset_window_counters(0);
             __atomic_store_n(&g_active_move_id, 3, __ATOMIC_RELEASE);
             __atomic_store_n(&g_move_window_open[3], true, __ATOMIC_RELEASE);
         }
 
         bool parent_reaped = false;
         int parent_status = -1;
-        for (int i = 0; i < mig_reap_idx && i < 8; i++) {
+        int reap_cnt = __atomic_load_n(&mig_reap_idx, __ATOMIC_ACQUIRE);
+        for (int i = 0; i < reap_cnt && i < 8; i++) {
             if ((int)mig_reap_pid_seen[i] == g_parent_pid) {
                 parent_reaped = true;
                 parent_status = (int)mig_reap_status_seen[i];
@@ -1352,3 +1587,4 @@ void test_aarch64_user_migration_run(void)
     int rc = __atomic_load_n(&g_mig_done, __ATOMIC_ACQUIRE) ? g_mig_rc : 1;
     selftest_record_late("aarch64_user_runtime_migration", rc);
 }
+#endif /* AARCH64_USER_RUNTIME_CASE_MIGRATION */

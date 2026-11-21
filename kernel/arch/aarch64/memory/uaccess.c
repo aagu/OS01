@@ -229,21 +229,19 @@ static ssize_t copy_user_common(uint64_t user_addr, const void *kern, size_t n,
         : aarch64_copy_from_user_raw((void *)kern, user_addr, n);
 
     *win = (struct aarch64_uaccess_window){0};
-    arch_local_irq_restore(state);
-
     if (rc < 0)
         goto fault;
+    arch_local_irq_restore(state);
+
 #ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
-    if (!write && (user_addr == 0x40002040ULL || user_addr == 0x40003000ULL))
-        aarch64_user_mig_note_copy(arch_current_task(), (int64_t)n);
+    aarch64_user_mig_note_copy(arch_current_task(), write, user_addr, (int64_t)n);
 #endif
     return (ssize_t)n;
 
 fault:
     arch_local_irq_restore(state);
 #ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
-    if (!write && (user_addr == 0x40002040ULL || user_addr == 0x40003000ULL))
-        aarch64_user_mig_note_copy(arch_current_task(), -EFAULT);
+    aarch64_user_mig_note_copy(arch_current_task(), write, user_addr, -EFAULT);
 #endif
     return user_copy_fault(on_fault, arg);
 }

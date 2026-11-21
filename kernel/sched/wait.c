@@ -113,6 +113,14 @@ int64_t do_waitpid(int64_t pid, int *user_status, int options)
 
             debug_task("waitpid: pid=%d reaped child %d (exit=%d)\n",
                           (int)current->pid, (int)child_pid, (int)exit_code);
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+            {
+                extern void aarch64_user_mig_note_wait_status(
+                    int req_pid, int child_pid, int exit_code, int copy_rc);
+                aarch64_user_mig_note_wait_status((int)pid, (int)child_pid,
+                                                   (int)exit_code, (int)status_rc);
+            }
+#endif
             return (status_rc < 0) ? status_rc : child_pid;
         }
 

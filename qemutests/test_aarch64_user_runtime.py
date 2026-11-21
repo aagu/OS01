@@ -90,8 +90,6 @@ def _good_migration_trace():
     ev("fork", pid=21, cpu=0, mask=3)
     ev("fork", pid=22, cpu=1, mask=3)
     ev("cow_check", pid=21, va="0x40001000", cow_val="0x2222")
-    ev("parent_check", pid=20, va="0x40000000", pa="0x50001000",
-       data="0x1111", cow_val="0x1111")
     ev("old_load", pid=21, cpu=0, root="0x50010000", asid=2,
        va="0x40000000", pa="0x50001000", data="0x1111")
 
@@ -111,7 +109,7 @@ def _good_migration_trace():
     ev("pick", move_id=1, pid=21, cpu=1, root="0x50010000", asid=2, on_cpu=1)
     ev("hw_install", move_id=1, pid=21, cpu=1, root="0x50010000", asid=2)
     ev("irq_resume", move_id=1, pid=21, cpu=1, root="0x50010000", asid=2, frame="0xffff00001000", match=1)
-    ev("el0_after", move_id=1, pid=21, cpu=1, root="0x50010000", asid=2)
+    ev("el0_after", move_id=1, pid=21, cpu=1, root="0x50010000", asid=2, x13="0xcafe0001", tpidr="0xbeef1234")
 
     # Remap on CPU 1: munmap, mmap, demand fault, mprotect
     ev("edit_begin", pid=21, cpu=1, root="0x50010000", asid=2, tx=1, op="munmap")
@@ -138,11 +136,13 @@ def _good_migration_trace():
     ev("pick", move_id=2, pid=21, cpu=0, root="0x50010000", asid=2, on_cpu=1)
     ev("hw_install", move_id=2, pid=21, cpu=0, root="0x50010000", asid=2)
     ev("irq_resume", move_id=2, pid=21, cpu=0, root="0x50010000", asid=2, frame="0xffff00001000", match=1)
-    ev("el0_after", move_id=2, pid=21, cpu=0, root="0x50010000", asid=2)
+    ev("el0_after", move_id=2, pid=21, cpu=0, root="0x50010000", asid=2, x13="0xcafe0002", tpidr="0xbeef1234")
 
     ev("new_load", pid=21, cpu=0, root="0x50010000", asid=2, va="0x40000000", pa="0x50020000", data="0x3333")
     ev("permission_abort", pid=21, cpu=0, root="0x50010000", asid=2, va="0x40000000", pa="0x50020000", data="0x3333", ec="0x24", fsc="0xf", far="0x40000000", wnr=1)
     ev("wait_status", child_pid=21, returned_pid=21, status=-14)
+    ev("parent_check", pid=20, va="0x40000000", pa="0x50001000",
+       data="0x1111", cow_val="0x1111")
 
     # Move 3: child 22 1 -> 0, copy_ok/copy_denied, exec
     ev("irq_save", move_id=3, pid=22, cpu=1, root="0x50030000", asid=3, frame="0xffff00002000")
@@ -154,7 +154,7 @@ def _good_migration_trace():
     ev("pick", move_id=3, pid=22, cpu=0, root="0x50030000", asid=3, on_cpu=1)
     ev("hw_install", move_id=3, pid=22, cpu=0, root="0x50030000", asid=3)
     ev("irq_resume", move_id=3, pid=22, cpu=0, root="0x50030000", asid=3, frame="0xffff00002000", match=1)
-    ev("el0_after", move_id=3, pid=22, cpu=0, root="0x50030000", asid=3)
+    ev("el0_after", move_id=3, pid=22, cpu=0, root="0x50030000", asid=3, x13="0xcafe0003", tpidr="0xbeef5678")
 
     ev("copy_ok", pid=22, cpu=0, ret=16)
     ev("copy_denied", pid=22, cpu=0, ret=-14)
@@ -333,6 +333,16 @@ class UserRuntimeEvidenceTests(unittest.TestCase):
         lines[i_fin], lines[i_pass] = lines[i_pass], lines[i_fin]
         ok, _ = runner.parse_user_runtime_evidence("\n".join(lines) + "\n", "migration")
         self.assertFalse(ok)
+
+    def test_migration_data_mismatch_fails(self):
+        text = _good_migration_trace().replace("data=0x3333", "data=0x1111", 1)
+        ok, _ = runner.parse_user_runtime_evidence(text, "migration")
+        self.assertFalse(ok)
+
+    def test_product_audit_forbids_mig_prefixes(self):
+        self.assertIn("aarch64_user_mig_", runner.FORBIDDEN_PRODUCT_PREFIXES)
+        self.assertIn("aarch64_sched_tick_mig_", runner.FORBIDDEN_PRODUCT_PREFIXES)
+        self.assertIn("aarch64_asid_test_", runner.FORBIDDEN_PRODUCT_PREFIXES)
 
 
 if __name__ == "__main__":

@@ -161,6 +161,8 @@ _start:
     ldr     x11, [x21]
     /* Read old content from 0x40000000 (warm old TLB). */
     ldr     x12, [x20]
+    /* Warm control page write permission before opening VM window. */
+    str     xzr, [x22, #CTRL_C1_STAGE]
     /* Kernel observes cow_check + old_load on CPU0 via SYS_getpid. */
     mov     x8, #SYS_getpid
     svc     #0

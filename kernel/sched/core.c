@@ -581,6 +581,11 @@ void schedule(void)
     current->thread->sched_flags = arch_local_irq_save();
 
     rq->schedule_count++;
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+    aarch64_user_mig_note_sched_entry(
+        rq->cpu_id, current == rq->idle,
+        __atomic_load_n(&rq->need_resched, __ATOMIC_RELAXED));
+#endif
 
     // ── Hang detector ──────────────────────────────────
     if (rq->watchdog_counter >= HANG_THRESHOLD) {

@@ -66,6 +66,7 @@ void arch_aarch64_idle_step(void)
 
     /* 3. runnable work → schedule (IRQ state restored around it). */
 #ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+    aarch64_user_mig_note_ap_work(cpu_id(), slot_state);
     aarch64_user_mig_idle_after_check(cpu_id(), idle_balance,
                                       !need && slot_state != AP_WORK_READY);
 #endif

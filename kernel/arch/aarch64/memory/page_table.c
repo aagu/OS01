@@ -278,6 +278,12 @@ static void tlb_invalidate_local(uint64_t va)
             "isb"
             :: "r"((va >> AARCH64_PT_L3_SHIFT) & UINT64_C(0xfffffffff))
             : "memory");
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+        {
+            extern void aarch64_user_mig_note_va_tlbi(uint64_t va);
+            aarch64_user_mig_note_va_tlbi(va);
+        }
+#endif
     } else {
         __asm__ __volatile__(
             "tlbi vae1, %0\n\t"

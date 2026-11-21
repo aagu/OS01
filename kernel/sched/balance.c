@@ -40,7 +40,7 @@ unsigned sched_pick_cpu_mask(uint64_t allowed)
         if (!__atomic_load_n(&percpu_data[i].online, __ATOMIC_ACQUIRE) ||
             !__atomic_load_n(&percpu_data[i].scheduler_ok, __ATOMIC_ACQUIRE))
             continue;
-        uint32_t nr = *(volatile uint32_t *)&percpu_data[i].nr_running;
+        uint32_t nr = __atomic_load_n(&percpu_data[i].nr_running, __ATOMIC_RELAXED);
         /* Tiebreak: lower nr wins; equal nr prefers the caller's CPU
          * to keep the schedule local; further equal prefers lower i. */
         if (nr < min_nr ||

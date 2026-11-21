@@ -63,13 +63,22 @@ void aarch64_user_mig_idle_pre_wfi(uint32_t cpu, uint32_t rq_nr);
 void aarch64_user_mig_idle_tick(uint32_t cpu, uint32_t intid);
 void aarch64_user_mig_idle_after_check(uint32_t cpu, bool took_balance,
                                        bool entered_wfi);
+void aarch64_user_mig_note_vm_begin(const struct task_struct *tsk);
 void aarch64_user_mig_note_vm_edit(const struct task_struct *tsk,
                                    uint64_t nr, uint64_t va, bool is_fault,
                                    uint64_t old_pte, uint64_t new_pte,
                                    bool leaf_absent);
+void aarch64_user_mig_note_va_tlbi(uint64_t va);
 void aarch64_user_mig_note_tlbi(uint8_t asid, bool is_full_flush);
-void aarch64_user_mig_note_copy(const struct task_struct *tsk, int64_t ret);
+void aarch64_user_mig_note_copy(const struct task_struct *tsk, bool write,
+                                uint64_t user_addr, int64_t ret);
 void aarch64_user_mig_note_bsp_sched(uint32_t cpu);
+void aarch64_user_mig_note_irq(uint32_t intid);
+void aarch64_user_mig_note_ap_work(uint32_t cpu, uint32_t slot_state);
+void aarch64_user_mig_note_sched_entry(uint32_t cpu, bool is_idle,
+                                       uint32_t need_resched);
+void aarch64_user_mig_note_wait_status(int req_pid, int child_pid,
+                                       int exit_code, int copy_rc);
 #endif
 #endif
 
