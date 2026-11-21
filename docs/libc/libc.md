@@ -40,7 +40,7 @@ append）外加 shutdown（由 guest 的 nettest 用例验收）—— 详见验
 用例数是 **2026-11-09 实测**的（直接跑 `build/x86_64-clang/host-test/*.elf` 的汇总行）。
 
 **本期不实现**（2026-11-09 用户决定）：POSIX 正则引擎（T16）与 glob/globfree 匹配。
-见 §4。
+见 §5。
 
 ---
 
@@ -104,7 +104,81 @@ libc 分配缓冲区，**调用方负责 free**。
 
 ---
 
-## 4. 已知限制
+## 4. libm 基础代数集
+
+`libm.a` 是**独立的第三个归档**（2026-11-21 落地），既不属于 `libc.a`，也不属于内核的
+`libk.a`。它是 sysroot 里唯一会做数学计算的库。
+
+### 4.1 符号集（16 个）
+
+| 函数 | 变体 | 说明 |
+|---|---|---|
+| `fabs` | `fabsf` | 取绝对值（按位清符号位） |
+| `copysign` | `copysignf` | 复制符号位 |
+| `floor` | `floorf` | 向下取整 |
+| `ceil` | `ceilf` | 向上取整 |
+| `trunc` | `truncf` | 向零取整 |
+| `round` | `roundf` | 四舍五入（远离零） |
+| `fmod` | `fmodf` | 浮点取模 |
+| `sqrt` | `sqrtf` | 平方根 |
+
+来源为 **musl 1.2.5** vendored（SHA256 钉在 `thirdpart/musl-libc-algorithms.manifest`，
+MIT 许可）。`libc/include/math.h` 按 musl 格式改写为公开契约，声明**恰为这 16 个**。
+
+### 4.2 归属与调用方式
+
+- **内核不链接 libm**：`libm.a` 不进 `libk.a`，内核保持 FP-free。`test-libc-api-audit`
+  断言这 16 个符号**只**由 `libm.a` 导出——`libc.a` 与 `libk.a` 都不得定义它们。
+- **调用方需显式链接 `-lm`**（如 `user/doom/app.mk`）。
+- 归档位置：`build/<profile>/staging/libc/usr/lib/libm.a`，随 sysroot generation 发布。
+
+### 4.3 实现方法：整数位运算
+
+全部函数用**整数位操作**计算，浮点单元从不做算术。这样 NaN 载荷与负零符号能原样保留——
+浮点算术路径（尤其 FMA 与取整）会规范化掉这些位。
+
+`scripts/audit_libm_asm.py` 审计**已发布**归档（`$(SYSROOT)/usr/lib/libm.a`）的反汇编，
+证明方法而非只证明结果：不得出现浮点加减乘除、FMA、平方根、比较、取整或整数↔浮点
+转换指令；浮点寄存器只允许被数据搬运指令触及（x86_64 的 `movsd/movss/xorps`，
+aarch64 的 `fmov/fcsel/movi/ldr/str`）。profile 决定架构，外来架构的归档是**失败**
+而非警告。
+
+### 4.4 怎么验证
+
+```bash
+# 符号归属：16 个符号只由 libm.a 导出
+make PROFILE=x86_64-clang test-libc-api-audit
+
+# 指令审计：已发布归档无浮点算术指令（两个 profile 各跑一次）
+make PROFILE=x86_64-clang test-libm-asm
+make PROFILE=aarch64-clang test-libm-asm
+
+# 宿主对拍宿主 glibc
+make PROFILE=x86_64-clang test-libc-host LIBC_CASE=math
+
+# guest 实跑 16 个符号
+make OS01_SYSTEST=1 test-syscall
+```
+
+审计脚本自身的负向能力用 `--selftest` 复现：它现场组装临时夹具，确认干净夹具通过，
+而 `addsd`/`cvttss2si`/`vfmadd213sd`（x86_64）与 `fadd`/`scvtf`/`frintn`（aarch64）逐一
+被点名拒绝。
+
+### 4.5 剩余范围（未实现）
+
+三角/对数/幂等等超越函数、`long double` 变体（x86_64 是 x87 80-bit、aarch64 是
+binary128 quad）、复数函数、`fenv`（异常标志）**均未实现**，`math.h` 不声明它们。
+`long double` 变体的排除是显式决定：x87 与 compiler-rt 软浮点都会把 OS01 当前没有的
+依赖拖进来。
+
+设计 spec：[`docs/superpowers/specs/2026-11-21-libm-design.md`](../superpowers/specs/2026-11-21-libm-design.md) ·
+实施 plan：[`docs/superpowers/plans/2026-11-21-libm.md`](../superpowers/plans/2026-11-21-libm.md) ·
+闭环记录：[`docs/changelog.md`](../changelog.md#2026-11-21) ·
+构建指南：[`docs/build/build.md`](../build/build.md)
+
+---
+
+## 5. 已知限制
 
 | # | 限制 | 说明 |
 |---|---|---|
@@ -122,7 +196,7 @@ libc 分配缓冲区，**调用方负责 free**。
 
 ---
 
-## 5. 消费者
+## 6. 消费者
 
 libc 的真实消费者都在本仓库里，且**必须走真实库能力**：
 
@@ -139,7 +213,7 @@ libc 的真实消费者都在本仓库里，且**必须走真实库能力**：
 
 ---
 
-## 6. 证据
+## 7. 证据
 
 - 逐任务的实施报告：`.superpowers/sdd/2026-11-08-libc-completion/task-*-report.md`
 - 批审记录：同目录的 `review-*.md`

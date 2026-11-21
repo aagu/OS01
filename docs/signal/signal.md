@@ -98,6 +98,13 @@ new_rsp+8: [struct sigframe (200 bytes)]   ← saved pt_regs + blocked mask
 
 The trampoline is `sa_restorer` (set by libc's `sigaction()` to `sigreturn_trampoline`).
 
+**x86_64 帧无 FPU 区。** 上面的 200 字节只存通用寄存器与 blocked 掩码
+（`kernel/include/uapi/time.h:95-106`），**不含 x87/SSE 状态**——signal handler 一旦使用
+浮点，被打断上下文的 FP 状态会被毁掉。aarch64 侧已于 2026-11-21 补齐（`struct
+aarch64_sigframe` 816 B，含 16 字节对齐的 `fp[528]@288`，见
+[`arch.md`](../arch.md) 与 [`changelog.md`](../changelog.md#2026-11-21)）；x86_64 的对齐
+任务是规划项，见 [`roadmap.md`](../roadmap.md) P5。
+
 ## Signal handler return
 
 The assembler trampoline in `libc/arch/<arch>/sigreturn_trampoline.S` (a libc.a member, pulled by `sigaction()`/`signal()`):

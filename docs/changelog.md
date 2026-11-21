@@ -7,6 +7,27 @@
 
 ## 2026-11-21
 
+- feat(libc): **libm 基础代数集落地（闭合 roadmap P3「libc / 可选 LVGL 能力」② libm 归档）**——sysroot 里的空桩 `libm.a` 换成会算的真实归档，musl 1.2.5 vendored（spec `docs/superpowers/specs/2026-11-21-libm-design.md`、plan `docs/superpowers/plans/2026-11-21-libm.md`）：
+
+  **做了什么**
+  - **真实归档**：`libc/math/` 下 18 个文件建成独立的 `usr/lib/libm.a`（`libc/Makefile:87-116` 建 `LIBM_ARCHIVE`，`:213` 安装到 sysroot）。**16 个符号**：`fabs/fabsf`、`copysign/copysignf`、`floor/floorf`、`ceil/ceilf`、`trunc/truncf`、`round/roundf`、`fmod/fmodf`、`sqrt/sqrtf`。`libc/include/math.h` 按 musl 格式改写为公开契约，声明**恰为这 16 个**（此前只有头内 inline 的 `fabs`）。
+  - **归属隔离**：`libm.a` **不进** `libk.a`（内核保持 FP-free），`math/*.c` 也不进 `libc.a` 的对象清单——三者互不重叠，由 `test-libc-api-audit` 断言这 16 个符号**只**由 libm.a 导出。调用方需显式链接 `-lm`（如 `user/doom/app.mk`）。
+  - **整数位运算实现**：全部用整数位操作计算，浮点单元从不做算术——这样 NaN 载荷与负零符号能原样保留。
+  - **三层验证**：① 宿主 `test_libc_math` 对拍宿主 glibc（`hosttests/oracle/libm_oracle.c` + `hosttests/data/libm_cases.h`）；② guest `64_libm` 用例在运行中的系统实跑 16 个符号（`user/systest/test_libm.c`）；③ `scripts/audit_libm_asm.py` 审计**已发布归档**的反汇编，证明方法——不得出现浮点加减乘除、FMA、平方根、比较、取整或整数↔浮点转换指令，浮点寄存器只允许被数据搬运指令触及；x86_64 的 `movsd/movss/xorps` 与 aarch64 的 `fmov/fcsel/movi/ldr/str` 合规，aarch64 的 `fabs`/`fneg` 符号位指令同样禁用。profile 决定架构，外来架构的归档是失败而非警告。审计脚本 `--selftest` 现场组装夹具证明它有牙齿：`addsd`/`cvttss2si`/`vfmadd213sd`（x86_64）与 `fadd`/`scvtf`/`frintn`（aarch64）逐一被点名拒绝。
+  - **明确排除**（写进 spec，不做）：三角/对数/幂等超越函数、`long double` 变体（x86_64 是 x87 80-bit、aarch64 是 binary128，前者要 x87、后者要 compiler-rt 软浮点）、复数、`fenv` 异常标志。本次取代 [D01 Doom 前置 libc 补充](superpowers/specs/2026-11-10-doom-01-libc-design.md) 里「fabs 用头内静态内联、不引入 libm archive」的决定。
+
+  **验收**
+  - `make PROFILE=x86_64-clang test-libc-api-audit`：16 个符号的归属断言通过。
+  - `make PROFILE=x86_64-clang test-libm-asm` 与 `make PROFILE=aarch64-clang test-libm-asm`：两个 profile 的已发布归档反汇编审计均通过。
+  - guest `64_libm` 用例在运行中的系统实跑通过；宿主 `test_libc_math` 对拍宿主 glibc 通过。
+
+- docs: **roadmap 对齐 master 现状，移除已完成项并归位到专题文档**——以 master（`4c394eb8`）为准逐条核对路线图全部 P1~P5 条目，删除已完成任务并把叙述迁到对应专题文档：
+  - **删除已闭环项**：P2「EL0 FP/SIMD 上下文（剩余项）」整行移除（该行内部自述「剩余三项已于 2026-11-21 闭环」，闭环记录已在 `docs/changelog.md` 与 `docs/arch.md`）。但其中**唯一真实未完成的后续项**——x86_64 signal 帧无 FPU 区——被保留为 P5 独立行（x86_64 `struct sigframe` 仍 200 B 仅存 GPR + blocked，handler 用 FP 会毁掉被打断上下文的 x87/SSE 状态）。
+  - **计数校正**：P2 由 18 改为 15（内存与执行体 3→1：EL0 FP/SIMD 行移除后该表只剩跨进程 inode 级 `MAP_SHARED`）、P5 由 13 改为 14（新增 x86_64 signal 帧 FPU 区）。原计数与表内实际行数已对不上，按表内实际行数重算。
+  - **修正与 master 不符的陈述**（此前均为事实错误，非行号漂移）：① 平台能力上限原称「正解读 `ID_AA64MMFR0_EL1.PARange` 动态设 IPS」——全树无任何 PARange 读取，IPS 是编译期硬编码 0b010，>40-bit PA 平台实际不支持；② identity map 原引 `head.S:485-501`/`:549-566`——master 上 `head.S` 仅 288 行，实际在 `:168-212`；③ Device 窗口原称「现为减去 [0x08000000,0x0a000000)」——它已运行时化（优先取 boot_context handoff 派生值，QEMU 常量只是 fallback），原文与本节开头「已闭环」自相矛盾；④ 网络栈接入原称「翻门解锁 `kernel/fs/file.c`/`kernel/fs/poll.c` 的 FD_SOCKET 编译块」——`poll.c` 根本没有 `OS01_HAS_NET` 编译门，只有 `file.c` 有；⑤ E2E 套件原称「约 20 个」——实为 25 个 x86-only（`TEST_QEMU_SUITE_IDS` 共 41 项），aarch64 侧另有 16 项 `SUITE=aarch64-*` 与 17 种 MODE；⑥ `SYS_time` 桩原称「x86 侧」——它在架构中立的 `kernel/syscall/sys_time.c:24-45`。
+  - **行号漂移校正**（结论不变，仅引用指向 master 上不存在的行）：`mk/components/run.mk` 1228→1235、1324-1326→1344-1347、1875→1915、1395-1398→1436；`config/busybox.config.in` 975→980、989→994、446→451 及六个 applet 行号；`user/Makefile` 85→86；`kernel/include/sched/task.h` 71→70；`kernel/arch/aarch64/memory/user_elf.c` 41-42→45-46；`kernel/arch/aarch64/intr/entry.S` SError 自跳 61/89/105→62/90/106；P2 粗估句原称「剩余差距集中在 EL0 FP/SIMD 剩余项」——该差距已闭环，改为跨进程 `MAP_SHARED` 与 x86_64 signal 帧 FPU 区。
+  - **归位**：libm 的完整交付记录（本条目）与专题说明（`docs/libc/libc.md` 新增 §「libm 基础代数集」）补齐——此前 master 上 libm 的 5 个提交只改了 roadmap 一行与构建指南，changelog 与 libc 专题文档都没有记录。P2「能力齐平」开篇句「已由上文三任务收口」相应改为「已收口」。
+
 - refactor(mk): **构建规则 x86_64/aarch64 冗余清理（mk/ 目录 8 项去重，行为保持）**——分支 `mk-arch-dedup`（叠于 aarch64-ext2-product-image 之上，共 8 个提交）：
   - **固件获取规则合一**：x86 OVMF（run.mk）与 aarch64 QEMU_EFI（image.mk）两份逐字拷贝的下载/拷贝 recipe 收敛为 `firmware_fetch_cmd` + `firmware_size_normalize_64m` canned recipe（64 MiB cfi.pflash01 归一化为 aarch64 侧附加行）；错误文案仍拼出用户可读的 `*_SOURCE` 变量名。实测本地拷贝/64MiB 截断/两类错误分支。
   - **publish-lock 提取**：5 处逐字相同的锁前奏（mkdir 重试 + trap + owner 记录）收敛为 `os01_acquire_publish_lock`（project.mk，紧邻 LOCK_DIR）；kernel/user 的 `$(SHELL) -ec` 单引号包裹与 sysroot/clean 直排 recipe 共用双引号转义 trap 形态（单引号→双引号为唯一语义等价归一）。实测 kernel.bin 全量构建与 sysroot 重发布（generation 10-13）。
