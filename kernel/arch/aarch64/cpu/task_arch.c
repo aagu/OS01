@@ -16,6 +16,7 @@
 #include <selftest/aarch64_user_task.h>
 #endif
 #include <arch/aarch64/ipi.h>   /* P2: need-slot offset cross-check */
+#include <arch/aarch64/unwind.h>
 #include <percpu/percpu.h>
 #include <arch/cpu.h>
 #include <arch/irq.h>
@@ -388,6 +389,15 @@ void arch_task_switch(task_t *prev, task_t *next)
         aarch64_fp_save(prev->fpu_save);
     if (next->fpu_save)
         aarch64_fp_restore(next->fpu_save);
+    {
+        uintptr_t base = (uintptr_t)next;
+        uintptr_t expected_low = (base + sizeof(task_t) + 256u + 15u) & ~(uintptr_t)15u;
+        if (next->thread->stack_base == base &&
+            next->thread->stack_top == base + STACK_SIZE &&
+            next->thread->usable_low == expected_low) {
+            aarch64_unwind_publish_task_stack(cpu_id(), base);
+        }
+    }
     aarch64_switch_context(prev, prev->thread, next->thread);
 }
 
@@ -502,6 +512,17 @@ void arch_aarch64_bsp_handoff(void)
     if (idle != &init_task_union.task)
         fatal_context(10, (uintptr_t)__builtin_frame_address(0),
                       (uintptr_t)&init_task_union, (uintptr_t)&init_task_union + STACK_SIZE);
+    {
+        uintptr_t base = (uintptr_t)idle;
+        uintptr_t expected_low = (base + sizeof(task_t) + 256u + 15u) & ~(uintptr_t)15u;
+        if ((base & 15u) == 0 &&
+            idle->thread != NULL &&
+            idle->thread->stack_base == base &&
+            idle->thread->stack_top == base + STACK_SIZE &&
+            idle->thread->usable_low == expected_low) {
+            aarch64_unwind_publish_task_stack(0, base);
+        }
+    }
     idle->cpu = 0;
     idle->allowed_cpus = 1;
     idle->state = TASK_RUNNING;
@@ -580,6 +601,9 @@ void arch_aarch64_bsp_handoff(void)
     int selftest_failed = selftest_end_run();
     serial_printk("[selftest] done (failed=%u)\n",
                   (unsigned)selftest_failed);
+#elif defined(AARCH64_EXCEPTION_TRACE_TASK)
+    extern void aarch64_exception_trace_task_start(void);
+    aarch64_exception_trace_task_start();
 #elif defined(OS01_SELFTEST)
     test_aarch64_scheduler_run();
     int selftest_failed = selftest_end_run();

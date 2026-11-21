@@ -17,6 +17,7 @@
 #include <arch/aarch64/smp.h>
 #include <arch/aarch64/sched_tick.h>  /* aarch64_sched_tick_start */
 #include <arch/aarch64/user_task.h>
+#include <arch/aarch64/unwind.h>
 #include <arch/context.h>
 #include <sched/task.h>
 #include <sched/internal.h>
@@ -175,6 +176,16 @@ void aarch64_ap_idle_handoff(uint32_t cpu)
         idle->thread->sp < idle->thread->usable_low ||
         idle->thread->sp >= idle->thread->stack_top)
         ap_sched_fatal("handoff: invalid idle metadata", cpu);
+    {
+        uintptr_t base = (uintptr_t)idle;
+        uintptr_t expected_low = (base + sizeof(task_t) + 256u + 15u) & ~(uintptr_t)15u;
+        if ((base & 15u) == 0 &&
+            idle->thread->stack_base == base &&
+            idle->thread->stack_top == base + STACK_SIZE &&
+            idle->thread->usable_low == expected_low) {
+            aarch64_unwind_publish_task_stack(cpu, base);
+        }
+    }
     idle->state = TASK_RUNNING;
     idle->on_cpu = 1;
     idle->on_rq = 0;

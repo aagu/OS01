@@ -702,3 +702,34 @@ $(TEST_BLD)/test_unwind_x86_stack.elf: \
 		$(TEST_BLD)/test_unwind_x86_stack.o \
 		$(TEST_BLD)/x86_unwind_production.o
 	$(HOST_CC) -o $@ $^
+
+# AArch64 unwind fixup & stack ownership tests (Task 4)
+A64_UNWIND_HOST_CFLAGS := -g -O0 -Wall -Wextra -Wno-unused-parameter -DOS01_HOST_TEST \
+                          -I$(TEST_INC) -I$(TEST_MOCK)/intr_dispatch/aarch64 \
+                          $(KERNEL_INC) -idirafter $(TESTS_DIR)/libc/include
+
+$(TEST_BLD)/aarch64_unwind_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/intr/unwind.c \
+		$(TESTS_DIR)/kernel/include/arch/unwind.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/unwind.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/regs.h \
+		$(TEST_MOCK)/intr_dispatch/aarch64/arch/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) -g -O0 -Wall -Wextra -Wno-unused-parameter -DOS01_HOST_TEST \
+	    -U__x86_64__ -D__aarch64__ \
+	    -I$(TEST_MOCK)/intr_dispatch/aarch64 $(KERNEL_INC) $(LIBC_INC) \
+	    -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_unwind_aarch64.o: \
+		$(TEST_CASES)/test_unwind_aarch64.c \
+		$(TESTS_DIR)/kernel/include/arch/unwind.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/unwind.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/regs.h \
+		$(TEST_MOCK)/intr_dispatch/aarch64/arch/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(A64_UNWIND_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_unwind_aarch64.elf: \
+		$(TEST_BLD)/test_unwind_aarch64.o \
+		$(TEST_BLD)/aarch64_unwind_production.o
+	$(HOST_CC) -o $@ $^

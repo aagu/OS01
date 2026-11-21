@@ -88,6 +88,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_boot.c \
                    core/panic.c \
                    core/boot_failure.c \
                    core/trace_symbols.c \
+                   core/trace.c \
                    core/main.c \
                    core/smp.c \
                    driver/logo.c \
@@ -279,8 +280,13 @@ ARCH_C_SOURCES := $(wildcard $(ARCHDIR)/*.c) \
     $(foreach dir,$(ARCH_SOURCE_DIRS),$(wildcard $(ARCHDIR)/$(dir)/*.c))
 # The probe is filtered out of the wildcard discovery and re-added
 # above ONLY for the dedicated fault variant.
-ARCH_C_SOURCES := $(filter-out $(ARCHDIR)/intr/fault_probe.c, $(ARCH_C_SOURCES))
+ARCH_C_SOURCES := $(filter-out $(ARCHDIR)/intr/fault_probe.c $(ARCHDIR)/intr/trace_probe.c, $(ARCH_C_SOURCES))
 ARCH_C_SOURCES += $(KERNEL_X86_INTR_FAULT_C_SOURCES)
+ifeq ($(ARCH),aarch64)
+ifneq ($(strip $(AARCH64_EXCEPTION_TRACE_TEST)),)
+ARCH_C_SOURCES += $(ARCHDIR)/intr/trace_probe.c
+endif
+endif
 
 # ── BOOT-2 isolation fixture ─────────────────────────────────
 # kernel/selftest/boot_irq_time_fixture.c is compiled ONLY for the
@@ -347,8 +353,11 @@ ALL_C_SOURCES_EXTRA := $(KERNEL_BOOT2_FIXTURE_C_SOURCES) $(KERNEL_BOOT3_FIXTURE_
 ARCH_ASM_SOURCES := $(wildcard $(ARCHDIR)/*.S) \
     $(foreach dir,$(ARCH_SOURCE_DIRS),$(wildcard $(ARCHDIR)/$(dir)/*.S))
 # Exclude trampoline.S from normal compilation (special handling below)
-ARCH_ASM_SOURCES := $(filter-out $(ARCHDIR)/trampoline.S $(ARCHDIR)/intr/fault_probe_bad_fp.S, $(ARCH_ASM_SOURCES))
+ARCH_ASM_SOURCES := $(filter-out $(ARCHDIR)/trampoline.S $(ARCHDIR)/intr/fault_probe_bad_fp.S $(ARCHDIR)/intr/trace_probe_bad_fp.S, $(ARCH_ASM_SOURCES))
 ARCH_ASM_SOURCES += $(KERNEL_X86_INTR_FAULT_S_SOURCES)
+ifeq ($(ARCH):$(AARCH64_EXCEPTION_TRACE_TEST),aarch64:bad-fp)
+ARCH_ASM_SOURCES += $(ARCHDIR)/intr/trace_probe_bad_fp.S
+endif
 
 ALL_C_SOURCES   := $(KERNEL_C_SOURCES) $(ARCH_C_SOURCES) $(ALL_C_SOURCES_EXTRA)
 # kallsyms is a two-pass build artifact, not a regular source
@@ -590,6 +599,15 @@ else ifeq ($(AARCH64_SERROR_TEST),el1h)
 ALL_CFLAGS += -DAARCH64_SERROR_TEST=1 -DAARCH64_SERROR_TEST_ORIGIN_EL1H=1
 else ifeq ($(AARCH64_SERROR_TEST),el0t)
 ALL_CFLAGS += -DAARCH64_SERROR_TEST=1 -DAARCH64_SERROR_TEST_ORIGIN_EL0T=1
+endif
+endif
+ifneq ($(strip $(AARCH64_EXCEPTION_TRACE_TEST)),)
+ifeq ($(AARCH64_EXCEPTION_TRACE_TEST),read)
+ALL_CFLAGS += -DAARCH64_EXCEPTION_TRACE_TEST=1 -DAARCH64_EXCEPTION_TRACE_READ=1
+else ifeq ($(AARCH64_EXCEPTION_TRACE_TEST),bad-fp)
+ALL_CFLAGS += -DAARCH64_EXCEPTION_TRACE_TEST=1 -DAARCH64_EXCEPTION_TRACE_BAD_FP=1
+else ifeq ($(AARCH64_EXCEPTION_TRACE_TEST),task)
+ALL_CFLAGS += -DAARCH64_EXCEPTION_TRACE_TEST=1 -DAARCH64_EXCEPTION_TRACE_TASK=1
 endif
 endif
 # The AArch64 port links the SAME fixed-number syscall table as the

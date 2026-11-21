@@ -38,6 +38,8 @@
 #include <arch/aarch64/sync_fault.h>
 #include <arch/aarch64/uaccess.h>
 #include <arch/aarch64/user_vm.h>
+#include <arch/aarch64/unwind.h>
+#include <core/trace.h>
 #if AARCH64_EL0_TEST
 #include <arch/aarch64/el0.h>
 #include <arch/aarch64/timer.h>
@@ -124,8 +126,11 @@ void arch_context_deliver_return_signals(struct pt_regs *frame,
  *
  * 早期可达链：no_stack_protector（canary prologue 依赖的 guard reload
  * 在 per-CPU 初始化前不可用）。 */
+__attribute__((no_stack_protector))
 void aarch64_el1_sync(pt_regs_t *regs, uint64_t esr, uint64_t far)
 {
+    if (aarch64_unwind_fixup(regs, esr, far))
+        return;
     if (aarch64_uaccess_fixup(regs, esr, far))
         return;
     struct intr_event ev;
@@ -280,6 +285,8 @@ void aarch64_el1_sync_fatal(struct pt_regs *regs, uint64_t esr, uint64_t far)
     }
     arch_early_putc('\n');
 
+    trace_exception(regs, TRACE_FULL);
+
     /* 5. Park.  Diagnostic is delivered; never eret from this path. */
     for (;;) arch_cpu_halt();
     __builtin_unreachable();
@@ -327,6 +334,8 @@ void aarch64_serror_fatal(struct pt_regs *regs, uint64_t esr)
     arch_early_puts(" spsr=0x");
     put_reg64(regs->spsr_el1);
     arch_early_puts(" far=n/a\n");
+
+    trace_exception(regs, TRACE_PC_ONLY);
 
     aarch64_serror_park();
     __builtin_unreachable();

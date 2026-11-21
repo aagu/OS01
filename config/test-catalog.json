@@ -4955,6 +4955,16 @@
       "source": "hosttests/cases/test_trace_symbols.c"
     },
     {
+      "id": "test_unwind_aarch64",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "hosttests/cases/test_unwind_aarch64.c"
+    },
+    {
       "id": "test_unwind_fixup_x86",
       "layer": "host",
       "subsystem": "intr",

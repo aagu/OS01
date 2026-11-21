@@ -216,7 +216,35 @@ _SMP_RE = re.compile(r"^\[smp\]", re.MULTILINE)
 _PHASE1_OK_RE = re.compile(r"^OS01 aarch64 phase1 boot ok$", re.MULTILINE)
 
 
-def sync_fault_evidence(text: str) -> bool:
+_BT_START_RE = re.compile(
+    r"^====================== Kernel Stack Backtrace ======================$",
+    re.MULTILINE,
+)
+_BT_END_RE = re.compile(
+    r"^====================== End Kernel Stack Backtrace ======================$",
+    re.MULTILINE,
+)
+_BT_FRAME_RE = re.compile(
+    r"^\s*\+---> address:(0x[0-9a-fA-F]{16})(?:\s+\(\+\)\s+\d+\s+function:(\S+))?.*$",
+    re.MULTILINE,
+)
+
+
+def _resolve_probe_pc(nm_bin: str, elf_path: str) -> int | None:
+    res = subprocess.run(
+        [nm_bin, str(elf_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    for line in res.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[2] == "aarch64_sync_fault_probe_pc":
+            return int(parts[0], 16)
+    return None
+
+
+def sync_fault_evidence(text: str, *, probe_pc: int | None = None) -> bool:
     """Return True iff ``text`` contains a complete EL1h sync fatal
     diagnostic produced by ``aarch64_el1_sync_fatal``, with the probe
     pre-conditions satisfied and no post-diagnostic continuation.
@@ -278,6 +306,26 @@ def sync_fault_evidence(text: str) -> bool:
     esr_ec = (esr_int >> 26) & 0x3F
     if esr_ec != 0x25:
         return False
+
+    if probe_pc is not None:
+        if int(elr_hex, 16) != probe_pc:
+            return False
+        bt_starts = list(_BT_START_RE.finditer(post_fatal))
+        bt_ends = list(_BT_END_RE.finditer(post_fatal))
+        if len(bt_starts) != 1 or len(bt_ends) != 1:
+            return False
+        if bt_starts[0].end() >= bt_ends[0].start():
+            return False
+        bt_body = post_fatal[bt_starts[0].end():bt_ends[0].start()]
+        frames = list(_BT_FRAME_RE.finditer(bt_body))
+        if len(frames) < 3:
+            return False
+        if int(frames[0].group(1), 16) != probe_pc:
+            return False
+        if frames[1].group(2) != "aarch64_sync_fault_middle":
+            return False
+        if frames[2].group(2) != "aarch64_sync_fault_outer":
+            return False
     return True
 
 
@@ -383,6 +431,15 @@ def run_case(args: argparse.Namespace, *, session_factory=None, build_dir=None,
     }
     metadata_path.write_text(json.dumps(metadata, indent=2) + "\n")
 
+    probe_pc = None
+    elf_path = getattr(args, "elf", None)
+    if elf_path:
+        nm_bin = getattr(args, "nm", None) or "llvm-nm"
+        probe_pc = _resolve_probe_pc(nm_bin, elf_path)
+        if probe_pc is None:
+            print(f"[{SUITE}] ERROR: aarch64_sync_fault_probe_pc not found in {elf_path}")
+            return 2
+
     session = None
     fatal_observed = False
     timed_out = False
@@ -396,7 +453,7 @@ def run_case(args: argparse.Namespace, *, session_factory=None, build_dir=None,
         session.start()
         # Wait for the suite-owned fatal evidence. If it never arrives the
         # deadline trips (timed_out) and the run is not a success.
-        session.wait_for(lambda text: sync_fault_evidence(text))
+        session.wait_for(lambda text: sync_fault_evidence(text, probe_pc=probe_pc))
         fatal_observed = not session.timed_out
         # Short drain so trailing kernel noise is captured, but do not
         # wait for QEMU to exit on its own: the runner stops it (spec §5.2).
@@ -424,7 +481,7 @@ def run_case(args: argparse.Namespace, *, session_factory=None, build_dir=None,
             firmware=args.firmware, image=args.image)
         return 2
 
-    accepted = sync_fault_evidence(text)
+    accepted = sync_fault_evidence(text, probe_pc=probe_pc)
     # spec §5.2: success requires the harness to actively terminate QEMU
     # after observing the FATAL. A QEMU that self-exits before the
     # harness gets a chance to terminate it (e.g. it shut down cleanly
@@ -487,6 +544,8 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=60)
     parser.add_argument("--firmware")
     parser.add_argument("--image")
+    parser.add_argument("--elf", default=None)
+    parser.add_argument("--nm", default="llvm-nm")
     parser.add_argument("--qemu")
     parser.add_argument("--log-dir")
     parser.add_argument("--build-dir", default=None,

@@ -60,6 +60,18 @@ _FORBIDDEN_RE = re.compile(
     r"\[aarch64-sync\] FATAL\b"
 )
 _PC_RE = re.compile(r"\bPC=([0-9a-fA-F]+)\b")
+_BT_START_RE = re.compile(
+    r"^====================== Kernel Stack Backtrace ======================$",
+    re.MULTILINE,
+)
+_BT_END_RE = re.compile(
+    r"^====================== End Kernel Stack Backtrace ======================$",
+    re.MULTILINE,
+)
+_BT_FRAME_RE = re.compile(
+    r"^\s*\+---> address:(0x[0-9a-fA-F]{16})\b.*$",
+    re.MULTILINE,
+)
 
 
 def serror_evidence(
@@ -70,6 +82,7 @@ def serror_evidence(
     park_start: int,
     park_size: int,
 ) -> bool:
+    log = log.replace("\r", "")
     if origin not in EXPECTED_SPSR:
         return False
     if park_size <= 0 or not (park_start <= park_pc < park_start + park_size):
@@ -113,6 +126,20 @@ def serror_evidence(
     if int(f_elr, 16) != elr:
         return False
     if int(f_spsr, 16) != EXPECTED_SPSR[origin]:
+        return False
+
+    tail = log[fatal_matches[0].end():]
+    bt_starts = list(_BT_START_RE.finditer(tail))
+    bt_ends = list(_BT_END_RE.finditer(tail))
+    if len(bt_starts) != 1 or len(bt_ends) != 1:
+        return False
+    if bt_starts[0].end() >= bt_ends[0].start():
+        return False
+    bt_body = tail[bt_starts[0].end():bt_ends[0].start()]
+    frames = list(_BT_FRAME_RE.finditer(bt_body))
+    if len(frames) != 1:
+        return False
+    if int(frames[0].group(1), 16) != elr:
         return False
     return True
 
@@ -254,10 +281,17 @@ def run_case(
 
         try:
             session.start()
-            session.wait_for(
-                lambda text: bool(_FORBIDDEN_RE.search(text))
-                or (len(_FATAL_LINE_RE.findall(text)) == 1 and bool(_ARMED_RE.search(text)))
-            )
+            seen = ""
+
+            def _serror_ready(suffix: str) -> bool:
+                full = (seen + suffix).replace("\r", "")
+                return bool(_FORBIDDEN_RE.search(full)) or (
+                    len(_FATAL_LINE_RE.findall(full)) == 1
+                    and bool(_ARMED_RE.search(full))
+                    and bool(_BT_END_RE.search(full))
+                )
+
+            session.wait_for(_serror_ready)
             if session.timed_out:
                 error_msg = "timeout waiting for fatal evidence"
             elif _FORBIDDEN_RE.search(session.text):

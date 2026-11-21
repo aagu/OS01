@@ -367,6 +367,21 @@ EOF
              # Normal smp mode must not include the fault injection flag.
              drain_smp=$(make -n PROFILE=aarch64-clang test-aarch64 MODE=smp)
              ! echo "$drain_smp" | grep -q AARCH64_SYNC_FAULT_TEST=1
+             ! echo "$drain_smp" | grep -q AARCH64_EXCEPTION_TRACE_TEST=
+
+             # AArch64 MODE=exception-trace dry-run & conflict checks
+             drain_et=$(make -n PROFILE=aarch64-clang test-aarch64 MODE=exception-trace 2>&1 || true)
+             for c in read bad-fp task; do
+               echo "$drain_et" | grep -qF "AARCH64_EXCEPTION_TRACE_TEST=$c" \
+                 || { echo "targets: exception-trace dry-run missing case=$c" >&2; exit 1; }
+               echo "$drain_et" | grep -qF "kernel/exception-trace-$c/" \
+                 || { echo "targets: exception-trace-$c did not isolate kernel dir" >&2; exit 1; }
+               echo "$drain_et" | grep -qF "image/exception-trace-$c/" \
+                 || { echo "targets: exception-trace-$c did not isolate image dir" >&2; exit 1; }
+             done
+             ! make -n PROFILE=x86_64-clang test-aarch64 MODE=exception-trace
+             ! make -n PROFILE=aarch64-clang test-aarch64 MODE=exception-trace EXCEPTION_TRACE_CASE=invalid
+             ! make -n PROFILE=aarch64-clang KERNEL_SELFTEST=1 AARCH64_EXCEPTION_TRACE_TEST=read AARCH64_SYNC_FAULT_TEST=1 print-run-paths
              # ── x86 intr-x86 isolated destructive dispatch (Task 5) ──
              # x86_64-only: these assertions dry-run/build x86_64 fault
              # variants and nm-inspect $(base) kernel ELF paths, so they

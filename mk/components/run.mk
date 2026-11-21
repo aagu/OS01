@@ -434,6 +434,23 @@ $(eval $(call _aarch64_prep,sync-fault,1,AARCH64_SYNC_FAULT_TEST=1))
 $(eval $(call _aarch64_prep,serror-el1t,1,AARCH64_SERROR_TEST=el1t))
 $(eval $(call _aarch64_prep,serror-el1h,1,AARCH64_SERROR_TEST=el1h))
 $(eval $(call _aarch64_prep,serror-el0t,1,AARCH64_SERROR_TEST=el0t))
+$(eval $(call _aarch64_prep,exception-trace-read,1,AARCH64_EXCEPTION_TRACE_TEST=read))
+$(eval $(call _aarch64_prep,exception-trace-bad-fp,1,AARCH64_EXCEPTION_TRACE_TEST=bad-fp))
+$(eval $(call _aarch64_prep,exception-trace-task,1,AARCH64_EXCEPTION_TRACE_TEST=task))
+EXCEPTION_TRACE_CASE ?= all
+EXCEPTION_TRACE_CASES_VALID := all read bad-fp task
+ifeq ($(filter $(EXCEPTION_TRACE_CASE),$(EXCEPTION_TRACE_CASES_VALID)),)
+$(error invalid EXCEPTION_TRACE_CASE='$(EXCEPTION_TRACE_CASE)'; valid: $(EXCEPTION_TRACE_CASES_VALID))
+endif
+.PHONY: _test-aarch64-prep-exception-trace
+_test-aarch64-prep-exception-trace:
+ifeq ($(EXCEPTION_TRACE_CASE),all)
+	$(MAKE) --no-print-directory _test-aarch64-prep-exception-trace-read
+	$(MAKE) --no-print-directory _test-aarch64-prep-exception-trace-bad-fp
+	$(MAKE) --no-print-directory _test-aarch64-prep-exception-trace-task
+else
+	$(MAKE) --no-print-directory _test-aarch64-prep-exception-trace-$(EXCEPTION_TRACE_CASE)
+endif
 .PHONY: _test-aarch64-prep-serror
 _test-aarch64-prep-serror:
 	$(MAKE) --no-print-directory _test-aarch64-prep-serror-el1t
@@ -490,6 +507,8 @@ _test-aarch64-run-gic-spi:
 _test-aarch64-run-sync-fault:
 	python3 qemutests/aarch64_sync_fault.py \
 	  --timeout 60 \
+	  --elf "$(call aarch64_variant_kernel,sync-fault)" \
+	  --nm "$(LLVM_NM)" \
 	  $(call _aarch64_run_tail,$(call aarch64_variant_disk,sync-fault),$(OS01_ROOT)/test-results/aarch64-sync-fault/$$(date -u +%Y%m%dT%H%M%S)-$$$$)
 
 .PHONY: _test-aarch64-run-serror
@@ -505,6 +524,32 @@ _test-aarch64-run-serror:
 	  --firmware "$(AARCH64_UEFI_FIRMWARE)" --qemu "$(AARCH64_QEMU)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
 	  --log-dir "$(OS01_ROOT)/test-results/aarch64-serror/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+
+.PHONY: _test-aarch64-run-exception-trace
+_test-aarch64-run-exception-trace:
+ifeq ($(EXCEPTION_TRACE_CASE),all)
+	@for c in read bad-fp task; do \
+	  python3 qemutests/exception_trace.py --profile "$(PROFILE)" --case "$$c" \
+	    --timeout 60 \
+	    --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	    --image "$(BUILD_DIR)/image/exception-trace-$$c/aarch64-uefi.img" \
+	    --elf "$(BUILD_DIR)/kernel/exception-trace-$$c/kernel.elf" \
+	    --nm "$(LLVM_NM)" \
+	    --qemu "$(AARCH64_QEMU)" \
+	    --build-dir "$(BUILD_DIR)" \
+	    --log-dir "$(OS01_ROOT)/test-results/aarch64-exception-trace/$$c-$$(date -u +%Y%m%dT%H%M%S)-$$$$" || exit $$?; \
+	done
+else
+	python3 qemutests/exception_trace.py --profile "$(PROFILE)" --case "$(EXCEPTION_TRACE_CASE)" \
+	  --timeout 60 \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --image "$(call aarch64_variant_disk,exception-trace-$(EXCEPTION_TRACE_CASE))" \
+	  --elf "$(call aarch64_variant_kernel,exception-trace-$(EXCEPTION_TRACE_CASE))" \
+	  --nm "$(LLVM_NM)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --build-dir "$(BUILD_DIR)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-exception-trace/$(EXCEPTION_TRACE_CASE)-$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+endif
 
 # MODE=sched (spec §10.2, P5 Tasks 1-3): the strict scheduler acceptance
 # runner. Prep builds the exact KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=<v>
@@ -615,8 +660,8 @@ test-aarch64:
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
 	@case "$(MODE)" in \
-	  smp|no-ack|gic-spi|sync-fault|serror|m3-probe|sched|sched-ap|sched-wake|sched-tick|user-runtime|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract|lma-layout) ;; \
-	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|serror|m3-probe|sched|sched-ap|sched-wake|sched-tick|user-runtime|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract|lma-layout, got '$(MODE)'" >&2; exit 1;; \
+	  smp|no-ack|gic-spi|sync-fault|serror|exception-trace|m3-probe|sched|sched-ap|sched-wake|sched-tick|user-runtime|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract|lma-layout) ;; \
+	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|serror|exception-trace|m3-probe|sched|sched-ap|sched-wake|sched-tick|user-runtime|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract|lma-layout, got '$(MODE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-aarch64] MODE=$(MODE) extra=$(TEST_AARCH64_EXTRA_$(MODE))"
 	$(MAKE) --no-print-directory _test-aarch64-prep-$(MODE)

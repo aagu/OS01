@@ -26,14 +26,17 @@ except ImportError:  # pragma: no cover
     RunArchive = None  # type: ignore[assignment]
 
 from qemutests.boot_suite import write_suite_report as _shared_write_suite_report  # noqa: E402
-from qemutests.harness.qemu_cmd import build_qemu_x86  # noqa: E402
+from qemutests.harness.qemu_cmd import build_qemu_aarch64, build_qemu_x86  # noqa: E402
 
 SUITE = "exception-trace"
 CASE_READ = "read"
 CASE_BAD_FP = "bad-fp"
-CASES = (CASE_READ, CASE_BAD_FP)
+CASE_TASK = "task"
+CASES = (CASE_READ, CASE_BAD_FP, CASE_TASK)
 OBSERVE_SECONDS = 0.3
 BAD_FP_RESUME_SYMBOL = "x86_intr_fault_bad_fp_resume"
+A64_BAD_FP_SYMBOL = "aarch64_trace_bad_fp_pc"
+A64_TASK_SYMBOL = "aarch64_trace_task_pc"
 
 _UNEXPECTED_FATAL_RE = re.compile(
     r"(?:^|\n)(?:\[aarch64-sync\] FATAL|do_page_fault\(14\)|"
@@ -55,6 +58,11 @@ _FRAME_RE = re.compile(
 )
 _INT3_FATAL_RE = re.compile(
     r"^do_int3\(3\),ERROR_CODE:(0x[0-9a-fA-F]{16}),RSP:(0x[0-9a-fA-F]{16}),RIP:(0x[0-9a-fA-F]{16})$",
+    re.MULTILINE,
+)
+_A64_SYNC_FATAL_RE = re.compile(
+    r"^\[aarch64-sync\] FATAL mpidr=0x[0-9a-f]{16} ec=0x[0-9a-f]{2} "
+    r"esr=0x[0-9a-f]{16} elr=(0x[0-9a-f]{16}) spsr=0x[0-9a-f]{16} far=\S+$",
     re.MULTILINE,
 )
 
@@ -82,6 +90,7 @@ def trace_evidence(
     resume_addr: int | None = None,
 ) -> tuple[bool, list[str]]:
     """Validate guest serial log for an exception-trace case."""
+    text = text.replace("\r", "")
     errors: list[str] = []
 
     armed_re = re.compile(
@@ -120,15 +129,26 @@ def trace_evidence(
         elif armed_matches and pass_matches[0].start() < armed_matches[0].start():
             errors.append("PASS line appeared before armed line")
     elif case == CASE_BAD_FP:
-        fatals = list(_INT3_FATAL_RE.finditer(text))
-        if len(fatals) != 1:
-            errors.append(f"expected exactly 1 do_int3(3) fatal line, found {len(fatals)}")
-        elif armed_matches and fatals[0].start() < armed_matches[0].start():
-            errors.append("fatal line appeared before armed line")
-        elif resume_addr is not None and int(fatals[0].group(3), 16) != resume_addr:
-            errors.append(
-                f"fatal RIP {fatals[0].group(3)} != expected resume 0x{resume_addr:016x}"
-            )
+        if arch == "x86_64":
+            fatals = list(_INT3_FATAL_RE.finditer(text))
+            if len(fatals) != 1:
+                errors.append(f"expected exactly 1 do_int3(3) fatal line, found {len(fatals)}")
+            elif armed_matches and fatals[0].start() < armed_matches[0].start():
+                errors.append("fatal line appeared before armed line")
+            elif resume_addr is not None and int(fatals[0].group(3), 16) != resume_addr:
+                errors.append(
+                    f"fatal RIP {fatals[0].group(3)} != expected resume 0x{resume_addr:016x}"
+                )
+        else:
+            fatals = list(_A64_SYNC_FATAL_RE.finditer(text))
+            if len(fatals) != 1:
+                errors.append(f"expected exactly 1 [aarch64-sync] FATAL line, found {len(fatals)}")
+            elif armed_matches and fatals[0].start() < armed_matches[0].start():
+                errors.append("fatal line appeared before armed line")
+            elif resume_addr is not None and int(fatals[0].group(1), 16) != resume_addr:
+                errors.append(
+                    f"fatal ELR {fatals[0].group(1)} != expected PC 0x{resume_addr:016x}"
+                )
 
         bt_starts = list(_BT_START_RE.finditer(text))
         bt_ends = list(_BT_END_RE.finditer(text))
@@ -147,20 +167,86 @@ def trace_evidence(
                 errors.append(
                     f"frame 0 PC {frames[0].group(1)} != expected resume 0x{resume_addr:016x}"
                 )
+    elif case == CASE_TASK:
+        fatals = list(_A64_SYNC_FATAL_RE.finditer(text))
+        if len(fatals) != 1:
+            errors.append(f"expected exactly 1 [aarch64-sync] FATAL line, found {len(fatals)}")
+        elif armed_matches and fatals[0].start() < armed_matches[0].start():
+            errors.append("fatal line appeared before armed line")
+        elif resume_addr is not None and int(fatals[0].group(1), 16) != resume_addr:
+            errors.append(
+                f"fatal ELR {fatals[0].group(1)} != expected PC 0x{resume_addr:016x}"
+            )
+
+        bt_starts = list(_BT_START_RE.finditer(text))
+        bt_ends = list(_BT_END_RE.finditer(text))
+        if len(bt_starts) != 1 or len(bt_ends) != 1:
+            errors.append(
+                f"expected 1 backtrace start and 1 end marker, got {len(bt_starts)}/{len(bt_ends)}"
+            )
+        elif bt_starts[0].end() >= bt_ends[0].start():
+            errors.append("backtrace end appeared before start")
+        else:
+            bt_body = text[bt_starts[0].end():bt_ends[0].start()]
+            frames = list(_FRAME_RE.finditer(bt_body))
+            if len(frames) < 3:
+                errors.append(f"expected >= 3 frames for task, got {len(frames)}")
+            else:
+                if resume_addr is not None and int(frames[0].group(1), 16) != resume_addr:
+                    errors.append(
+                        f"frame 0 PC {frames[0].group(1)} != expected PC 0x{resume_addr:016x}"
+                    )
+                if frames[1].group(2) != "aarch64_trace_task_middle":
+                    errors.append(f"frame 1 expected aarch64_trace_task_middle, got {frames[1].group(2)!r}")
+                if frames[2].group(2) != "aarch64_trace_task_outer":
+                    errors.append(f"frame 2 expected aarch64_trace_task_outer, got {frames[2].group(2)!r}")
     else:
         errors.append(f"unsupported case: {case!r}")
 
     return (len(errors) == 0), errors
 
 
-def qemu_command(args) -> list[str]:
-    return build_qemu_x86(
-        qemu=str(args.qemu),
+def _build_diagnostic_dtb(qemu: str, out_dtb: Path) -> None:
+    sparse = out_dtb.with_suffix(".dtb.sparse")
+    subprocess.run(
+        [
+            qemu, "-M", "virt,gic-version=2", "-cpu", "cortex-a53",
+            "-smp", "2", "-machine", f"dumpdtb={sparse}",
+            "-display", "none", "-m", "512",
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    subprocess.run(
+        ["dtc", "-I", "dtb", "-O", "dtb", "-o", str(out_dtb), str(sparse)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    sparse.unlink(missing_ok=True)
+
+
+def qemu_command(args, *, dtb_path: str | None = None) -> list[str]:
+    if args.profile.startswith("x86_64"):
+        return build_qemu_x86(
+            qemu=str(args.qemu),
+            firmware=str(args.firmware),
+            image=str(args.image),
+            smp=1,
+            serial="stdio",
+            snapshot=True,
+            extra=["-no-reboot"],
+        )
+    cpus = 2 if dtb_path else 1
+    return build_qemu_aarch64(
         firmware=str(args.firmware),
         image=str(args.image),
-        smp=1,
-        serial="stdio",
+        cpus=cpus,
+        dtb=dtb_path,
         snapshot=True,
+        memory="512",
+        qemu=str(args.qemu),
         extra=["-no-reboot"],
     )
 
@@ -187,16 +273,25 @@ def run_case(args, *, session_factory=None, symbol_resolver=None) -> int:
     run_dir.mkdir(parents=True, exist_ok=True)
 
     arch = "x86_64" if args.profile.startswith("x86_64") else "aarch64"
-    variant = f"intr-x86-fault-trace-{case}"
+    variant = f"intr-x86-fault-trace-{case}" if arch == "x86_64" else f"exception-trace-{case}"
     resume_addr = None
-    if case == CASE_BAD_FP:
+    if case in (CASE_BAD_FP, CASE_TASK):
+        sym = BAD_FP_RESUME_SYMBOL if arch == "x86_64" else (
+            A64_BAD_FP_SYMBOL if case == CASE_BAD_FP else A64_TASK_SYMBOL
+        )
         resolver = symbol_resolver or resolve_symbol
-        resume_addr = resolver(args.nm, args.elf, BAD_FP_RESUME_SYMBOL)
+        resume_addr = resolver(args.nm, args.elf, sym)
         if resume_addr is None:
-            print(f"[{SUITE}] ERROR: resume symbol {BAD_FP_RESUME_SYMBOL} not found in {args.elf}")
+            print(f"[{SUITE}] ERROR: resume symbol {sym} not found in {args.elf}")
             return 2
 
-    command = qemu_command(args)
+    dtb_path = None
+    if arch == "aarch64" and case == CASE_TASK and session_factory is ProcessSession:
+        dtb_file = run_dir / "virt.dtb"
+        _build_diagnostic_dtb(str(args.qemu), dtb_file)
+        dtb_path = str(dtb_file)
+
+    command = qemu_command(args, dtb_path=dtb_path)
 
     session = None
     errors: list[str] = []
@@ -219,7 +314,7 @@ def run_case(args, *, session_factory=None, symbol_resolver=None) -> int:
             done_re = _BT_END_RE
 
         def check_done(suffix: str) -> bool:
-            return done_re.search(seen + suffix) is not None
+            return done_re.search((seen + suffix).replace("\r", "")) is not None
 
         session.wait_for(check_done)
         if session.timed_out:

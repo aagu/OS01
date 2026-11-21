@@ -48,6 +48,9 @@ endif
 # The macro NAME (not the whole flag) is matched, so the spelling stays
 # identical to the C sources' `#if defined(X86_INTR_FAULT_TEST_BP)`.
 X86_INTR_FAULT_CASE := $(if $(findstring X86_INTR_FAULT_TEST_BP,$(KERNEL_EXTRA_CFLAGS)),bp,$(if $(findstring X86_INTR_FAULT_TEST_NMI,$(KERNEL_EXTRA_CFLAGS)),nmi,$(if $(findstring X86_INTR_FAULT_TEST_TRACE_READ,$(KERNEL_EXTRA_CFLAGS)),trace-read,$(if $(findstring X86_INTR_FAULT_TEST_TRACE_BAD_FP,$(KERNEL_EXTRA_CFLAGS)),trace-bad-fp,))))
+ifneq ($(strip $(AARCH64_EXCEPTION_TRACE_TEST)),)
+$(error AARCH64_EXCEPTION_TRACE_TEST='$(AARCH64_EXCEPTION_TRACE_TEST)' is aarch64-only)
+endif
 # BOOT-1 CPU-lifecycle fault matrix (Task 3): same macro-derived case —
 # a direct KERNEL_EXTRA_CFLAGS selection resolves here too.
 X86_SMP_BOOT_CASE := $(if $(findstring X86_SMP_BOOT_TEST_DELAY_ONLINE,$(KERNEL_EXTRA_CFLAGS)),delay-online,$(if $(findstring X86_SMP_BOOT_TEST_NO_ONLINE,$(KERNEL_EXTRA_CFLAGS)),no-online,$(if $(findstring X86_SMP_BOOT_TEST_NO_SCHEDULER,$(KERNEL_EXTRA_CFLAGS)),no-scheduler,)))

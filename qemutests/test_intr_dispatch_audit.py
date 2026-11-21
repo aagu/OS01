@@ -377,6 +377,7 @@ ffff0000400971f4 T gic_dev_current
 ffff0000400978d4 T gic_dev_dispatch
 ffff0000400a0a80 T arch_early_putc
 ffff0000400a0a84 T arch_early_puts
+ffff000040097080 T aarch64_unwind_fixup
 ffff0000400970c0 T aarch64_uaccess_fixup
 ffff000040097180 T aarch64_user_current_mm
 ffff000040097200 T aarch64_user_syscall
@@ -506,10 +507,14 @@ ffff0000400a3960: 94000980     	bl	0xffff000040097ca4 <aarch64_el1_sync>
 ffff0000400a3964: 17ffffc0     	b	0xffff0000400a3864 <restore_pt_regs>
 
 ffff000040097ca4 <aarch64_el1_sync>:
+ffff000040097ca8: 94000cf6     	bl	0xffff000040097080 <aarch64_unwind_fixup>
 ffff000040097cb0: 94000d04     	bl	0xffff0000400970c0 <aarch64_uaccess_fixup>
 ffff000040097cc8: 97ffff32     	bl	0xffff000040097990 <aarch64_intr_decode_sync>
 ffff000040097cd4: 97fff10c     	bl	0xffff000040094104 <arch_intr_dispatch>
 ffff000040097ce0: 94002bb1     	bl	0xffff0000400a2ba4 <arch_intr_bad_event>
+
+ffff000040097080 <aarch64_unwind_fixup>:
+ffff000040097084: d65f03c0     	ret
 
 ffff0000400970c0 <aarch64_uaccess_fixup>:
 ffff0000400970e0: 94000028     	bl	0xffff000040097180 <aarch64_user_current_mm>

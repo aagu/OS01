@@ -51,6 +51,9 @@ def _make_log(
         daif1,
         fatal_line if fatal_first else armed_line,
         armed_line if fatal_first else fatal_line,
+        "====================== Kernel Stack Backtrace ======================",
+        f"+---> address:0x{elr:016x} \t(no symbol)",
+        "====================== End Kernel Stack Backtrace ======================",
     ]
     if extra_after:
         lines.append(extra_after)
@@ -77,6 +80,24 @@ class TestSerrorEvidence(unittest.TestCase):
         log = _make_log(daif1="")
         self.assertFalse(runner.serror_evidence(
             log, "el1h", self.ELR, self.PARK_START, self.PARK_START, self.PARK_SIZE
+        ))
+
+    def test_extra_or_missing_backtrace_frame_fails(self):
+        base = _make_log(origin="el1h", spsr=0x245, elr=self.ELR)
+        no_end = base.replace(
+            "====================== End Kernel Stack Backtrace ======================\n",
+            "",
+        )
+        self.assertFalse(runner.serror_evidence(
+            no_end, "el1h", self.ELR, self.PARK_START, self.PARK_START, self.PARK_SIZE
+        ))
+        two_frames = base.replace(
+            "====================== End Kernel Stack Backtrace ======================\n",
+            f"  +---> address:0x{self.ELR:016x} \t(no symbol)\n"
+            "====================== End Kernel Stack Backtrace ======================\n",
+        )
+        self.assertFalse(runner.serror_evidence(
+            two_frames, "el1h", self.ELR, self.PARK_START, self.PARK_START, self.PARK_SIZE
         ))
 
     def test_daif_a_set_or_i_clear_fails(self):

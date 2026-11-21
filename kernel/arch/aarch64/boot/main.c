@@ -557,6 +557,38 @@ void arch_boot_memory(const struct boot_context *bootctx)
     }
 }
 
+#if AARCH64_SYNC_FAULT_TEST
+__attribute__((noinline))
+static void aarch64_sync_fault_inner(void)
+{
+    uint64_t probed;
+    __asm__ __volatile__(
+        ".globl aarch64_sync_fault_probe_pc\n\t"
+        "aarch64_sync_fault_probe_pc:\n\t"
+        "ldr %0, [%2]\n\t"
+        : "=r"(probed)
+        : "m"(*(volatile uint64_t *)(uintptr_t)AARCH64_PT_SELFTEST_VA),
+          "r"((uint64_t)(uintptr_t)AARCH64_PT_SELFTEST_VA)
+        : "memory");
+    (void)probed;
+    __asm__ __volatile__("" ::: "memory");
+}
+
+__attribute__((noinline))
+static void aarch64_sync_fault_middle(void)
+{
+    aarch64_sync_fault_inner();
+    __asm__ __volatile__("" ::: "memory");
+}
+
+__attribute__((noinline))
+static void aarch64_sync_fault_outer(void)
+{
+    aarch64_sync_fault_middle();
+    __asm__ __volatile__("" ::: "memory");
+}
+#endif
+
 void arch_pre_subsys_selftest(const struct boot_context *bootctx)
 {
     (void)bootctx;
@@ -591,17 +623,17 @@ void arch_pre_subsys_selftest(const struct boot_context *bootctx)
             for (;;) arch_cpu_halt();
         }
         kputs("[aarch64-sync-test] armed\n");
-        uint64_t probed;
-        __asm__ __volatile__(
-            "ldr %0, [%2]\n\t"
-            : "=r"(probed)
-            : "m"(*(volatile uint64_t *)(uintptr_t)AARCH64_PT_SELFTEST_VA),
-              "r"((uint64_t)(uintptr_t)AARCH64_PT_SELFTEST_VA)
-            : "memory");
+        aarch64_sync_fault_outer();
         kputs("[aarch64-sync-test] returned\n");
-        (void)probed;
         for (;;) arch_cpu_halt();
     }
+#endif
+#if defined(AARCH64_EXCEPTION_TRACE_READ)
+    extern void aarch64_exception_trace_read_run(void);
+    aarch64_exception_trace_read_run();
+#elif defined(AARCH64_EXCEPTION_TRACE_BAD_FP)
+    extern void aarch64_exception_trace_bad_fp_run(void);
+    aarch64_exception_trace_bad_fp_run();
 #endif
 }
 

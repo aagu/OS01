@@ -527,7 +527,8 @@ _X86_PF_CHAIN = ("arch_intr_dispatch", "arch_intr_handle_sync",
                  "x86_handle_page_fault")
 
 _A64_EARLY_CHAIN = ("arch_intr_dispatch", "aarch64_intr_decode_sync",
-                    "aarch64_el1_sync", "aarch64_uaccess_fixup",
+                    "aarch64_el1_sync", "aarch64_unwind_fixup",
+                    "aarch64_uaccess_fixup",
                     "aarch64_user_current_mm", "arch_intr_handle_sync",
                     "arch_intr_bad_event")
 
@@ -1700,7 +1701,8 @@ def _audit_aarch64(symtab, blocks, order, repo: Path,
                 errors.append(f"edge aarch64_el1_sync: unresolvable "
                               f"{e.kind} edge ({e.detail})")
         targets = {e.target for e in edges if e.kind == "call"}
-        for required in ("aarch64_uaccess_fixup", "aarch64_intr_decode_sync",
+        for required in ("aarch64_unwind_fixup", "aarch64_uaccess_fixup",
+                         "aarch64_intr_decode_sync",
                          "arch_intr_dispatch", "arch_intr_bad_event"):
             if required not in targets:
                 errors.append(f"edge aarch64_el1_sync -> {required}: "
