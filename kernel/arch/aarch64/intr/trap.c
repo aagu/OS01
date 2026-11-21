@@ -284,3 +284,50 @@ void aarch64_el1_sync_fatal(struct pt_regs *regs, uint64_t esr, uint64_t far)
     for (;;) arch_cpu_halt();
     __builtin_unreachable();
 }
+
+extern _Noreturn void aarch64_serror_park(void);
+
+static __attribute__((no_stack_protector))
+const char *serror_origin_str(uint64_t spsr)
+{
+    switch (spsr & 0x1fu) {
+    case 0x04u: return "el1t";
+    case 0x05u: return "el1h";
+    case 0x00u: return "el0t";
+    default:    return "unknown";
+    }
+}
+
+__attribute__((noreturn, no_stack_protector, cold))
+void aarch64_serror_fatal(struct pt_regs *regs, uint64_t esr)
+{
+    arch_local_irq_disable();
+    __asm__ __volatile__("msr daifset, #0xf" ::: "memory");
+
+    uint64_t mpidr;
+    __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr));
+
+    unsigned ec = (unsigned)((esr >> 26) & 0x3fu);
+    const char *origin = serror_origin_str(regs->spsr_el1);
+    int winner = arch_atomic_cas(&first_fault, 0, 1);
+    if (!winner) {
+        aarch64_serror_park();
+    }
+
+    arch_early_puts("[aarch64-serror] FATAL origin=");
+    arch_early_puts(origin);
+    arch_early_puts(" mpidr=0x");
+    put_mpidr(mpidr);
+    arch_early_puts(" ec=0x");
+    put_hex_u8(ec);
+    arch_early_puts(" esr=0x");
+    put_reg64(esr);
+    arch_early_puts(" elr=0x");
+    put_reg64(regs->elr_el1);
+    arch_early_puts(" spsr=0x");
+    put_reg64(regs->spsr_el1);
+    arch_early_puts(" far=n/a\n");
+
+    aarch64_serror_park();
+    __builtin_unreachable();
+}

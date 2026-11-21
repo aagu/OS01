@@ -1170,7 +1170,7 @@ int64_t arch_syscall_sigreturn(void *arch_frame)
         return -EFAULT;
     }
 
-    /* Require exact AARCH64_USER_TASK_PSTATE (0x340: EL0t with D/A/F masked
+    /* Require exact AARCH64_USER_TASK_PSTATE (0x240: EL0t with D/F masked
      * and I enabled) in all non-NZCV bits; reject forged EL1 modes or DAIF edits. */
     if ((frame->regs.spsr_el1 & ~UINT64_C(0xf0000000)) != AARCH64_USER_TASK_PSTATE) {
         kfree(frame);

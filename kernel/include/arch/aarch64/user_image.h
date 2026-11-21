@@ -60,7 +60,7 @@ struct aarch64_user_image;
  * do with FP/SIMD access (that is controlled solely by
  * CPACR_EL1.FPEN, which the kernel sets to 0b11 on every CPU; per-task
  * FP state is saved/restored by switch_to()). */
-#define AARCH64_USER_TASK_PSTATE  UINT64_C(0x340)
+#define AARCH64_USER_TASK_PSTATE  UINT64_C(0x240)
 
 /* Build an image from `bytes`/`size` with a `stack_pages`-page user
  * stack (see the stack window constants above; the selftest callers

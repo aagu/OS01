@@ -559,8 +559,11 @@ def check_vector_branches(path, vectors_va, symbols):
         if ph[0] == 1:
             loads.append(dict(flags=ph[1], va=ph[3], pa=ph[4],
                               filesz=ph[5], memsz=ph[6], off=ph[2]))
-    for off, want_label in ((0x200, "el1_sync_entry"),
-                            (0x280, "el1_irq_entry")):
+    for off, want_label in ((0x180, "el1t_serror_entry"),
+                            (0x200, "el1_sync_entry"),
+                            (0x280, "el1_irq_entry"),
+                            (0x380, "el1_serror_entry"),
+                            (0x580, "el1_serror_entry")):
         slot_va = vectors_va + off
         seg = next(s for s in loads
                    if s["va"] <= slot_va < s["va"] + s["filesz"])
@@ -577,6 +580,54 @@ def check_vector_branches(path, vectors_va, symbols):
         assert target_va == target_sym_va, (
             "vector slot +0x%x branches to 0x%x, expected %s @ 0x%x"
             % (off, target_va, want_label, target_sym_va))
+
+    check_serror_disassembly(path, symbols)
+
+
+def _objdump_symbol_insns(path, sym_name):
+    objdump = os.environ.get("OBJDUMP", "llvm-objdump")
+    res = subprocess.run([objdump, "-d", "--disassemble-symbols=" + sym_name, str(path)],
+                         text=True, capture_output=True, check=True)
+    insns = []
+    for line in res.stdout.splitlines():
+        m = re.match(r"^\s*[0-9a-fA-F]+:\s+[0-9a-fA-F]+\s+(.+)$", line)
+        if m:
+            insns.append(m.group(1).strip().lower())
+    return insns
+
+
+def check_serror_disassembly(path, symbols):
+    for req in ("el1t_serror_entry", "el1_serror_entry",
+                "aarch64_serror_fatal", "aarch64_serror_park"):
+        assert req in symbols, "%s not exported by kernel ELF" % req
+
+    el1t_insns = _objdump_symbol_insns(path, "el1t_serror_entry")
+    assert el1t_insns, "el1t_serror_entry disassembly empty"
+    spsel_idx = next((i for i, s in enumerate(el1t_insns)
+                      if re.search(r"\bmsr\s+spsel,\s*#(?:0x)?1\b", s)), None)
+    stack_idx = next((i for i, s in enumerate(el1t_insns)
+                      if re.search(r"\b(sp|sub\s+sp)\b", s)), None)
+    assert spsel_idx is not None, "el1t_serror_entry missing 'msr spsel, #1'"
+    assert stack_idx is None or spsel_idx < stack_idx, (
+        "el1t_serror_entry accesses stack before 'msr spsel, #1'")
+
+    restore_vas = set()
+    for rsym in ("restore_pt_regs", "ARCH_CONTEXT_RESTORE_FRAME"):
+        if rsym in symbols:
+            restore_vas.add(symbols[rsym][0])
+
+    for sym in ("el1t_serror_entry", "el1_serror_entry",
+                "aarch64_serror_fatal", "aarch64_serror_park"):
+        insns = _objdump_symbol_insns(path, sym)
+        assert insns, "%s disassembly empty" % sym
+        for insn in insns:
+            assert not re.match(r"^eret\b", insn), (
+                "%s contains forbidden eret: %s" % (sym, insn))
+            m = re.match(r"^(?:b|bl)(?:\.\w+)?\s+(?:0x)?([0-9a-f]+)", insn)
+            if m:
+                tgt = int(m.group(1), 16)
+                assert tgt not in restore_vas, (
+                    "%s branches to restore path 0x%x: %s" % (sym, tgt, insn))
 
 
 def _save_pt_regs_macro_body(lines):

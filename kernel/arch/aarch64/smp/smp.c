@@ -270,6 +270,7 @@ int arch_smp_boot_aps(uint32_t cpu_count, arch_smp_ap_entry_t entry,
 void arch_smp_ap_cpu_init(uint32_t cpu_id, struct percpu *cpu)
 {
     (void)cpu;
+    __asm__ __volatile__("msr daifclr, #4\n\tisb" ::: "memory");
     /* Per-CPU tick ownership (per-CPU tick accounting, Task 2).
      *
      * The GLOBAL time base still belongs to the BSP alone: the timer

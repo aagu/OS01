@@ -609,6 +609,7 @@ void arch_boot_controllers(const struct boot_context *bootctx)
 {
     dtb_init(bootctx);
     pl011_init();
+    __asm__ __volatile__("msr daifclr, #4\n\tisb" ::: "memory");
     log_info("OS01 aarch64 uefi handoff ok\n");
     log_info("OS01 aarch64 phase1 boot ok\n");
     gic_init();

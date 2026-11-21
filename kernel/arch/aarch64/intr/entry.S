@@ -59,7 +59,7 @@ exception_vectors:
 
 /* ───── SError, current SP_EL0 ───── */
 .balign 0x80
-4:  b   .
+4:  b   el1t_serror_entry
 
 /* ───── Synchronous exception, current SP_ELx ─────
  *
@@ -87,7 +87,7 @@ exception_vectors:
 
 /* ───── SError, current SP_ELx ───── */
 .balign 0x80
-8:  b   .
+8:  b   el1_serror_entry
 
 /* ───── Synchronous exception, EL0 (AArch64) ───── */
 .balign 0x80
@@ -103,7 +103,7 @@ exception_vectors:
 
 /* ───── SError, EL0 ───── */
 .balign 0x80
-12: b   .
+12: b   el1_serror_entry
 
 /* ───── AArch32 entries (unused; EL0 in AArch64 mode traps them) ───── */
 .balign 0x80
@@ -228,6 +228,38 @@ el1_sync_entry:
     mov     x0, sp                       /* x0 = &regs */
     bl      aarch64_el1_sync
     b       restore_pt_regs
+
+/* ──────────────────────────────────────────────────────────────
+ * el1t_serror_entry / el1_serror_entry / aarch64_serror_park
+ *
+ * Formal EL1 VBAR SError entry (+0x180, +0x380, +0x580).
+ * EL1t switches to SP_EL1 before any stack access; all three paths
+ * mask DAIF, save full 272-byte pt_regs, read ESR_EL1, and call
+ * aarch64_serror_fatal(regs, esr). Never returns or ERETs.
+ * ────────────────────────────────────────────────────────────── */
+.balign 0x80
+.globl el1t_serror_entry
+.type el1t_serror_entry, %function
+el1t_serror_entry:
+    msr     daifset, #0xf
+    msr     spsel, #1
+.size el1t_serror_entry, . - el1t_serror_entry
+.globl el1_serror_entry
+.type el1_serror_entry, %function
+el1_serror_entry:
+    msr     daifset, #0xf
+    save_pt_regs
+    mrs     x1, esr_el1
+    mov     x0, sp
+    bl      aarch64_serror_fatal
+.size el1_serror_entry, . - el1_serror_entry
+.globl aarch64_serror_park
+.type aarch64_serror_park, %function
+aarch64_serror_park:
+    msr     daifset, #0xf
+0:  wfi
+    b       0b
+.size aarch64_serror_park, . - aarch64_serror_park
 
 /* Lower-EL IRQ saves the same frame as the EL1h IRQ.  The GIC
  * dispatcher owns IAR/EOI; the frame is returned through the shared

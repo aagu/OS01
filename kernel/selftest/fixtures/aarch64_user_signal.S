@@ -85,6 +85,25 @@ _start:
     US_EXIT 0x02
 3:
 
+    /* ── 2b. Negative check: forged A=1 spsr_el1=0x340 -> -EINVAL (-22) ── */
+    sub     sp, sp, #288
+    mov     x9, #0
+31:
+    str     xzr, [sp, x9]
+    add     x9, x9, #8
+    cmp     x9, #288
+    b.lt    31b
+
+    mov     x9, #0x340              /* EL0t with A=1 masked */
+    str     x9, [sp, #264]
+    mov     x8, #SYS_sigreturn
+    svc     #0
+    add     sp, sp, #288
+    cmn     x0, #22                 /* -EINVAL */
+    b.eq    32f
+    US_EXIT 0x16
+32:
+
     /* ── 3. Negative check: unaligned sp_el0 -> -EFAULT (-14) ── */
     sub     sp, sp, #8
     mov     x8, #SYS_sigreturn
@@ -313,6 +332,13 @@ sigusr1_handler:
     cbz     x9, 4f
     US_EXIT 0x14
 4:
+    /* Delivered sigframe.regs.spsr_el1 (offset 264) must be 0x240 (with NZCV masked). */
+    ldr     x9, [sp, #264]
+    bic     x9, x9, #0xf0000000
+    cmp     x9, #0x240
+    b.eq    41f
+    US_EXIT 0x15
+41:
     adrp    x9, g_sig_count
     add     x9, x9, :lo12:g_sig_count
     ldr     x10, [x9]
