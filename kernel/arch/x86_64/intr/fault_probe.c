@@ -159,6 +159,25 @@ static void probe_print_variant(void)
 #if defined(X86_INTR_FAULT_TEST_BP)
 
 __attribute__((noinline))
+static void bp_probe_inner(void)
+{
+    __asm__ __volatile__(
+        "int3\n\t"
+        ".globl x86_intr_fault_bp_resume\n\t"
+        ".type x86_intr_fault_bp_resume, @function\n\t"
+        "x86_intr_fault_bp_resume:\n\t"
+        ::: "memory");
+    __asm__ __volatile__("" ::: "memory");
+}
+
+__attribute__((noinline))
+static void bp_probe_middle(void)
+{
+    bp_probe_inner();
+    __asm__ __volatile__("" ::: "memory");
+}
+
+__attribute__((noinline))
 static void bp_probe(void)
 {
     probe_check_precondition();
@@ -170,22 +189,7 @@ static void bp_probe(void)
     probe_print_variant();
     probe_puts("[x86-intr-fault] bp armed\n");
 
-    // The single-byte `int3` and the resume label that follows it.
-    //
-    // The CPU pushes the address of the instruction AFTER a trap, so the
-    // saved RIP of the fatal diagnostic equals the label's address —
-    // never the int3's own address.  The label is a GLOBAL symbol so
-    // the acceptance runner can resolve it from the variant ELF.
-    //
-    // The block is volatile so the compiler can neither elide the int3
-    // nor move it; `noinline` on the probe function keeps the label
-    // defined exactly once.
-    __asm__ __volatile__(
-        "int3\n\t"
-        ".globl x86_intr_fault_bp_resume\n\t"
-        ".type x86_intr_fault_bp_resume, @function\n\t"
-        "x86_intr_fault_bp_resume:\n\t"
-        ::: "memory");
+    bp_probe_middle();
 
     // Unreachable: the #BP fatal path halts the CPU.  The marker exists
     // so the runner can prove the probe never returned.
@@ -338,6 +342,35 @@ static void trace_read_probe(void)
 
 #endif /* X86_INTR_FAULT_TEST_TRACE_READ */
 
+#if defined(X86_INTR_FAULT_TEST_TRACE_BAD_FP)
+
+extern void x86_trace_bad_fp_trigger(void);
+
+__attribute__((noinline))
+static void bad_fp_probe(void)
+{
+    probe_check_precondition();
+
+    __asm__ __volatile__("cli" ::: "memory");
+    probe_print_variant();
+    probe_puts("[exception-trace] armed arch=x86_64 case=bad-fp variant="
+#ifdef KERNEL_VARIANT_NAME
+               OS01_STRINGIFY(KERNEL_VARIANT_NAME)
+#else
+               "default"
+#endif
+               "\n");
+
+    x86_trace_bad_fp_trigger();
+
+    probe_puts("[exception-trace] FAIL arch=x86_64 case=bad-fp reason=returned\n");
+    for (;;) {
+        __asm__ __volatile__("hlt" ::: "memory");
+    }
+}
+
+#endif /* X86_INTR_FAULT_TEST_TRACE_BAD_FP */
+
 void x86_intr_fault_probe_run(void)
 {
 #if defined(X86_INTR_FAULT_TEST_BP)
@@ -346,6 +379,8 @@ void x86_intr_fault_probe_run(void)
     nmi_probe();
 #elif defined(X86_INTR_FAULT_TEST_TRACE_READ)
     trace_read_probe();
+#elif defined(X86_INTR_FAULT_TEST_TRACE_BAD_FP)
+    bad_fp_probe();
 #else
 #error "fault_probe.c compiled without a probe-selection macro"
 #endif

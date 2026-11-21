@@ -12,6 +12,7 @@
 #include <core/printk.h>
 #include <log/log.h>
 #include <core/trace.h>
+#include <arch/early_print.h>
 #include <arch/x86_64/asm.h>
 #include <sched/task.h>
 #include <memory/memory.h>
@@ -136,17 +137,97 @@ static inline int handle_user_fault(pt_regs_t *regs, const char *name, int sig)
     return 0;
 }
 
+/* ── Lock-free fatal exception reporter (Task 3) ─────────────────── */
+
+static void x86_fatal_put_hex64(uint64_t val)
+{
+    static const char hex[] = "0123456789abcdef";
+    arch_early_puts("0x");
+    for (int shift = 60; shift >= 0; shift -= 4) {
+        arch_early_putc(hex[(val >> shift) & 0xfU]);
+    }
+}
+
+static void x86_fatal_put_dec(unsigned val)
+{
+    char buf[16];
+    int len = 0;
+    if (val == 0) {
+        arch_early_putc('0');
+        return;
+    }
+    while (val != 0 && len < (int)sizeof(buf)) {
+        buf[len++] = (char)('0' + (int)(val % 10U));
+        val /= 10U;
+    }
+    while (len > 0) {
+        arch_early_putc(buf[--len]);
+    }
+}
+
+static uint32_t x86_fatal_winner = 0;
+
+static void x86_fatal_begin(const char *name, unsigned vector,
+                            const struct pt_regs *regs, uint64_t error)
+{
+    __asm__ __volatile__("cli" ::: "memory");
+    if (__atomic_exchange_n(&x86_fatal_winner, 1U, __ATOMIC_ACQ_REL) != 0U) {
+        for (;;) {
+            hlt();
+        }
+    }
+    arch_early_puts(name);
+    arch_early_putc('(');
+    x86_fatal_put_dec(vector);
+    arch_early_puts("),ERROR_CODE:");
+    x86_fatal_put_hex64(error);
+    arch_early_puts(",RSP:");
+    x86_fatal_put_hex64(regs->rsp);
+    arch_early_puts(",RIP:");
+    x86_fatal_put_hex64(regs->rip);
+    arch_early_putc('\n');
+}
+
+__attribute__((no_stack_protector))
+static _Noreturn void x86_fatal_exception(const char *name, unsigned vector,
+                                          const struct pt_regs *regs,
+                                          uint64_t error, enum trace_mode mode)
+{
+    x86_fatal_begin(name, vector, regs, error);
+    trace_exception(regs, mode);
+    for (;;) {
+        hlt();
+    }
+}
+
+__attribute__((no_stack_protector))
+static _Noreturn void x86_fatal_page_fault(const struct pt_regs *regs,
+                                           uint64_t error, uint64_t cr2)
+{
+    x86_fatal_begin("do_page_fault", 14U, regs, error);
+    arch_early_puts("PF-KRN: err=");
+    x86_fatal_put_hex64(error);
+    arch_early_puts(" rip=");
+    x86_fatal_put_hex64(regs->rip);
+    arch_early_puts(" rsp=");
+    x86_fatal_put_hex64(regs->rsp);
+    arch_early_puts(" rbp=");
+    x86_fatal_put_hex64(regs->rbp);
+    arch_early_puts(" cr2=");
+    x86_fatal_put_hex64(cr2);
+    arch_early_putc('\n');
+    trace_exception(regs, TRACE_FULL);
+    for (;;) {
+        hlt();
+    }
+}
+
 /* Installed exception adapters preserve the native assembly ABI. */
 
 void x86_handle_divide_error(pt_regs_t * regs, uint64_t error_code)
 {
-        if (handle_user_fault(regs, "do_divide_error", SIGFPE)) return;
-    log_err("do_divide_error(0),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    if (handle_user_fault(regs, "do_divide_error", SIGFPE)) return;
+    x86_fatal_exception("do_divide_error", 0U, regs, error_code, TRACE_FULL);
 }
 
 __attribute__((no_stack_protector))
@@ -167,12 +248,7 @@ void do_debug(pt_regs_t * regs, uint64_t error_code)
 
 void x86_handle_debug(pt_regs_t * regs, uint64_t error_code)
 {
-	log_err("do_debug(1),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    x86_fatal_exception("do_debug", 1U, regs, error_code, TRACE_FULL);
 }
 
 __attribute__((no_stack_protector))
@@ -185,12 +261,7 @@ void do_nmi(pt_regs_t * regs, uint64_t error_code)
 
 void x86_handle_nmi(pt_regs_t * regs, uint64_t error_code)
 {
-	log_err("do_nmi(2),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    x86_fatal_exception("do_nmi", 2U, regs, error_code, TRACE_PC_ONLY);
 }
 
 __attribute__((no_stack_protector))
@@ -203,12 +274,7 @@ void do_int3(pt_regs_t * regs, uint64_t error_code)
 
 void x86_handle_int3(pt_regs_t * regs, uint64_t error_code)
 {
-	log_err("do_int3(3),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    x86_fatal_exception("do_int3", 3U, regs, error_code, TRACE_FULL);
 }
 
 __attribute__((no_stack_protector))
@@ -222,12 +288,7 @@ void do_overflow(pt_regs_t * regs, uint64_t error_code)
 void x86_handle_overflow(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_overflow", SIGFPE)) return;
-	log_err("do_overflow(4),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    x86_fatal_exception("do_overflow", 4U, regs, error_code, TRACE_FULL);
 }
 
 __attribute__((no_stack_protector))
@@ -241,23 +302,13 @@ void do_bounds(pt_regs_t * regs, uint64_t error_code)
 void x86_handle_bounds(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_bounds", SIGFPE)) return;
-	log_err("do_bounds(5),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    x86_fatal_exception("do_bounds", 5U, regs, error_code, TRACE_FULL);
 }
 
 void x86_handle_undefined_opcode(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_undefined_opcode", SIGILL)) return;
-	log_err("do_undefined_opcode(6),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    x86_fatal_exception("do_undefined_opcode", 6U, regs, error_code, TRACE_FULL);
 }
 
 __attribute__((no_stack_protector))
@@ -279,12 +330,7 @@ void do_dev_not_available(pt_regs_t * regs, uint64_t error_code)
 void x86_handle_dev_not_available(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_dev_not_available", SIGFPE)) return;
-	log_err("do_dev_not_available(7),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    x86_fatal_exception("do_dev_not_available", 7U, regs, error_code, TRACE_FULL);
 }
 
 __attribute__((no_stack_protector))
@@ -297,12 +343,7 @@ void do_double_fault(pt_regs_t * regs, uint64_t error_code)
 
 void x86_handle_double_fault(pt_regs_t * regs, uint64_t error_code)
 {
-	log_err("do_double_fault(8),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    x86_fatal_exception("do_double_fault", 8U, regs, error_code, TRACE_PC_ONLY);
 }
 
 __attribute__((no_stack_protector))
@@ -316,12 +357,7 @@ void do_coprocessor_segment_overrun(pt_regs_t * regs, uint64_t error_code)
 void x86_handle_coprocessor_segment_overrun(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_coprocessor_segment_overrun", SIGFPE)) return;
-	log_err("do_coprocessor_segment_overrun(9),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    x86_fatal_exception("do_coprocessor_segment_overrun", 9U, regs, error_code, TRACE_FULL);
 }
 
 __attribute__((no_stack_protector))
@@ -335,39 +371,7 @@ void do_invalid_TSS(pt_regs_t * regs, uint64_t error_code)
 void x86_handle_invalid_TSS(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_invalid_TSS", SIGSEGV)) return;
-	log_err("do_invalid_TSS(10),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-
-	if(error_code & 0x01)
-	{
-		log_info("The exception occurred during delivery of an event external to the program,such as an interrupt or an earlier exception.\n");
-	}
-
-	if(error_code & 0x02)
-	{
-		log_info("Refers to a gate descriptor in the IDT;\n");
-	}
-	else
-	{
-		log_info("Refers to a descriptor in the GDT or the current LDT;\n");
-	}
-
-	if((error_code & 0x02) == 0)
-	{
-		if(error_code & 0x04)
-		{
-			log_info("Refers to a segment or gate descriptor in the LDT;\n");
-		}
-		else
-		{
-			log_info("Refers to a descriptor in the current GDT;\n");
-		}
-	}
-	log_info("Segment Selector Index:%#010x\n",error_code & 0xfff8);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    x86_fatal_exception("do_invalid_TSS", 10U, regs, error_code, TRACE_FULL);
 }
 
 __attribute__((no_stack_protector))
@@ -381,39 +385,7 @@ void do_segment_not_present(pt_regs_t * regs, uint64_t error_code)
 void x86_handle_segment_not_present(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_segment_not_present", SIGBUS)) return;
-	log_err("do_segment_not_present(11),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-
-	if(error_code & 0x01)
-	{
-		log_info("The exception occurred during delivery of an event external to the program,such as an interrupt or an earlier exception.\n");
-	}
-
-	if(error_code & 0x02)
-	{
-		log_info("Refers to a gate descriptor in the IDT;\n");
-	}
-	else
-	{
-		log_info("Refers to a descriptor in the GDT or the current LDT;\n");
-	}
-
-	if((error_code & 0x02) == 0)
-	{
-		if(error_code & 0x04)
-		{
-			log_info("Refers to a segment or gate descriptor in the LDT;\n");
-		}
-		else
-		{
-			log_info("Refers to a descriptor in the current GDT;\n");
-		}
-	}
-	log_info("Segment Selector Index:%#010x\n",error_code & 0xfff8);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    x86_fatal_exception("do_segment_not_present", 11U, regs, error_code, TRACE_FULL);
 }
 
 __attribute__((no_stack_protector))
@@ -427,39 +399,7 @@ void do_stack_segment_fault(pt_regs_t * regs, uint64_t error_code)
 void x86_handle_stack_segment_fault(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_stack_segment_fault", SIGBUS)) return;
-	log_err("do_stack_segment_fault(12),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-
-	if(error_code & 0x01)
-	{
-		log_info("The exception occurred during delivery of an event external to the program,such as an interrupt or an earlier exception.\n");
-	}
-
-	if(error_code & 0x02)
-	{
-		log_info("Refers to a gate descriptor in the IDT;\n");
-	}
-	else
-	{
-		log_info("Refers to a descriptor in the GDT or the current LDT;\n");
-	}
-
-	if((error_code & 0x02) == 0)
-	{
-		if(error_code & 0x04)
-		{
-			log_info("Refers to a segment or gate descriptor in the LDT;\n");
-		}
-		else
-		{
-			log_info("Refers to a descriptor in the current GDT;\n");
-		}
-	}
-	log_info("Segment Selector Index:%#010x\n",error_code & 0xfff8);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    x86_fatal_exception("do_stack_segment_fault", 12U, regs, error_code, TRACE_FULL);
 }
 
 void x86_handle_general_protection(pt_regs_t * regs, uint64_t error_code)
@@ -481,50 +421,24 @@ void x86_handle_general_protection(pt_regs_t * regs, uint64_t error_code)
 		kill_current_user_task(regs, SIGSEGV);
 		return;
 	}
-	log_err("do_general_protection(13),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	log_err(" GPR: RAX=%#018lx RBX=%#018lx RCX=%#018lx RDX=%#018lx\n",
-	        regs->rax, regs->rbx, regs->rcx, regs->rdx);
-	log_err(" GPR: RSI=%#018lx RDI=%#018lx RBP=%#018lx R8=%#018lx\n",
-	        regs->rsi, regs->rdi, regs->rbp, regs->r8);
-	log_err(" GPR: R9=%#018lx R10=%#018lx R11=%#018lx R12=%#018lx\n",
-	        regs->r9, regs->r10, regs->r11, regs->r12);
-	log_err(" GPR: R13=%#018lx R14=%#018lx R15=%#018lx\n",
-	        regs->r13, regs->r14, regs->r15);
-	log_err(" CS=%#04lx SS=%#04lx EFLAGS=%#018lx CR2=%#018lx\n",
-	        regs->cs, regs->ss, regs->rflags, ({ uint64_t v; __asm__ __volatile__("movq %%cr2, %0" : "=r"(v) :: "memory"); v; }));
-
-
-	if(error_code & 0x01)
 	{
-		log_info("The exception occurred during delivery of an event external to the program,such as an interrupt or an earlier exception.\n");
-	}
-
-	if(error_code & 0x02)
-	{
-		log_info("Refers to a gate descriptor in the IDT;\n");
-	}
-	else
-	{
-		log_info("Refers to a descriptor in the GDT or the current LDT;\n");
-	}
-
-	if((error_code & 0x02) == 0)
-	{
-		if(error_code & 0x04)
-		{
-			log_info("Refers to a segment or gate descriptor in the LDT;\n");
-		}
-		else
-		{
-			log_info("Refers to a descriptor in the current GDT;\n");
+		uint64_t gp_cr2 = 0;
+		__asm__ __volatile__("movq %%cr2, %0" : "=r"(gp_cr2) :: "memory");
+		x86_fatal_begin("do_general_protection", 13U, regs, error_code);
+		arch_early_puts(" CS=");
+		x86_fatal_put_hex64(regs->cs);
+		arch_early_puts(" SS=");
+		x86_fatal_put_hex64(regs->ss);
+		arch_early_puts(" EFLAGS=");
+		x86_fatal_put_hex64(regs->rflags);
+		arch_early_puts(" CR2=");
+		x86_fatal_put_hex64(gp_cr2);
+		arch_early_putc('\n');
+		trace_exception(regs, TRACE_FULL);
+		for (;;) {
+			hlt();
 		}
 	}
-	log_info("Segment Selector Index:%#010x\n",error_code & 0xfff8);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
 }
 
 __attribute__((no_stack_protector))
@@ -547,121 +461,15 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 
 	// Detect kernel-mode PF (IST 0 = task stack)
 	if (!(regs->cs & 3)) {
-		task_t *t = task_from_tss();
-		// uaccess _ft recovery: user-range fault while a copy buffer is armed.
-		// current == task_from_ist0 (verified by Task 0; eq=1 on kernel-mode PF
-		// because the #PF frames on IST 0 = the task's kernel stack).  Longjmp
-		// value is the Clang-required compile-time constant 1.
-		if (cr2 < current->addr_limit && current->fault_jmp)
-			__builtin_longjmp(current->fault_jmp, 1);
-		log_err("PF-KRN: err=%lx rip=%lx rsp=%lx rbp=%lx cr2=%lx "
-			"pid=%d cpu=%d\n",
-			error_code, regs->rip, regs->rsp, regs->rbp, cr2,
-			t?t->pid:-1, cpu_id());
-
-		// TASKLIST dump below covers every live task (pid/state/
-		// on_rq/on_cpu/cpu/stack) — the UAF victim is identifiable
-		// even when the crashing task_t is already reclaimed.
-
-		// TASKLIST FIRST: full task inventory before touching t (which
-		// may itself be a freed/garbage pointer).  Prints every live
-		// task's pid/state/stack so the UAF victim is identifiable even
-		// when the crashing task_t is already reclaimed.
-		{
-			uint64_t head = (uint64_t)&init_task_union.task.list;
-			uint64_t pos = *(uint64_t *)head;  // list.next
-			int n = 0;
-			log_err("PF-KRN: tasklist head=%lx\n", head);
-			// Circular list: stop when we return to head.  Do NOT use
-			// address ordering (head is lower than heap nodes).
-			while (pos != head && n < 32) {
-				if (pos < 0xffff800000000000ULL ||
-				    pos > 0xffff800020000000ULL) {
-					log_err("PF-KRN:   tasklist corrupt pos=%lx\n", pos);
-					break;
-				}
-				task_t *tl = container_of((list_t *)pos, task_t, list);
-				uint64_t stk = (uint64_t)tl->stack_alloc_base;
-				log_err("PF-KRN:   task pid=%ld st=%d fl=%lx cpu=%u on_rq=%u on_cpu=%u thd=%p stk=%lx\n",
-					(long)tl->pid, (int)tl->state, (unsigned long)tl->flags,
-					(unsigned)tl->cpu, (unsigned)tl->on_rq, (unsigned)tl->on_cpu,
-					(void *)tl->thread, stk);
-				pos = *(uint64_t *)pos;  // next
-				n++;
-			}
+		uint32_t lo = 0, hi = 0;
+		__asm__ __volatile__("rdmsr" : "=a"(lo), "=d"(hi) : "c"(0xc0000101U));
+		uintptr_t gs_base = ((uintptr_t)hi << 32) | (uintptr_t)lo;
+		if (x86_unwind_resolve_stack(gs_base, (uintptr_t)regs->rsp, NULL, NULL)) {
+			task_t *t = (task_t *)(regs->rsp & ~(STACK_SIZE - 1));
+			if (cr2 < t->addr_limit && t->fault_jmp)
+				__builtin_longjmp(t->fault_jmp, 1);
 		}
-		log_err("PF-KRN: r8=%lx r9=%lx r10=%lx r11=%lx\n",
-			regs->r8, regs->r9, regs->r10, regs->r11);
-		log_err("PF-KRN: r12=%lx r13=%lx r14=%lx r15=%lx\n",
-			regs->r12, regs->r13, regs->r14, regs->r15);
-		log_err("PF-KRN: rax=%lx rbx=%lx rcx=%lx rdx=%lx\n",
-			regs->rax, regs->rbx, regs->rcx, regs->rdx);
-		log_err("PF-KRN: rdi=%lx rsi=%lx cs=%lx ss=%lx\n",
-			regs->rdi, regs->rsi, regs->cs, regs->ss);
-		if (t) {
-			log_err("PF-KRN: task sig=%lx blk=%lx st=%d fl=%lx\n",
-				t->signal, t->blocked, t->state, t->flags);
-			log_err("PF-KRN: thd rsp=%lx rsp0=%lx rip=%lx\n",
-				t->thread->rsp, t->thread->rsp0, t->thread->rip);
-			// Dump 8 bytes at saved RSP to see what schedule() saved
-			uint64_t saved_rsp = t->thread->rsp;
-			if (saved_rsp >= 0xffff800000000000ULL)
-				log_err("PF-KRN: *thd_rsp=%lx %lx\n",
-					*(uint64_t *)saved_rsp,
-					*((uint64_t *)saved_rsp + 1));
-			// Dump 16 qwords around the saved rsp to reconstruct the
-			// return chain that led to the bad RIP.
-			if (saved_rsp >= 0xffff800000000000ULL) {
-				uint64_t *p = (uint64_t *)(saved_rsp & ~0x7ULL);
-				log_err("PF-KRN: thd_rsp-8..+120:\n");
-				for (int i = -1; i < 15; i++) {
-					uint64_t addr = (uint64_t)p + i * 8;
-					if (addr < 0xffff800000000000ULL ||
-					    addr > 0xffff800020000000ULL)
-						break;
-					log_err("PF-KRN:   [%+d] %p: %lx\n",
-						(i * 8), (void *)addr,
-						*(uint64_t *)addr);
-				}
-			}
-			// Also dump 8 qwords at the crash rsp.
-			{
-				uint64_t cr = regs->rsp;
-				if (cr >= 0xffff800000000000ULL &&
-				    cr <= 0xffff800020000000ULL) {
-					log_err("PF-KRN: crsp dump:\n");
-					for (int i = 0; i < 8; i++) {
-						uint64_t addr = cr + i * 8;
-						if (addr > 0xffff800020000000ULL) break;
-						log_err("PF-KRN:   crsp[%d] %p: %lx\n",
-							i, (void *)addr, *(uint64_t *)addr);
-					}
-				}
-			}
-		}
-		// Check stack boundaries
-		uint64_t sb = regs->rsp & ~(STACK_SIZE - 1);
-		log_err("PF-KRN: stack %lu/%lu used\n",
-			((sb + STACK_SIZE) - regs->rsp), (uint64_t)STACK_SIZE);
-
-		// Raw rbp-chain backtrace: return addresses + frame pointers.
-		// Walk up to 12 frames; stop on unmapped/loop pointers.
-		{
-			uint64_t fp = regs->rbp;
-			log_err("PF-KRN: bt rbp=%lx rip=%lx\n", fp, regs->rip);
-			for (int i = 0; i < 12; i++) {
-				if (fp < 0xffff800000000000ULL ||
-				    fp > 0xffff800020000000ULL)
-					break;
-				uint64_t *fr = (uint64_t *)fp;
-				uint64_t ret = fr[1];
-				uint64_t next_fp = fr[0];
-				log_err("PF-KRN:   #%d fp=%lx ret=%lx\n",
-					i, fp, ret);
-				if (next_fp <= fp) break;  // loop or forward
-				fp = next_fp;
-			}
-		}
+		x86_fatal_page_fault(regs, error_code, cr2);
 	}
 
 	// User-mode PF - VMA-based demand paging
@@ -923,49 +731,7 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 		kill_current_user_task(regs, SIGSEGV);
 		return;
 	}
-	log_err("do_page_fault(14),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-
-	if(!(error_code & 0x01))
-	{
-		log_info("Page Not-Present,\t");
-	}
-
-	if(error_code & 0x02)
-	{
-		log_info("Write Cause Fault,\t");
-	}
-	else
-	{
-		log_info("Read Cause Fault,\t");
-	}
-
-	if(error_code & 0x04)
-	{
-		log_info("Fault in user(3)\t");
-	}
-	else
-	{
-		log_info("Fault in supervisor(0,1,2)\t");
-	}
-
-	if(error_code & 0x08)
-	{
-		log_info(",Reserved Bit Cause Fault\t");
-	}
-
-	if(error_code & 0x10)
-	{
-		log_info(",Instruction fetch Cause Fault");
-	}
-
-	log_info("\n");
-
-	log_info("CR2:%#018lx\n",cr2);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+	x86_fatal_page_fault(regs, error_code, cr2);
 }
 
 __attribute__((no_stack_protector))
@@ -999,12 +765,7 @@ void do_x87_FPU_error(pt_regs_t * regs, uint64_t error_code)
 void x86_handle_x87_FPU_error(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_x87_FPU_error", SIGFPE)) return;
-	log_err("do_x87_FPU_error(16),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    x86_fatal_exception("do_x87_FPU_error", 16U, regs, error_code, TRACE_FULL);
 }
 
 __attribute__((no_stack_protector))
@@ -1018,12 +779,7 @@ void do_alignment_check(pt_regs_t * regs, uint64_t error_code)
 void x86_handle_alignment_check(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_alignment_check", SIGBUS)) return;
-	log_err("do_alignment_check(17),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    x86_fatal_exception("do_alignment_check", 17U, regs, error_code, TRACE_FULL);
 }
 
 __attribute__((no_stack_protector))
@@ -1037,12 +793,7 @@ void do_machine_check(pt_regs_t * regs, uint64_t error_code)
 void x86_handle_machine_check(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_machine_check", SIGBUS)) return;
-	log_err("do_machine_check(18),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    x86_fatal_exception("do_machine_check", 18U, regs, error_code, TRACE_PC_ONLY);
 }
 
 __attribute__((no_stack_protector))
@@ -1056,12 +807,7 @@ void do_SIMD_exception(pt_regs_t * regs, uint64_t error_code)
 void x86_handle_SIMD_exception(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_SIMD_exception", SIGFPE)) return;
-	log_err("do_SIMD_exception(19),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    x86_fatal_exception("do_SIMD_exception", 19U, regs, error_code, TRACE_FULL);
 }
 
 __attribute__((no_stack_protector))
@@ -1075,12 +821,7 @@ void do_virtualization_exception(pt_regs_t * regs, uint64_t error_code)
 void x86_handle_virtualization_exception(pt_regs_t * regs, uint64_t error_code)
 {
     if (handle_user_fault(regs, "do_virtualization_exception", SIGBUS)) return;
-	log_err("do_virtualization_exception(20),ERROR_CODE:%#018lx,RSP:%#018lx,RIP:%#018lx\n",error_code , regs->rsp, regs->rip);
-	backtrace(regs);
-	while(1)
-    {
-        hlt();
-    }
+    x86_fatal_exception("do_virtualization_exception", 20U, regs, error_code, TRACE_FULL);
 }
 
 

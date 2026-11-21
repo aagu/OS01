@@ -633,8 +633,9 @@ $(TEST_BLD)/test_trace_symbols.elf: $(TEST_BLD)/test_trace_symbols.o \
 		$(TEST_BLD)/test_trace_symbols_missing.elf
 	$(HOST_CC) -o $@ $(TEST_BLD)/test_trace_symbols.o $(TEST_BLD)/trace_symbols_production.o
 
-# x86_64 unwind #PF fixup production tests (Task 2)
-X86_UNWIND_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(KERNEL_INC) \
+# x86_64 unwind #PF fixup production tests (Task 2 & 3)
+X86_UNWIND_HOST_CFLAGS := -g -O0 -Wall -Wextra -Wno-unused-parameter -DOS01_HOST_TEST \
+                          -I$(TEST_INC) $(KERNEL_INC) \
                           -idirafter $(TESTS_DIR)/libc/include
 
 $(TEST_BLD)/x86_unwind_production.o: \
@@ -644,7 +645,8 @@ $(TEST_BLD)/x86_unwind_production.o: \
 		$(TESTS_DIR)/kernel/include/arch/regs.h \
 		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(X86_UNWIND_HOST_CFLAGS) -MMD -MP -c $< -o $@
+	$(HOST_CC) -g -O0 -Wall -Wextra -Wno-unused-parameter -DOS01_HOST_TEST \
+	    $(KERNEL_INC) $(LIBC_INC) -MMD -MP -c $< -o $@
 
 $(TEST_BLD)/test_unwind_fixup_x86.o: \
 		$(TEST_CASES)/test_unwind_fixup_x86.c \
@@ -657,5 +659,46 @@ $(TEST_BLD)/test_unwind_fixup_x86.o: \
 
 $(TEST_BLD)/test_unwind_fixup_x86.elf: \
 		$(TEST_BLD)/test_unwind_fixup_x86.o \
+		$(TEST_BLD)/x86_unwind_production.o
+	$(HOST_CC) -o $@ $^
+
+# Shared exception trace walker production tests (Task 3)
+TRACE_WALKER_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(KERNEL_INC) \
+                            -idirafter $(TESTS_DIR)/libc/include
+
+$(TEST_BLD)/trace_production.o: \
+		$(TESTS_DIR)/kernel/core/trace.c \
+		$(TESTS_DIR)/kernel/include/core/trace.h \
+		$(TESTS_DIR)/kernel/include/core/trace_symbols.h \
+		$(TESTS_DIR)/kernel/include/arch/unwind.h \
+		$(TESTS_DIR)/kernel/include/arch/early_print.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(TRACE_WALKER_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_exception_trace.o: \
+		$(TEST_CASES)/test_exception_trace.c \
+		$(TESTS_DIR)/kernel/include/core/trace.h \
+		$(TESTS_DIR)/kernel/include/core/trace_symbols.h \
+		$(TESTS_DIR)/kernel/include/arch/unwind.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(TRACE_WALKER_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_exception_trace.elf: \
+		$(TEST_BLD)/test_exception_trace.o \
+		$(TEST_BLD)/trace_production.o
+	$(HOST_CC) -o $@ $^
+
+# x86_64 stack ownership tests (Task 3)
+$(TEST_BLD)/test_unwind_x86_stack.o: \
+		$(TEST_CASES)/test_unwind_x86_stack.c \
+		$(TESTS_DIR)/kernel/include/arch/unwind.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/unwind.h \
+		$(TESTS_DIR)/kernel/include/arch/regs.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(X86_UNWIND_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_unwind_x86_stack.elf: \
+		$(TEST_BLD)/test_unwind_x86_stack.o \
 		$(TEST_BLD)/x86_unwind_production.o
 	$(HOST_CC) -o $@ $^

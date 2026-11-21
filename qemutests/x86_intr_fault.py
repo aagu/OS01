@@ -83,6 +83,19 @@ CASE_BP = "bp"
 CASE_NMI = "nmi"
 CASES = (CASE_BP, CASE_NMI)
 
+_BACKTRACE_START_RE = re.compile(
+    r"^====================== Kernel Stack Backtrace ======================$",
+    re.MULTILINE,
+)
+_BACKTRACE_END_RE = re.compile(
+    r"^====================== End Kernel Stack Backtrace ======================$",
+    re.MULTILINE,
+)
+_FRAME_LINE_RE = re.compile(
+    r"^\s*\+---> address:(0x[0-9a-fA-F]{16})(?:\s+\(\+\)\s+\d+\s+function:(\S+))?.*$",
+    re.MULTILINE,
+)
+
 # The isolated kernel/image variant slug.  MUST match the slug built by
 # mk/profiles/x86_64-clang.mk (``intr-x86-fault-$(X86_INTR_FAULT_TEST)``)
 # and mk/project.mk's IMAGE_VARIANT composition; the build-contract
@@ -288,6 +301,31 @@ def fault_evidence(text: str, *, case: str,
         return False
     if _PANIC_RE.search(tail):
         return False
+
+    # Backtrace validation: both #BP and NMI must emit the start and end
+    # backtrace markers after the fatal primary line.
+    bt_starts = list(_BACKTRACE_START_RE.finditer(tail))
+    bt_ends = list(_BACKTRACE_END_RE.finditer(tail))
+    if len(bt_starts) != 1 or len(bt_ends) != 1:
+        return False
+    if bt_starts[0].end() >= bt_ends[0].start():
+        return False
+    bt_body = tail[bt_starts[0].end():bt_ends[0].start()]
+    frames = list(_FRAME_LINE_RE.finditer(bt_body))
+    if case == CASE_BP:
+        if len(frames) < 3:
+            return False
+        if int(frames[0].group(1), 16) != resume_addr:
+            return False
+        if frames[1].group(2) != "bp_probe_middle":
+            return False
+        if frames[2].group(2) != "bp_probe":
+            return False
+    elif case == CASE_NMI:
+        if len(frames) != 1:
+            return False
+        if int(frames[0].group(1), 16) != int(rip, 16):
+            return False
     if _FATAL_PREFIX_RE.search(tail):
         return False
     return True
@@ -542,14 +580,17 @@ def run_case(args, *, session_factory=None, qmp_factory=None,
                         pass
                 if qmp_error is not None:
                     errors.append(f"QMP inject-nmi failed: {qmp_error}")
-            # 3. The complete fatal diagnostic is the ordering boundary.
+            # 3. The complete fatal diagnostic + backtrace end is the ordering boundary.
             if not errors:
                 session.wait_for(matches(_FATAL_RE[case]))
                 if session.timed_out:
                     errors.append("timeout before the fatal diagnostic")
                 else:
-                    # 4. The bounded post-diagnostic observation window.
-                    if deadline - time.monotonic() < OBSERVE_SECONDS:
+                    seen = session.text
+                    session.wait_for(matches(_BACKTRACE_END_RE))
+                    if session.timed_out:
+                        errors.append("timeout before the backtrace end marker")
+                    elif deadline - time.monotonic() < OBSERVE_SECONDS:
                         errors.append("timeout: insufficient fatal observation budget")
                     else:
                         session.observe(OBSERVE_SECONDS)

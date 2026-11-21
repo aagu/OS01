@@ -11,9 +11,22 @@
 #include <stdbool.h>
 #include <string.h>
 
+#define timeval os01_uapi_timeval
+#define timespec os01_uapi_timespec
+#include <percpu/percpu.h>
+#include <sched/task.h>
+#undef timeval
+#undef timespec
+
 #include <arch/regs.h>
 #include <arch/unwind.h>
 #include <arch/x86_64/unwind.h>
+#include <arch/x86_64/tss.h>
+
+percpu_t percpu_data[NR_CPUS];
+unsigned int TSS64_Table[26];
+struct tss_struct init_tss[NR_CPUS];
+union task_union init_task_union;
 
 extern const char x86_unwind_load_next_fp[];
 extern const char x86_unwind_load_ret_pc[];

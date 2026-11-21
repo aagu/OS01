@@ -85,7 +85,10 @@ BP_LOG = (
     "do_int3(3),ERROR_CODE:0x0000000000000000,"
     "RSP:0xffffffffffffe000,RIP:0xffffffff81001234\n"
     "====================== Kernel Stack Backtrace ======================\n"
-    "  +---> address:0xffffffff81001234 \t(+) 0000 function:probe\n"
+    "+---> address:0xffffffff81001234 \t(+) 0000 function:bp_probe_inner\n"
+    "  +---> address:0xffffffff81001250 \t(+) 0016 function:bp_probe_middle\n"
+    "    +---> address:0xffffffff81001280 \t(+) 0016 function:bp_probe\n"
+    "====================== End Kernel Stack Backtrace ======================\n"
 )
 
 NMI_LOG = (
@@ -97,6 +100,8 @@ NMI_LOG = (
     "do_nmi(2),ERROR_CODE:0x0000000000000000,"
     "RSP:0xffffffffffffe000,RIP:0xffffffff8100abcd\n"
     "====================== Kernel Stack Backtrace ======================\n"
+    "+---> address:0xffffffff8100abcd \t(no symbol)\n"
+    "====================== End Kernel Stack Backtrace ======================\n"
 )
 
 
@@ -618,11 +623,11 @@ class LifecycleTests(unittest.TestCase):
 
     # -- the passing paths ----------------------------------------
     def test_fatal_newline_must_arrive_before_observation(self):
-        fatal = BP_LOG.split("\n======================")[0]
-        session = FakeSession(chunks=[fatal, "\n"])
+        fatal, bt = BP_LOG.split("\n======================", 1)
+        session = FakeSession(chunks=[fatal, "\n======================" + bt])
         original = session.observe
         def observe(seconds):
-            self.assertEqual(session.text, fatal + "\n")
+            self.assertEqual(session.text, BP_LOG)
             return original(seconds)
         session.observe = observe
         self.assertEqual(self._run("bp", session), 0)
@@ -698,11 +703,10 @@ class LifecycleTests(unittest.TestCase):
         # The diagnostic arrives in two reads: the first half with the
         # armed marker, the rest in the next read.  The runner must
         # judge the WHOLE stream, not the host's read boundaries.
-        head, tail = BP_LOG.split("do_int3(3)")
+        head, tail = BP_LOG.split("do_int3(3),ERROR_CODE:0x00000000")
         session = FakeSession(chunks=[
             head + "do_int3(3),ERROR_CODE:0x00000000",
-            "00000000,RSP:0xffffffffffffe000,RIP:0xffffffff81001234\n"
-            "====================== Kernel Stack Backtrace ====\n",
+            tail,
         ])
         self.assertEqual(self._run(xif.CASE_BP, session), 0)
 

@@ -1203,9 +1203,11 @@ INTR_X86_TIMEOUT ?= 120
 TEST_INTR_X86_IMAGE_bp := $(BUILD_DIR)/image/intr-x86-fault-bp/disk.img
 TEST_INTR_X86_IMAGE_nmi := $(BUILD_DIR)/image/intr-x86-fault-nmi/disk.img
 TEST_INTR_X86_IMAGE_trace_read := $(BUILD_DIR)/image/intr-x86-fault-trace-read/disk.img
+TEST_INTR_X86_IMAGE_trace_bad_fp := $(BUILD_DIR)/image/intr-x86-fault-trace-bad-fp/disk.img
 TEST_INTR_X86_ELF_bp   := $(BUILD_DIR)/kernel/intr-x86-fault-bp/kernel.elf
 TEST_INTR_X86_ELF_nmi   := $(BUILD_DIR)/kernel/intr-x86-fault-nmi/kernel.elf
 TEST_INTR_X86_ELF_trace_read := $(BUILD_DIR)/kernel/intr-x86-fault-trace-read/kernel.elf
+TEST_INTR_X86_ELF_trace_bad_fp := $(BUILD_DIR)/kernel/intr-x86-fault-trace-bad-fp/kernel.elf
 .PHONY: test-qemu-intr-x86
 test-qemu-intr-x86:
 	@echo "  [test-qemu] SUITE=intr-x86: building the isolated #BP variant"
@@ -1244,6 +1246,18 @@ test-qemu-intr-x86:
 	  --qemu "$(QEMU_BIN)" \
 	  --build-dir "$(abspath $(BUILD_DIR))" \
 	  --log-dir "$(abspath $(BUILD_DIR))/test-results/intr-x86/trace-read-$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+	@echo "  [test-qemu] SUITE=intr-x86: building the isolated trace-bad-fp variant"
+	$(MAKE) --no-print-directory X86_INTR_FAULT_TEST=trace-bad-fp image
+	@echo "  [test-qemu] SUITE=intr-x86: running the trace-bad-fp case"
+	python3 qemutests/exception_trace.py --profile "$(PROFILE)" --case bad-fp \
+	  --timeout $(INTR_X86_TIMEOUT) \
+	  --firmware "$(OVMF_FIRMWARE)" \
+	  --image "$(TEST_INTR_X86_IMAGE_trace_bad_fp)" \
+	  --elf "$(TEST_INTR_X86_ELF_trace_bad_fp)" \
+	  --nm "$(LLVM_NM)" \
+	  --qemu "$(QEMU_BIN)" \
+	  --build-dir "$(abspath $(BUILD_DIR))" \
+	  --log-dir "$(abspath $(BUILD_DIR))/test-results/intr-x86/trace-bad-fp-$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 
 # Per-SUITE lookups (TEST_QEMU_SUITE_IDS, TEST_QEMU_FLAVOR_*, TEST_QEMU_IMG_*)
 # and TEST_SUITE_CATALOG_DATA are generated into mk/generated/test-dispatch.mk.

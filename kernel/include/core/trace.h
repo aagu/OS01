@@ -1,12 +1,16 @@
 #ifndef _KERNEL_TRACE_H
 #define _KERNEL_TRACE_H
 
-#include <arch/thread.h>
+#include <arch/regs.h>
 #include <core/trace_symbols.h>
 
 #define KERNEL_TRACE_DEPTH 4
 
-void backtrace(pt_regs_t* regs);
-int32_t lookup_kallsyms(uint64_t address, int32_t level);
+enum trace_mode {
+    TRACE_FULL,
+    TRACE_PC_ONLY,
+};
+
+void trace_exception(const struct pt_regs *regs, enum trace_mode mode);
 
 #endif

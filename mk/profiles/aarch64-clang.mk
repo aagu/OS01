@@ -109,7 +109,7 @@ endif
 # probe-selection macro travels through KERNEL_EXTRA_CFLAGS, so reject a
 # non-empty selection here — this profile is also included directly by
 # the aarch64 kernel sub-make, which never sees mk/project.mk.
-X86_INTR_FAULT_CASE := $(if $(findstring X86_INTR_FAULT_TEST_BP,$(KERNEL_EXTRA_CFLAGS)),bp,$(if $(findstring X86_INTR_FAULT_TEST_NMI,$(KERNEL_EXTRA_CFLAGS)),nmi,$(if $(findstring X86_INTR_FAULT_TEST_TRACE_READ,$(KERNEL_EXTRA_CFLAGS)),trace-read,)))
+X86_INTR_FAULT_CASE := $(if $(findstring X86_INTR_FAULT_TEST_BP,$(KERNEL_EXTRA_CFLAGS)),bp,$(if $(findstring X86_INTR_FAULT_TEST_NMI,$(KERNEL_EXTRA_CFLAGS)),nmi,$(if $(findstring X86_INTR_FAULT_TEST_TRACE_READ,$(KERNEL_EXTRA_CFLAGS)),trace-read,$(if $(findstring X86_INTR_FAULT_TEST_TRACE_BAD_FP,$(KERNEL_EXTRA_CFLAGS)),trace-bad-fp,))))
 ifneq ($(strip $(X86_INTR_FAULT_CASE)),)
 $(error X86_INTR_FAULT_TEST=$(X86_INTR_FAULT_CASE) is x86-only; the aarch64 profile must not select a destructive fault variant)
 endif

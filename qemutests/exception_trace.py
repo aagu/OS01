@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+import subprocess
 import sys
 import time
 from pathlib import Path
@@ -29,14 +30,47 @@ from qemutests.harness.qemu_cmd import build_qemu_x86  # noqa: E402
 
 SUITE = "exception-trace"
 CASE_READ = "read"
-CASES = (CASE_READ,)
+CASE_BAD_FP = "bad-fp"
+CASES = (CASE_READ, CASE_BAD_FP)
 OBSERVE_SECONDS = 0.3
+BAD_FP_RESUME_SYMBOL = "x86_intr_fault_bad_fp_resume"
 
 _UNEXPECTED_FATAL_RE = re.compile(
     r"(?:^|\n)(?:\[aarch64-sync\] FATAL|do_page_fault\(14\)|"
     r"====================== Kernel Stack Backtrace ======================|"
     r"KERNEL PANIC|\[stack-chk\] FAIL)"
 )
+
+_BT_START_RE = re.compile(
+    r"^====================== Kernel Stack Backtrace ======================$",
+    re.MULTILINE,
+)
+_BT_END_RE = re.compile(
+    r"^====================== End Kernel Stack Backtrace ======================$",
+    re.MULTILINE,
+)
+_FRAME_RE = re.compile(
+    r"^\s*\+---> address:(0x[0-9a-fA-F]{16})(?:\s+\(\+\)\s+\d+\s+function:(\S+))?.*$",
+    re.MULTILINE,
+)
+_INT3_FATAL_RE = re.compile(
+    r"^do_int3\(3\),ERROR_CODE:(0x[0-9a-fA-F]{16}),RSP:(0x[0-9a-fA-F]{16}),RIP:(0x[0-9a-fA-F]{16})$",
+    re.MULTILINE,
+)
+
+
+def resolve_symbol(nm_bin: str, elf_path: str, symbol: str) -> int | None:
+    res = subprocess.run(
+        [nm_bin, str(elf_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    for line in res.stdout.splitlines():
+        parts = line.split()
+        if len(parts) >= 3 and parts[2] == symbol:
+            return int(parts[0], 16)
+    return None
 
 
 def trace_evidence(
@@ -45,6 +79,7 @@ def trace_evidence(
     case: str,
     variant: str,
     arch: str = "x86_64",
+    resume_addr: int | None = None,
 ) -> tuple[bool, list[str]]:
     """Validate guest serial log for an exception-trace case."""
     errors: list[str] = []
@@ -69,10 +104,9 @@ def trace_evidence(
     if fail_lines:
         errors.append(f"guest reported FAIL: {fail_lines[0]}")
 
-    if _UNEXPECTED_FATAL_RE.search(text):
-        errors.append("unexpected fatal/panic diagnostic in serial output")
-
     if case == CASE_READ:
+        if _UNEXPECTED_FATAL_RE.search(text):
+            errors.append("unexpected fatal/panic diagnostic in serial output")
         pass_re = re.compile(
             rf"^\[exception-trace\] PASS arch={re.escape(arch)} case=read$",
             re.MULTILINE,
@@ -85,6 +119,34 @@ def trace_evidence(
             )
         elif armed_matches and pass_matches[0].start() < armed_matches[0].start():
             errors.append("PASS line appeared before armed line")
+    elif case == CASE_BAD_FP:
+        fatals = list(_INT3_FATAL_RE.finditer(text))
+        if len(fatals) != 1:
+            errors.append(f"expected exactly 1 do_int3(3) fatal line, found {len(fatals)}")
+        elif armed_matches and fatals[0].start() < armed_matches[0].start():
+            errors.append("fatal line appeared before armed line")
+        elif resume_addr is not None and int(fatals[0].group(3), 16) != resume_addr:
+            errors.append(
+                f"fatal RIP {fatals[0].group(3)} != expected resume 0x{resume_addr:016x}"
+            )
+
+        bt_starts = list(_BT_START_RE.finditer(text))
+        bt_ends = list(_BT_END_RE.finditer(text))
+        if len(bt_starts) != 1 or len(bt_ends) != 1:
+            errors.append(
+                f"expected 1 backtrace start and 1 end marker, got {len(bt_starts)}/{len(bt_ends)}"
+            )
+        elif bt_starts[0].end() >= bt_ends[0].start():
+            errors.append("backtrace end appeared before start")
+        else:
+            bt_body = text[bt_starts[0].end():bt_ends[0].start()]
+            frames = list(_FRAME_RE.finditer(bt_body))
+            if len(frames) != 1:
+                errors.append(f"expected exactly 1 frame for bad-fp, got {len(frames)}")
+            elif resume_addr is not None and int(frames[0].group(1), 16) != resume_addr:
+                errors.append(
+                    f"frame 0 PC {frames[0].group(1)} != expected resume 0x{resume_addr:016x}"
+                )
     else:
         errors.append(f"unsupported case: {case!r}")
 
@@ -103,7 +165,7 @@ def qemu_command(args) -> list[str]:
     )
 
 
-def run_case(args, *, session_factory=None) -> int:
+def run_case(args, *, session_factory=None, symbol_resolver=None) -> int:
     started = time.monotonic()
     case = args.case
     if case not in CASES:
@@ -126,6 +188,14 @@ def run_case(args, *, session_factory=None) -> int:
 
     arch = "x86_64" if args.profile.startswith("x86_64") else "aarch64"
     variant = f"intr-x86-fault-trace-{case}"
+    resume_addr = None
+    if case == CASE_BAD_FP:
+        resolver = symbol_resolver or resolve_symbol
+        resume_addr = resolver(args.nm, args.elf, BAD_FP_RESUME_SYMBOL)
+        if resume_addr is None:
+            print(f"[{SUITE}] ERROR: resume symbol {BAD_FP_RESUME_SYMBOL} not found in {args.elf}")
+            return 2
+
     command = qemu_command(args)
 
     session = None
@@ -139,11 +209,14 @@ def run_case(args, *, session_factory=None) -> int:
         deadline = session.deadline
         seen = ""
 
-        done_re = re.compile(
-            rf"^\[exception-trace\] (?:PASS|FAIL) arch={re.escape(arch)} "
-            rf"case={re.escape(case)}\b",
-            re.MULTILINE,
-        )
+        if case == CASE_READ:
+            done_re = re.compile(
+                rf"^\[exception-trace\] (?:PASS|FAIL) arch={re.escape(arch)} "
+                rf"case={re.escape(case)}\b",
+                re.MULTILINE,
+            )
+        else:
+            done_re = _BT_END_RE
 
         def check_done(suffix: str) -> bool:
             return done_re.search(seen + suffix) is not None
@@ -192,7 +265,9 @@ def run_case(args, *, session_factory=None) -> int:
         )
         return 2
 
-    ev_ok, ev_errors = trace_evidence(text, case=case, variant=variant, arch=arch)
+    ev_ok, ev_errors = trace_evidence(
+        text, case=case, variant=variant, arch=arch, resume_addr=resume_addr
+    )
     errors.extend(ev_errors)
     if not stopped_by_runner and not timed_out:
         errors.append("QEMU exited on its own before runner stop")

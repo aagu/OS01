@@ -11,7 +11,7 @@ from types import SimpleNamespace
 from qemutests import exception_trace
 
 TEST_MANIFEST = {
-    "id": "test_exception_trace",
+    "id": "test_exception_trace_runner",
     "layer": "harness",
     "subsystem": "intr",
     "timing": "strict",
@@ -122,6 +122,36 @@ class ExceptionTraceTests(unittest.TestCase):
                 ),
             )
             self.assertEqual(rc_ok, 0)
+
+    def test_bad_fp_evidence_requires_single_frame_matching_resume(self) -> None:
+        resume = 0xFFFF800000105500
+        good_bad_fp = (
+            "[exception-trace] armed arch=x86_64 case=bad-fp variant=intr-x86-fault-trace-bad-fp\n"
+            "do_int3(3),ERROR_CODE:0x0000000000000000,RSP:0xffff800000200000,RIP:0xffff800000105500\n"
+            "====================== Kernel Stack Backtrace ======================\n"
+            "+---> address:0xffff800000105500 \t(+) 0000 function:x86_intr_fault_bad_fp_resume\n"
+            "====================== End Kernel Stack Backtrace ======================\n"
+        )
+        ok, errs = exception_trace.trace_evidence(
+            good_bad_fp,
+            case="bad-fp",
+            variant="intr-x86-fault-trace-bad-fp",
+            resume_addr=resume,
+        )
+        self.assertTrue(ok, errs)
+
+        two_frames = good_bad_fp.replace(
+            "====================== End Kernel Stack Backtrace ======================\n",
+            "  +---> address:0xffff800000105600 \t(no symbol)\n"
+            "====================== End Kernel Stack Backtrace ======================\n",
+        )
+        ok2, _ = exception_trace.trace_evidence(
+            two_frames,
+            case="bad-fp",
+            variant="intr-x86-fault-trace-bad-fp",
+            resume_addr=resume,
+        )
+        self.assertFalse(ok2)
 
 
 if __name__ == "__main__":

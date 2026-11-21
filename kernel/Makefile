@@ -268,8 +268,12 @@ else ifneq ($(findstring X86_INTR_FAULT_TEST_NMI,$(KERNEL_EXTRA_CFLAGS)),)
 KERNEL_X86_INTR_FAULT_C_SOURCES := $(ARCHDIR)/intr/fault_probe.c
 else ifneq ($(findstring X86_INTR_FAULT_TEST_TRACE_READ,$(KERNEL_EXTRA_CFLAGS)),)
 KERNEL_X86_INTR_FAULT_C_SOURCES := $(ARCHDIR)/intr/fault_probe.c
+else ifneq ($(findstring X86_INTR_FAULT_TEST_TRACE_BAD_FP,$(KERNEL_EXTRA_CFLAGS)),)
+KERNEL_X86_INTR_FAULT_C_SOURCES := $(ARCHDIR)/intr/fault_probe.c
+KERNEL_X86_INTR_FAULT_S_SOURCES := $(ARCHDIR)/intr/fault_probe_bad_fp.S
 else
 KERNEL_X86_INTR_FAULT_C_SOURCES :=
+KERNEL_X86_INTR_FAULT_S_SOURCES :=
 endif
 ARCH_C_SOURCES := $(wildcard $(ARCHDIR)/*.c) \
     $(foreach dir,$(ARCH_SOURCE_DIRS),$(wildcard $(ARCHDIR)/$(dir)/*.c))
@@ -343,7 +347,8 @@ ALL_C_SOURCES_EXTRA := $(KERNEL_BOOT2_FIXTURE_C_SOURCES) $(KERNEL_BOOT3_FIXTURE_
 ARCH_ASM_SOURCES := $(wildcard $(ARCHDIR)/*.S) \
     $(foreach dir,$(ARCH_SOURCE_DIRS),$(wildcard $(ARCHDIR)/$(dir)/*.S))
 # Exclude trampoline.S from normal compilation (special handling below)
-ARCH_ASM_SOURCES := $(filter-out $(ARCHDIR)/trampoline.S, $(ARCH_ASM_SOURCES))
+ARCH_ASM_SOURCES := $(filter-out $(ARCHDIR)/trampoline.S $(ARCHDIR)/intr/fault_probe_bad_fp.S, $(ARCH_ASM_SOURCES))
+ARCH_ASM_SOURCES += $(KERNEL_X86_INTR_FAULT_S_SOURCES)
 
 ALL_C_SOURCES   := $(KERNEL_C_SOURCES) $(ARCH_C_SOURCES) $(ALL_C_SOURCES_EXTRA)
 # kallsyms is a two-pass build artifact, not a regular source
@@ -437,6 +442,7 @@ endif
 # docs/arch/cross-boundary-symbols.md §2.1) includes <os01/compiler_rt.h>
 # from the runtime component's own include tree.
 ALL_CFLAGS += -I$(CURDIR)/../runtime/include
+ALL_CFLAGS += -fno-omit-frame-pointer -mno-omit-leaf-frame-pointer
 ALL_ASMFLAGS := $(ASFLAGS) $(ARCH_ASMFLAGS)
 ifeq ($(ARCH),x86_64)
 # The kernel links -lk through the stable $(SYSROOT) symlink (same reason

@@ -30,7 +30,7 @@ _Static_assert(sizeof(struct boot_context) == 200, "boot_context v3 ABI");
 #include <init/userspace.h>   // kernel_start_userspace
 #endif
 
-#if defined(__x86_64__) && (defined(X86_INTR_FAULT_TEST_BP) || defined(X86_INTR_FAULT_TEST_NMI) || defined(X86_INTR_FAULT_TEST_TRACE_READ))
+#if defined(__x86_64__) && (defined(X86_INTR_FAULT_TEST_BP) || defined(X86_INTR_FAULT_TEST_NMI) || defined(X86_INTR_FAULT_TEST_TRACE_READ) || defined(X86_INTR_FAULT_TEST_TRACE_BAD_FP))
 #include <arch/x86_64/intr_fault_probe.h>   // x86_intr_fault_probe_run
 #endif
 
@@ -111,7 +111,7 @@ int kernel_main(const struct boot_context *bootctx)
     // ═══ 5.2. Seed the CSPRNG pool ════════════════════════════
     random_init(bootctx);
 
-#if defined(__x86_64__) && (defined(X86_INTR_FAULT_TEST_BP) || defined(X86_INTR_FAULT_TEST_NMI) || defined(X86_INTR_FAULT_TEST_TRACE_READ))
+#if defined(__x86_64__) && (defined(X86_INTR_FAULT_TEST_BP) || defined(X86_INTR_FAULT_TEST_NMI) || defined(X86_INTR_FAULT_TEST_TRACE_READ) || defined(X86_INTR_FAULT_TEST_TRACE_BAD_FP))
     x86_intr_fault_probe_run();
     for (;;) arch_cpu_halt();
 #endif
