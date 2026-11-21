@@ -206,7 +206,8 @@ int sched_alloc_and_publish_task(unsigned cpu, uint64_t allowed_cpus,
     /* EEVDF fair start: the new task joins the target CPU's timeline
      * no later than its current task, so a fresh kernel thread cannot
      * run ahead of the task that created it. */
-    uint64_t fair_start = percpu_data[cpu].min_vruntime;
+    uint64_t fair_start = __atomic_load_n(&percpu_data[cpu].min_vruntime,
+                                          __ATOMIC_RELAXED);
     tsk->vruntime = current->vruntime < fair_start ? current->vruntime
                                                    : fair_start;
     tsk->deadline = tsk->vruntime + EEVDF_MIN_SLICE;

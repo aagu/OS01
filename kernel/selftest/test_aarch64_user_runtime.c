@@ -86,6 +86,17 @@ static uint64_t g_cow_last_free_count;
 static int g_waitpid_blocked_ok;
 #endif
 
+bool aarch64_user_runtime_test_migration_veto(const struct task_struct *tsk)
+{
+#ifdef AARCH64_USER_RUNTIME_CASE_SMP
+    return g_urt_active && tsk && g_pid_child >= 0 &&
+           (int)tsk->pid == g_pid_child;
+#else
+    (void)tsk;
+    return false;
+#endif
+}
+
 static int urt_role_index(const task_t *tsk)
 {
     if (!tsk || !aarch64_user_task_is_user(tsk))

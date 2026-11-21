@@ -64,7 +64,7 @@ void enqueue_task(task_t *task, percpu_t *rq)
     __atomic_store_n(&task->on_rq, 1, __ATOMIC_RELEASE);
     rbtree_node_t *conflict = rbtree_insert(&rq->run_queue, &task->rb_node, cmp_deadline);
     ASSERT(conflict == NULL);
-    rq->nr_running++;
+    __atomic_fetch_add(&rq->nr_running, 1, __ATOMIC_RELAXED);
 }
 
 void dequeue_task(task_t *task, percpu_t *rq)
@@ -72,7 +72,7 @@ void dequeue_task(task_t *task, percpu_t *rq)
     rbtree_erase(&rq->run_queue, &task->rb_node);
     // [FIX-atomic] RELEASE store (see enqueue_task).
     __atomic_store_n(&task->on_rq, 0, __ATOMIC_RELEASE);
-    rq->nr_running--;
+    __atomic_fetch_sub(&rq->nr_running, 1, __ATOMIC_RELAXED);
 }
 
 /* ── pick_eevdf: select next task O(log n) ─────────── */
@@ -82,7 +82,8 @@ task_t *pick_eevdf(percpu_t *rq)
         return rq->idle;
     rbtree_node_t *node = rbtree_first(&rq->run_queue);
     task_t *t = container_of(node, task_t, rb_node);
-    if (t->vruntime > rq->min_vruntime + EEVDF_LATENCY)
-        rq->min_vruntime = t->vruntime;
+    uint64_t cur_min = __atomic_load_n(&rq->min_vruntime, __ATOMIC_RELAXED);
+    if (t->vruntime > cur_min + EEVDF_LATENCY)
+        __atomic_store_n(&rq->min_vruntime, t->vruntime, __ATOMIC_RELAXED);
     return t;
 }

@@ -75,6 +75,12 @@ static void schedule_charge_regression(void)
 }
 
 #if !EXPECT_SCHED_CHARGE
+bool aarch64_vm_task_editing(const struct task_struct *task)
+{
+    (void)task;
+    return false;
+}
+
 static void aarch64_balance_vetoes_pf_process(void)
 {
     sched_notify_reset();

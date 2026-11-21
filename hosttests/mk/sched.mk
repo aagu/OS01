@@ -1201,3 +1201,35 @@ $(TEST_BLD)/test_waitpid.elf: \
 .PHONY: test-waitpid
 test-waitpid: $(TEST_BLD)/test_waitpid.elf
 	$<
+
+# ── aarch64 runtime task migration host suite ────────────────────
+SCHED_A64_MIG_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC) $(LIBC_INC) -I$(TEST_INC) \
+	-DSCHED_AARCH64_MIGRATION_HOST=1
+SCHED_A64_MIG_PROD_CFLAGS := $(SCHED_A64_MIG_CFLAGS) \
+	-include $(TEST_MOCK)/sched_notify_test_runtime.h
+
+$(TEST_BLD)/sched_a64_mig_core.o: $(TESTS_DIR)/kernel/sched/core.c \
+		$(TEST_MOCK)/sched_notify_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SCHED_A64_MIG_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/sched_a64_mig_balance.o: $(TESTS_DIR)/kernel/sched/balance.c \
+		$(TEST_MOCK)/sched_notify_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SCHED_A64_MIG_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/sched_a64_mig_fair.o: $(TESTS_DIR)/kernel/sched/fair.c \
+		$(TEST_MOCK)/sched_notify_test_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(SCHED_A64_MIG_PROD_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/sched_a64_mig_rbtree.o: $(TESTS_DIR)/libc/rbtree/rbtree.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/libc/include -c $< -o $@
+
+LINK_CFLAGS_sched-aarch64-migration = $(SCHED_A64_MIG_CFLAGS)
+LINK_GROUP_sched-aarch64-migration := \
+	$(TEST_BLD)/sched_a64_mig_core.o \
+	$(TEST_BLD)/sched_a64_mig_balance.o \
+	$(TEST_BLD)/sched_a64_mig_fair.o \
+	$(TEST_BLD)/sched_a64_mig_rbtree.o

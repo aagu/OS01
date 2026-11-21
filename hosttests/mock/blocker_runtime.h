@@ -207,6 +207,7 @@ typedef struct task_struct {
     uint64_t deadline;
     uint64_t runtime_ticks;    /* per-task runtime (accounting.c) */
     bool on_rq;
+    bool irq_return_migratable;
 
     char comm[64];
     uint32_t cpu;
@@ -261,6 +262,7 @@ typedef struct mock_percpu {
     uint32_t cpu_id;
     uint32_t arch_processor_id;
     uint32_t online;
+    uint32_t ipi_ready;
     uint32_t scheduler_ok;
     uint64_t need_resched;
     rbtree_root_t run_queue;

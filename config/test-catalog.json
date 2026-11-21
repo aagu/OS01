@@ -4421,6 +4421,17 @@
       "source": "qemutests/test_scenario_pilot.py"
     },
     {
+      "id": "test_sched_aarch64_migration",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "link": "sched-aarch64-migration",
+      "source": "hosttests/cases/test_sched_aarch64_migration.c"
+    },
+    {
       "kind": "host_test",
       "id": "test_sched_layout_offsets",
       "layer": "host",

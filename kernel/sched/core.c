@@ -660,6 +660,13 @@ void schedule(void)
             // RELEASE store: lockless readers (notify target capture,
             // the ARM scanner skip) pair with it.
             __atomic_store_n(&next->cpu, rq->cpu_id, __ATOMIC_RELEASE);
+            if (next != current || next->vruntime >= next->deadline) {
+                uint64_t cur_min = __atomic_load_n(&rq->min_vruntime,
+                                                   __ATOMIC_RELAXED);
+                if (next->vruntime > cur_min)
+                    __atomic_store_n(&rq->min_vruntime, next->vruntime,
+                                     __ATOMIC_RELAXED);
+            }
         }
         __atomic_store_n(&rq->need_resched, 0, __ATOMIC_RELAXED);
         spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
@@ -686,17 +693,6 @@ void schedule(void)
     //        (spec §5.1: the scheduler skips every self-switch). Always
     //        skip idle→idle.
     if (next == current) {
-        // [P2-5] Baseline bookkeeping kept: the OLD slice-exhausted self
-        // path fell through the (formerly conditional) skip and advanced
-        // rq->min_vruntime before switching to itself.  The spec skips
-        // the self SWITCH, not the advance, so restore it under exactly
-        // the old condition — otherwise a CPU-bound task that always
-        // re-picks itself never advances its runqueue's min_vruntime
-        // and newly created/woken tasks inherit a stale floor.
-        if (next != rq->idle && next->vruntime >= next->deadline &&
-            next->vruntime > rq->min_vruntime)
-            rq->min_vruntime = next->vruntime;
-
         // need_resched was already consumed inside the pick decision
         // (the rq_lock-protected clear); nothing to clear here — a
         // post-unlock clear could erase a notification that arrived
@@ -705,10 +701,6 @@ void schedule(void)
         current->in_schedule = 0;
         return;
     }
-
-    // ── 6. Update min_vruntime ──────────────────────────────
-    if (next != rq->idle && next->vruntime > rq->min_vruntime)
-        rq->min_vruntime = next->vruntime;
 
     // Idle task thread->rip is 0 until its first switch_to.  Arm the
     // first continuation through the arch hook (x86 writes the common C

@@ -6,6 +6,13 @@
 #include <core/debug.h>
 #include <log/log.h>
 #include <kernel.h>
+#ifdef AARCH64_USER_RUNTIME_TEST
+#include <selftest/aarch64_user_runtime.h>
+#endif
+
+#if defined(__aarch64__) || defined(SCHED_AARCH64_MIGRATION_HOST)
+bool aarch64_vm_task_editing(const struct task_struct *task);
+#endif
 
 /* ── sched_pick_cpu_mask: choose any cpu in @allowed ────
  * Thermal plan Task 2: back-compat callers (do_fork / spawn_user_task)
@@ -135,6 +142,137 @@ void sched_notify_remote(task_t *tsk)
  * their slice and won't be scheduled again soon.  Preserves source
  * CPU's hot-cache "about to run" tasks.
  */
+#if defined(__aarch64__) || defined(SCHED_AARCH64_MIGRATION_HOST)
+static bool aarch64_rq_ready_locked(const percpu_t *rq)
+{
+    return __atomic_load_n(&rq->online, __ATOMIC_ACQUIRE) &&
+           __atomic_load_n(&rq->ipi_ready, __ATOMIC_ACQUIRE) &&
+           __atomic_load_n(&rq->scheduler_ok, __ATOMIC_ACQUIRE);
+}
+
+static bool pull_aarch64_user_task(percpu_t *dst, percpu_t *src)
+{
+    if (!dst || !src || dst == src)
+        return false;
+
+    spinlock_T *lo, *hi;
+    if ((uintptr_t)&src->rq_lock < (uintptr_t)&dst->rq_lock) {
+        lo = &src->rq_lock;
+        hi = &dst->rq_lock;
+    } else {
+        lo = &dst->rq_lock;
+        hi = &src->rq_lock;
+    }
+
+    uint64_t flags = arch_local_irq_save();
+    spin_lock(lo);
+    if (lo != hi)
+        spin_lock(hi);
+
+    bool moved = false;
+    if (!aarch64_rq_ready_locked(dst) || !aarch64_rq_ready_locked(src))
+        goto out_unlock;
+
+    uint32_t dst_nr = __atomic_load_n(&dst->nr_running, __ATOMIC_RELAXED);
+    uint32_t src_nr = __atomic_load_n(&src->nr_running, __ATOMIC_RELAXED);
+    if (src_nr == 0)
+        goto out_unlock;
+    if (dst_nr > 0 && src_nr <= dst_nr + 1)
+        goto out_unlock;
+
+    rbtree_node_t *node = rbtree_last(&src->run_queue);
+    while (node) {
+        task_t *t = container_of(node, task_t, rb_node);
+        rbtree_node_t *prev = rbtree_prev(node);
+
+        if (t != src->idle &&
+            t->pid != 1 &&
+            t->pid != user_init_pid &&
+            (t->flags & PF_PROCESS) != 0 &&
+            t->state == TASK_RUNNING &&
+            t->on_rq &&
+            __atomic_load_n(&t->cpu, __ATOMIC_RELAXED) == src->cpu_id &&
+            ((t->allowed_cpus >> dst->cpu_id) & 1ULL) != 0 &&
+            !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE) &&
+            t->irq_return_migratable &&
+            !aarch64_vm_task_editing(t)) {
+#ifdef AARCH64_USER_RUNTIME_TEST
+            if (aarch64_user_runtime_test_migration_veto(t)) {
+                node = prev;
+                continue;
+            }
+#endif
+            dequeue_task(t, src);
+            __atomic_store_n(&t->cpu, dst->cpu_id, __ATOMIC_RELEASE);
+            uint64_t dst_floor = __atomic_load_n(&dst->min_vruntime,
+                                                 __ATOMIC_RELAXED);
+            if (t->vruntime < dst_floor)
+                t->vruntime = dst_floor;
+            enqueue_task(t, dst);
+            moved = true;
+            break;
+        }
+        node = prev;
+    }
+
+out_unlock:
+    spin_unlock(hi);
+    if (lo != hi)
+        spin_unlock(lo);
+    arch_local_irq_restore(flags);
+    return moved;
+}
+
+void sched_balance(percpu_t *rq)
+{
+    if (!rq || num_cpus < 2)
+        return;
+    if (!aarch64_rq_ready_locked(rq))
+        return;
+
+    uint32_t local_nr = __atomic_load_n(&rq->nr_running, __ATOMIC_RELAXED);
+
+    struct {
+        uint32_t cpu;
+        uint32_t nr;
+    } cands[NR_CPUS];
+    uint32_t count = 0;
+
+    uint32_t ncpus = num_cpus < NR_CPUS ? num_cpus : NR_CPUS;
+    for (uint32_t i = 0; i < ncpus; i++) {
+        if (i == rq->cpu_id || !aarch64_rq_ready_locked(&percpu_data[i]))
+            continue;
+        uint32_t nr = __atomic_load_n(&percpu_data[i].nr_running,
+                                      __ATOMIC_RELAXED);
+        if (nr == 0)
+            continue;
+        if (local_nr > 0 && nr <= local_nr + 1)
+            continue;
+        cands[count].cpu = i;
+        cands[count].nr = nr;
+        count++;
+    }
+
+    for (uint32_t i = 1; i < count; i++) {
+        uint32_t key_cpu = cands[i].cpu;
+        uint32_t key_nr = cands[i].nr;
+        uint32_t j = i;
+        while (j > 0 && (cands[j - 1].nr < key_nr ||
+                         (cands[j - 1].nr == key_nr &&
+                          cands[j - 1].cpu > key_cpu))) {
+            cands[j] = cands[j - 1];
+            j--;
+        }
+        cands[j].cpu = key_cpu;
+        cands[j].nr = key_nr;
+    }
+
+    for (uint32_t i = 0; i < count; i++) {
+        if (pull_aarch64_user_task(rq, &percpu_data[cands[i].cpu]))
+            break;
+    }
+}
+#else
 void sched_balance(percpu_t *rq)
 {
     /* 1. Find busiest online CPU.  Spec §7: a candidate must be online
@@ -150,10 +288,12 @@ void sched_balance(percpu_t *rq)
             !__atomic_load_n(&percpu_data[i].online, __ATOMIC_ACQUIRE) ||
             !__atomic_load_n(&percpu_data[i].scheduler_ok, __ATOMIC_ACQUIRE))
             continue;
-        uint32_t nr = *(volatile uint32_t *)&percpu_data[i].nr_running;
+        uint32_t nr = __atomic_load_n(&percpu_data[i].nr_running,
+                                      __ATOMIC_RELAXED);
         if (nr == 0)
             continue;
-        uint64_t vr = *(volatile uint64_t *)&percpu_data[i].min_vruntime;
+        uint64_t vr = __atomic_load_n(&percpu_data[i].min_vruntime,
+                                      __ATOMIC_RELAXED);
         if (nr > max_nr || (nr == max_nr && vr > max_vr)) {
             max_nr = nr;
             max_vr = vr;
@@ -216,9 +356,6 @@ void sched_balance(percpu_t *rq)
              * plan explicitly forbids the silent fallback.
              */
             if (t->pid != user_init_pid &&
-#ifdef __aarch64__
-                !(t->flags & PF_PROCESS) &&
-#endif
                 !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE) &&
                 ((t->allowed_cpus >> rq->cpu_id) & 1ULL)) {
                 dequeue_task(t, src_rq);
@@ -250,3 +387,4 @@ void sched_balance(percpu_t *rq)
                     rq->cpu_id, taken, src_idx, src_rq->nr_running, rq->nr_running);
     }
 }
+#endif

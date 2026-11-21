@@ -115,7 +115,7 @@ static int build_status(uint32_t pid, struct procfs_snapshot **out)
          * task lifetime — the pointer itself is NOT retained. */
         ts.ppid = t->parent ? (uint64_t)t->parent->pid : 0;
         ts.state_c = snap_state_char(t->state);
-        ts.last_cpu = t->cpu;
+        ts.last_cpu = __atomic_load_n(&t->cpu, __ATOMIC_RELAXED);
         ts.priority = (int32_t)t->priority;
         memcpy(ts.comm, t->comm, sizeof(ts.comm));
         ts.comm[sizeof(ts.comm) - 1] = '\0';

@@ -116,11 +116,15 @@ static inline void list_del(list_t *entry)
 
 /* ── rbtree surface: stubbed (the notify/scan cases never enqueue for
  *    real — pick_eevdf/dequeue/enqueue are test spies). ─────────── */
+#ifdef SCHED_AARCH64_MIGRATION_HOST
+#include <rbtree.h>
+#else
 typedef struct { uint64_t stub; } rbtree_node_t;
 typedef struct { uint64_t stub; } rbtree_root_t;
 void *rbtree_last(rbtree_root_t *root);
 void *rbtree_prev(void *node);
 void rbtree_erase(rbtree_root_t *root, rbtree_node_t *node);
+#endif
 
 /* ── Spin surface ───────────────────────────────────────────────
  * Production objects get the recording copy (mock_record_lock_op is
@@ -130,11 +134,33 @@ void rbtree_erase(rbtree_root_t *root, rbtree_node_t *node);
 #define OS01_HOST_SPINLOCK_T_PROVIDED
 typedef struct { unsigned long lock; } spinlock_T;
 void mock_record_lock_op(spinlock_T *l, int is_lock);
+#ifdef SCHED_AARCH64_MIGRATION_HOST
+void mock_on_spin_lock(spinlock_T *l);
+#endif
 static inline void spin_init(spinlock_T *l) { l->lock = 1; }
-static inline void spin_lock(spinlock_T *l) { mock_record_lock_op(l, 1); }
+static inline void spin_lock(spinlock_T *l) {
+#ifdef SCHED_AARCH64_MIGRATION_HOST
+    mock_on_spin_lock(l);
+#endif
+    mock_record_lock_op(l, 1);
+}
 static inline void spin_unlock(spinlock_T *l) { mock_record_lock_op(l, 0); }
-static inline uint64_t spin_lock_irqsave(spinlock_T *l) { mock_record_lock_op(l, 1); return 0; }
+static inline uint64_t spin_lock_irqsave(spinlock_T *l) {
+#ifdef SCHED_AARCH64_MIGRATION_HOST
+    mock_on_spin_lock(l);
+#endif
+    mock_record_lock_op(l, 1);
+    return 0;
+}
 static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t f) { (void)f; mock_record_lock_op(l, 0); }
+#endif
+
+#ifdef SCHED_AARCH64_MIGRATION_HOST
+struct task_struct;
+bool aarch64_vm_task_editing(const struct task_struct *task);
+#ifndef _KERNEL_SCHED_INTERNAL_H
+void mock_on_spin_lock(spinlock_T *l);
+#endif
 #endif
 
 typedef struct mm_struct {
@@ -182,6 +208,7 @@ typedef struct task_struct {
     uint64_t vruntime;
     uint64_t deadline;
     bool on_rq;
+    bool irq_return_migratable;
 
     char comm[64];
     uint32_t cpu;
@@ -375,6 +402,17 @@ int mock_lock_log_is_lock[32];
 int mock_lock_log_count;
 void mock_record_lock_op(spinlock_T *l, int is_lock)
 {
+#ifdef SCHED_AARCH64_MIGRATION_HOST
+    if (is_lock) {
+        if (l->lock == 0)
+            abort();
+        l->lock = 0;
+    } else {
+        if (l->lock != 0)
+            abort();
+        l->lock = 1;
+    }
+#endif
     if (mock_lock_log_count < 32) {
         mock_lock_log_addr[mock_lock_log_count] = l;
         mock_lock_log_is_lock[mock_lock_log_count] = is_lock;
@@ -426,11 +464,15 @@ void arch_task_check_prev(task_t *t) { (void)t; }
 
 /* ── fair.c stand-in spies ── */
 int mock_update_curr_calls;
-void update_curr(task_t *task) { (void)task; mock_update_curr_calls++; }
-
 int mock_enqueue_calls;
 task_t *mock_enqueue_last;
 percpu_t *mock_enqueue_rq;
+int mock_dequeue_calls;
+task_t *mock_pick_next;   /* NULL = idle */
+task_t *mock_idle_task;
+#ifndef SCHED_AARCH64_MIGRATION_HOST
+void update_curr(task_t *task) { (void)task; mock_update_curr_calls++; }
+
 void enqueue_task(task_t *task, percpu_t *rq)
 {
     mock_enqueue_calls++;
@@ -439,7 +481,6 @@ void enqueue_task(task_t *task, percpu_t *rq)
     task->on_rq = true;
     rq->nr_running++;
 }
-int mock_dequeue_calls;
 void dequeue_task(task_t *task, percpu_t *rq)
 {
     mock_dequeue_calls++;
@@ -448,8 +489,6 @@ void dequeue_task(task_t *task, percpu_t *rq)
     if (rq->nr_running > 0)
         rq->nr_running--;
 }
-task_t *mock_pick_next;   /* NULL = idle */
-task_t *mock_idle_task;
 task_t *pick_eevdf(percpu_t *rq)
 {
     (void)rq;
@@ -465,6 +504,7 @@ void rbtree_erase(rbtree_root_t *root, rbtree_node_t *node)
     (void)root;
     (void)node;
 }
+#endif /* !SCHED_AARCH64_MIGRATION_HOST */
 
 /* ── aarch64 broadcast spy (P2 kick contract) ── */
 int mock_ipi_broadcast_calls;
