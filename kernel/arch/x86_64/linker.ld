@@ -17,13 +17,17 @@ SECTIONS
 	.text :
 	{
 		_text = .;
+		__trace_text_start = .;
 		*(.text.head)
 		*(.text .text.*)
+		__trace_text_end = .;
 	} :text
 	.ltext :
 	{
 		_ltext = .;
+		__trace_ltext_start = .;
 		*(.ltext .ltext.*)
+		__trace_ltext_end = .;
 		_eltext = .;
 		_etext = .;
 	} :text

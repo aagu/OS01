@@ -92,16 +92,22 @@ SECTIONS
     /* Convenience: anything tagged __attribute__((section(".high.text"))) */
     .text ALIGN(0x1000) : AT(_boot_end) {
         _text_start = .;
+        __trace_text_start = .;
         *(.text)
         *(.text.*)
         *(.high.text)
+        __trace_text_end = .;
         _text_end = .;
     } :text
+    __trace_ltext_start = __trace_text_end;
+    __trace_ltext_end = __trace_text_end;
 
     .rodata ALIGN(0x1000) : AT(ADDR(.rodata) - _kernel_page_offset) {
         _rodata_start = .;
         *(.rodata)
         *(.rodata.*)
+        *(.got)
+        *(.got.*)
         _rodata_end = .;
     } :text
 

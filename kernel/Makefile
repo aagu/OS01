@@ -87,6 +87,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_boot.c \
                    core/printk.c \
                    core/panic.c \
                    core/boot_failure.c \
+                   core/trace_symbols.c \
                    core/main.c \
                    core/smp.c \
                    driver/logo.c \

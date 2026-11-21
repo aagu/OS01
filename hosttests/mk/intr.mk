@@ -585,3 +585,50 @@ test-irq-capacity: $(TEST_BLD)/test_irq_capacity.elf
 	python3 $(TESTS_DIR)/qemutests/run_hosttests.py \
 	    --build-dir $(BUILD_DIR) --profile $(PROFILE) \
 	    --timeout $(HOST_TEST_TIMEOUT) $<
+
+# Trace symbol lookup production tests (Task 1)
+TRACE_SYMBOLS_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(KERNEL_INC) \
+                             -idirafter $(TESTS_DIR)/libc/include
+
+$(TEST_BLD)/trace_symbols_production.o: \
+		$(TESTS_DIR)/kernel/core/trace_symbols.c \
+		$(TESTS_DIR)/kernel/include/core/trace_symbols.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(TRACE_SYMBOLS_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_trace_symbols.o: \
+		$(TEST_CASES)/test_trace_symbols.c \
+		$(TESTS_DIR)/kernel/include/core/trace_symbols.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(TRACE_SYMBOLS_HOST_CFLAGS) \
+	    -DTRACE_SYMBOLS_EMPTY_ELF='"$(TEST_BLD)/test_trace_symbols_empty.elf"' \
+	    -DTRACE_SYMBOLS_MISSING_ELF='"$(TEST_BLD)/test_trace_symbols_missing.elf"' \
+	    -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_trace_symbols_empty.o: \
+		$(TEST_CASES)/test_trace_symbols.c \
+		$(TESTS_DIR)/kernel/include/core/trace_symbols.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(TRACE_SYMBOLS_HOST_CFLAGS) -DTRACE_SYMBOLS_FIXTURE_EMPTY \
+	    -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_trace_symbols_missing.o: \
+		$(TEST_CASES)/test_trace_symbols.c \
+		$(TESTS_DIR)/kernel/include/core/trace_symbols.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(TRACE_SYMBOLS_HOST_CFLAGS) -DTRACE_SYMBOLS_FIXTURE_MISSING \
+	    -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_trace_symbols_empty.elf: $(TEST_BLD)/test_trace_symbols_empty.o \
+		$(TEST_BLD)/trace_symbols_production.o
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/test_trace_symbols_missing.elf: $(TEST_BLD)/test_trace_symbols_missing.o \
+		$(TEST_BLD)/trace_symbols_production.o
+	$(HOST_CC) -o $@ $^
+
+$(TEST_BLD)/test_trace_symbols.elf: $(TEST_BLD)/test_trace_symbols.o \
+		$(TEST_BLD)/trace_symbols_production.o \
+		$(TEST_BLD)/test_trace_symbols_empty.elf \
+		$(TEST_BLD)/test_trace_symbols_missing.elf
+	$(HOST_CC) -o $@ $(TEST_BLD)/test_trace_symbols.o $(TEST_BLD)/trace_symbols_production.o

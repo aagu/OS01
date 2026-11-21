@@ -1,5 +1,6 @@
 #include <core/trace.h>
 #include <log/log.h>
+#include <stddef.h>
 
 void backtrace(pt_regs_t* regs)
 {
@@ -24,19 +25,16 @@ void backtrace(pt_regs_t* regs)
 
 int32_t lookup_kallsyms(uint64_t address, int32_t level)
 {
-    int index = 0;
-	char * string =(char *) &kallsyms_names;
-	for(index = 0;index<kallsyms_syms_num;index++)
-		if(address > kallsyms_addresses[index] && address <= kallsyms_addresses[index+1])
-			break;
-	if(index < kallsyms_syms_num)
+	const char *name = NULL;
+	uint64_t offset = 0;
+
+	if (trace_symbol_lookup((uintptr_t)address, &name, &offset))
 	{
 		log_err("%*s+---> address:%#018lx \t(+) %04d function:%s\n",
 		        level * 2, "", address,
-		        (int)(address - kallsyms_addresses[index]),
-		        &string[kallsyms_index[index]]);
+		        (int)offset,
+		        name);
 		return 0;
 	}
-	else
-		return 1;
+	return 1;
 }

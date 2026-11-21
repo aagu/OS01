@@ -3381,6 +3381,16 @@
       }
     },
     {
+      "id": "test_kallsyms_trace",
+      "layer": "harness",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_kallsyms_trace.py"
+    },
+    {
       "id": "test_kernel_selftest_result",
       "layer": "harness",
       "subsystem": "test-framework",
@@ -4913,6 +4923,16 @@
       "origin": {
         "from": "hosttests/inventory"
       }
+    },
+    {
+      "id": "test_trace_symbols",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "hosttests/cases/test_trace_symbols.c"
     },
     {
       "id": "test_usb_boot_runner",
