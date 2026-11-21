@@ -7,6 +7,18 @@
 
 ## 2026-11-21
 
+- refactor(mk): **构建规则 x86_64/aarch64 冗余清理（mk/ 目录 8 项去重，行为保持）**——分支 `mk-arch-dedup`（叠于 aarch64-ext2-product-image 之上，共 8 个提交）：
+  - **固件获取规则合一**：x86 OVMF（run.mk）与 aarch64 QEMU_EFI（image.mk）两份逐字拷贝的下载/拷贝 recipe 收敛为 `firmware_fetch_cmd` + `firmware_size_normalize_64m` canned recipe（64 MiB cfi.pflash01 归一化为 aarch64 侧附加行）；错误文案仍拼出用户可读的 `*_SOURCE` 变量名。实测本地拷贝/64MiB 截断/两类错误分支。
+  - **publish-lock 提取**：5 处逐字相同的锁前奏（mkdir 重试 + trap + owner 记录）收敛为 `os01_acquire_publish_lock`（project.mk，紧邻 LOCK_DIR）；kernel/user 的 `$(SHELL) -ec` 单引号包裹与 sysroot/clean 直排 recipe 共用双引号转义 trap 形态（单引号→双引号为唯一语义等价归一）。实测 kernel.bin 全量构建与 sysroot 重发布（generation 10-13）。
+  - **user 程序子 make 走 `os01_submake_cmd`**：user.mk 两份手写 env -i 块（dry-run/真实分支）删除；busybox 适配器的 4 处 env -i 刻意保留（SKIP_STRIP 环境变量 + 无 profile 管道，不合 os01 契约）、kernel.mk 保留（`$$force` 无法过 `$(call)` 参数展开）。
+  - **uefi.mk per-arch 块解析期 `$(if)` 化**：TARGET_TRIPLE 分派（arch family/EFI 名/digest 编译器/boot 源）与 aarch64 头文件追加两段 ifeq 收敛为单分派点；UEFI_CLANG 在非 x86 三元组下展开为空（`OS01_SUBMAKE_ARGS` 跳过空值，行为与未定义等价）。两架构 EFI 经 digest 门真实重建验证。
+  - **sysroot staging 尾部合一**：kernel-headers/libc/libgfx/gui 四段 stamp 的机械尾部（input-key 比对 + 条件子 make + 写 key + stamp_check）收敛为 `staging_stamp_tail`；各段 input-key 计算（真正差异所在）留在调用点。skip/restage/FB_RESOLUTION_TEST 翻转三路实测。
+  - **aarch64 runner 尾巴提取**：9 处 `_test-aarch64-run-*` 的重复参数尾巴（firmware/image/qemu/llvm-nm/build-dir/profile/log-dir 两种固定次序）收敛为 `_aarch64_run_tail` / `_aarch64_run_tail_nm`；boot-logo（无 --log-dir）与 m1/boot-contract 生成器保持原样。6 个 MODE dry-run token 流逐字一致。
+  - **usb hash-sandwich 合一**：usb-boot/usb-hid 的镜像完整性守卫（before/after sha + cmp）收敛为 `usb_hash_before`/`usb_hash_after`，python 调用保持原样多行（不进 `$(call)` 参数，规避 `$(if)` 逗号脆弱性）。
+  - **aarch64 boot-contract 并入 `boot_matrix_suite` 生成器**：删除手写调度（`_boot_contract_aarch64_run` + 顺序 rule），slug `boot-contract-aarch64` 经 8 个 slug 键控 `BM_*` knob（runner 前置参/固件/QEMU/normal 镜像/变体目录前缀/镜像文件名/构建目标/umbrella 名）复用同一生成器；生成 umbrella 即 `_test-aarch64-run-boot-contract`（MODE 分发/harness 解析/generated dispatch 入口不变）。**顺带修复 master 既有红灯**：d10cc2d2 将 `boot_contract.py --arch` 改为 required 后，x86 boot-contract 套件的生成行从未补上该参数（真实运行 argparse 即死）——x86 侧经同一 knob 补 `--arch x86_64`。生成器增加 eval 位置约束注释（eval 先于 define 会静默展开为空，本项开发中实际踩中并以 -p 数据库定位）。7 条 python 行与 4 条构建行与手写版逐字一致（瞬态 hash 文件改名 `boot-contract-aarch64.normal.*`）。
+  - **文档/注释行号引用同步**：build.md（USB gate/默认值、host_case_group、boot_matrix_suite 四处）、qemu_entropy_modes.sh、test_entropy_facade.sh（含 base 上已漂移的 1271/788/153/33 旧引用一并修正）。
+  - 验收：每提交后目标 harness 模块（make-qemu-failure/dry-run/usb/gfx/systest-protocol/flake/isolation/boot-\*/catalog/dispatch/flag-names）全绿（`test_boot_irq_time` 为 master 既有红灯——kernel/Makefile filter-out 形状断言，与本任务无关）；全部 dry-run 契约快照 token 流逐字一致（唯一差异 = C2 trap 引号归一 + C8 的 `--arch` 修复 + 瞬态文件名）；`make regen-test-catalog` 无漂移。
+
 - feat(aarch64): **产品 rootfs 内容对齐——全部解锁用户程序上盘**（ext2 迁移的同日跟进；plan「后续跟进」节）：产品 manifest 由 4 程序扩展为 `AARCH64_ROOTFS_PROGRAMS` = `USER_PROGRAMS` 减 x86 `ROOTFS_USER_PROGRAMS` 同款过滤器（sh → `/bin/sh` 软链承载、test_arch10_capacity / test_arch6_fsstress / usb_boot_probe 为压测/probe 不进常规镜像），29 项程序全部经 manifest 落 ext2 `/bin`（含 nettest/lspci/lsusb/mousetest 等跨架构通用 EL0 程序——缺对应 syscall 的程序可存在于盘，与 x86 同类）；prereq 挂 `AARCH64_ROOTFS_PROGRAM_ELFS`，任一程序变更触发镜像重建。applet 软链集仍不装（悬空软链缺陷待决，不复制）。验收：ext2 `/bin` 32 项与 artifacts 精确核对（差异恰为 4 项过滤器 + 非 USER_PROGRAM 的 link probe）；product/fp user-runtime 1/2/4/8 核回归 PASS；QEMU smoke 实跑 `/bin/hello` 成功 exec 并 respawn。
 
 - feat(aarch64): **产品镜像迁 ext2 根文件系统（VFS 门收尾：产品布局与 x86_64 对齐）**——aarch64 产品变体镜像从无分区表 64 MiB FAT32 superfloppy 迁到 mkdisk GPT 双分区布局（2026-11-18「VFS 门」时 ext2 内核侧已工作，本项消掉镜像层最后的架构差距；plan `docs/superpowers/plans/2026-11-21-aarch64-ext2-product-image.md`）：

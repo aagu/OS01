@@ -37,7 +37,7 @@ case "$ARCH:$MODE" in
             "$(make_mode_entry STRONG qemu64,+rdrand,+rdseed selftest '')"
         ) ;;
     aarch64:all)
-        # aarch64 三模式都跑真实 UEFI image（mk/components/run.mk:153 模板）；
+        # aarch64 三模式都跑真实 UEFI image（mk/components/run.mk:204 模板）；
         # NONE / STRONG 用 regular selftest variant；WEAK 用 weak-selftest variant。
         MODES=(
             "$(make_mode_entry NONE   cortex-a53 selftest '')"

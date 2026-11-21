@@ -139,7 +139,7 @@ ensure_built() {
 # 之前的 `run_selftest_tier` + `TIER_SELFTEST_*` aliases 只输出 build-infra FAIL
 # 消息，留下"可执行但跑不通"的死代码。reviewer round-3 §3 指出这是误导向。
 # 因此：alias + 函数完全删除。KERNEL_SELFTEST=1 等价覆盖路径在 docs §3.4。
-# 如要重新启用 KERNEL_SELFTEST boot 测试，必须先修 `mk/components/image.mk:33`
+# 如要重新启用 KERNEL_SELFTEST boot 测试，必须先修 `mk/components/image.mk:89`
 # 让 `NORMAL_IMAGE` 代入 IMAGE_VARIANT（超出 AAGU-5.8 范围）。
 
 # ── 启动 QEMU 的内核测试（普通 tier） ───────────────────
@@ -453,7 +453,7 @@ TIER3_HOST_NO_VIRTIO()       { run_tier "tier3-host-no-virtio"     "host"       
 TIER3_HOST_VIRTIO()          { run_tier "tier3-host-virtio"        "host"         1 "STRONG-via-GetRNG" -enable-kvm; }
 
 # KERNEL_SELFTEST=1 selftest tier 已完全移除（reviewer round-3 §3）：
-# build infra gap 在 docs §3.4；修 NORMAL_IMAGE（image.mk:33）后才能重建。
+# build infra gap 在 docs §3.4；修 NORMAL_IMAGE（image.mk:89）后才能重建。
 
 # ── main ───────────────────────────────
 if [ "$#" -eq 0 ]; then

@@ -436,8 +436,8 @@ make test-monitor-host CASE=file      # 只跑指定子系统的用例
 - **已登记自动化 bucket**：`usb-boot` 已在生成的 suite catalog
   （`config/test-bridge.json` → `mk/generated/test-dispatch.mk`）中，并登记为 nightly
   （strict，`config/test-ci-schedule.json:199`）。六组子用例为 `readonly` / `dual` /
-  `ahci` / `persistence` / `superspeed` / `hub`（`mk/components/run.mk:1271`），
-  `USB_BOOT_CASE` 默认即 `readonly`（`:1175`）。**唯一遗留的过期断言是 `firmware` 子用例**
+  `ahci` / `persistence` / `superspeed` / `hub`（`mk/components/run.mk:1447`），
+  `USB_BOOT_CASE` 默认即 `readonly`（`:1225`）。**唯一遗留的过期断言是 `firmware` 子用例**
   ——它仍断言 MSC 驱动落地前的预期失败 `[boot-3] FATAL stage=fs component=root rc=-19`
   （`qemutests/usb_boot.py:78`），而 USB-only 引导现已走通到 shell；该用例已非默认路径，
   也不在六组循环内，只可显式 opt-in。手动诊断可用
@@ -787,8 +787,8 @@ x86_64 的 `make test-static` 和 AArch64 的
 `TEST_QEMU_SUITE_IDS` 做 **parse-time 校验**，生成片段缺失即硬错误。
 
 **表驱动的目标生成**：聚焦宿主用例分组由 `host_case_group` 宏生成
-（`mk/components/run.mk:788`），五个 x86 `boot-*` QEMU 故障矩阵由 `boot_matrix_suite`
-宏生成（`:1061`）；RED / canary 管线脚本化提取，独立静态审计表驱动。
+（`mk/components/run.mk:803`），五个 x86 `boot-*` QEMU 故障矩阵由 `boot_matrix_suite`
+宏生成（`:1094`）；RED / canary 管线脚本化提取，独立静态审计表驱动。
 
 ### 6. 变量参考
 
