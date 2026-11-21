@@ -1094,15 +1094,29 @@ void aarch64_do_signal_delivery(pt_regs_t *regs)
             arch_syscall_exit((uint64_t)sig);
         }
 
-        struct aarch64_sigframe frame = {
-            .regs    = *regs,
-            .blocked = (uint64_t)cur->blocked,
-        };
+        /* The staged frame is heap-allocated: 816 bytes would blow the
+         * kernel's -Wframe-larger-than=512 stack budget (the same rule
+         * the ELF loader's program-header array follows). */
+        struct aarch64_sigframe *frame = kmalloc(sizeof(*frame));
+        if (!frame) {
+            /* Transient shortage: restore the pending bit and retry on
+             * the next return-work pass. */
+            __atomic_fetch_or(&cur->signal, (1ULL << sig), __ATOMIC_SEQ_CST);
+            return;
+        }
+        frame->regs    = *regs;
+        frame->blocked = (uint64_t)cur->blocked;
+        /* The interrupted task's FP state is live in the hardware at
+         * delivery time (the kernel never touches FP/SIMD); stash it
+         * so the handler may clobber the registers freely.  sigreturn
+         * restores it from frame->fp. */
+        aarch64_fp_save(frame->fp);
         uint64_t new_sp = (regs->sp_el0 - sizeof(struct aarch64_sigframe)) & ~UINT64_C(0xf);
 
         aarch64_vm_native_enter(regs, SYS_sigreturn);
-        ssize_t copy_rc = copy_to_user_ft((void *)(uintptr_t)new_sp, &frame, sizeof(frame));
+        ssize_t copy_rc = copy_to_user_ft((void *)(uintptr_t)new_sp, frame, sizeof(*frame));
         aarch64_vm_native_leave();
+        kfree(frame);
         if (copy_rc < 0) {
             __atomic_fetch_or(&cur->signal, (1ULL << sig), __ATOMIC_SEQ_CST);
             return;
@@ -1130,22 +1144,49 @@ int64_t arch_syscall_sigreturn(void *arch_frame)
     if ((regs->sp_el0 & UINT64_C(0xf)) != 0)
         return -EFAULT;
 
-    struct aarch64_sigframe frame;
-    if (!syscall_check_user_range(regs->sp_el0, sizeof(frame), false))
+    /* The staged frame is heap-allocated: 816 bytes would blow the
+     * kernel's -Wframe-larger-than=512 stack budget. */
+    struct aarch64_sigframe *frame = kmalloc(sizeof(*frame));
+    if (!frame)
+        return -ENOMEM;
+
+    /* Two-stage copy: the GPR half first, so a forged frame gets the
+     * documented -EINVAL from the PSTATE guard before the FP-area copy
+     * can hit an unmapped stack tail with -EFAULT.  Nothing is
+     * restored until both copies succeed (no partial restore). */
+    if (!syscall_check_user_range(regs->sp_el0,
+                                  offsetof(struct aarch64_sigframe, reserved),
+                                  false)) {
+        kfree(frame);
         return -EFAULT;
-    if (copy_from_user_ft(&frame, (const void *)(uintptr_t)regs->sp_el0,
-                          sizeof(frame)) < 0)
+    }
+    if (copy_from_user_ft(&frame->regs, (const void *)(uintptr_t)regs->sp_el0,
+                          offsetof(struct aarch64_sigframe, reserved)) < 0) {
+        kfree(frame);
         return -EFAULT;
+    }
 
     /* Require exact AARCH64_USER_TASK_PSTATE (0x340: EL0t with D/A/F masked
      * and I enabled) in all non-NZCV bits; reject forged EL1 modes or DAIF edits. */
-    if ((frame.regs.spsr_el1 & ~UINT64_C(0xf0000000)) != AARCH64_USER_TASK_PSTATE)
+    if ((frame->regs.spsr_el1 & ~UINT64_C(0xf0000000)) != AARCH64_USER_TASK_PSTATE) {
+        kfree(frame);
         return -EINVAL;
+    }
 
-    *regs = frame.regs;
+    if (copy_from_user_ft(frame->fp,
+                          (const void *)(uintptr_t)(regs->sp_el0 +
+                              offsetof(struct aarch64_sigframe, fp)),
+                          sizeof(frame->fp)) < 0) {
+        kfree(frame);
+        return -EFAULT;
+    }
+
+    *regs = frame->regs;
     task_t *cur = arch_current_task();
-    cur->blocked = (int64_t)(frame.blocked &
+    cur->blocked = (int64_t)(frame->blocked &
                              ~((1ULL << (SIGKILL - 1)) | (1ULL << (SIGSTOP - 1))));
+    aarch64_fp_restore(frame->fp);
+    kfree(frame);
 #ifdef AARCH64_USER_RUNTIME_TEST
     aarch64_user_runtime_test_sigreturn(cur);
 #endif

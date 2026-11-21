@@ -14,6 +14,9 @@
  * preserved for the ERET.
  */
 
+#include <stddef.h>
+
+#include <arch/aarch64/fp.h>
 #include <arch/aarch64/regs.h>
 
 /* Dispatch `regs->x8` through the shared syscall table with the live
@@ -24,14 +27,24 @@
 void aarch64_user_syscall(pt_regs_t *regs);
 
 /* User-stack signal trampoline frame pushed before entering sa_handler
- * and consumed by SYS_sigreturn (arch_syscall_sigreturn). */
+ * and consumed by SYS_sigreturn (arch_syscall_sigreturn).  The FP area
+ * follows the fp.h save-area layout (q0..q31, fpsr, fpcr); delivery
+ * stashes the interrupted task's live FP state in it and sigreturn
+ * restores it, so an FP-using handler cannot corrupt the interrupted
+ * context.  regs@0 and blocked@272 keep their historical offsets. */
 struct aarch64_sigframe {
     pt_regs_t regs;
     uint64_t  blocked;
+    uint8_t   reserved[8];               /* keeps fp 16-byte aligned */
+    uint8_t   fp[AARCH64_FP_STATE_SIZE];
 };
 
-_Static_assert(sizeof(struct aarch64_sigframe) == 280,
-               "aarch64_sigframe must be 280 bytes");
+_Static_assert(sizeof(struct aarch64_sigframe) ==
+               280 + 8 + AARCH64_FP_STATE_SIZE,
+               "aarch64_sigframe must be 816 bytes");
+_Static_assert(offsetof(struct aarch64_sigframe, fp) == 288 &&
+               (offsetof(struct aarch64_sigframe, fp) & 0xf) == 0,
+               "fp area 16-byte aligned at 288");
 
 /* Deliver pending unblocked signal(s) before returning to EL0. */
 void aarch64_do_signal_delivery(pt_regs_t *regs);
