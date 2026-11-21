@@ -12,6 +12,9 @@
 #ifdef AARCH64_SCHED_TICK_TEST
 #include <selftest/aarch64_sched_tick.h>
 #endif
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+#include <selftest/aarch64_user_runtime.h>
+#endif
 
 /* P2 polling+sleeping idle (spec §5.3).  Call contract: idle task
  * stack, IRQs ENABLED at entry, no lock held; returns with IRQs
@@ -62,6 +65,10 @@ void arch_aarch64_idle_step(void)
     spin_unlock_irqrestore(&cpu->rq_lock, rq_flags);
 
     /* 3. runnable work → schedule (IRQ state restored around it). */
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+    aarch64_user_mig_idle_after_check(cpu_id(), idle_balance,
+                                      !need && slot_state != AP_WORK_READY);
+#endif
     if (need) {
         schedule();
         arch_local_irq_restore(flags);
@@ -81,13 +88,18 @@ void arch_aarch64_idle_step(void)
     aarch64_ap_sched_idle_hook(cpu_id(), AP_SCHED_IDLE_AFTER_CHECK);
     aarch64_ap_sched_idle_hook(cpu_id(), AP_SCHED_IDLE_BEFORE_WAIT);
 #endif
-    #ifdef AARCH64_SCHED_TICK_TEST
+#ifdef AARCH64_SCHED_TICK_TEST
     /* The per-CPU tick observer (selftest build only): the target
      * records its idle sleep boundary, so a remote wake can be
      * distinguished from a periodic-timer wake.  The boundary is
      * reported through the arch-private wrapper, so this file keeps
      * exactly one sleep primitive — the audited wait helper below. */
     aarch64_sched_tick_sleep_boundary(cpu_id(), true);
+#endif
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+    aarch64_user_mig_idle_pre_wfi(cpu_id(),
+                                  __atomic_load_n(&cpu->nr_running,
+                                                  __ATOMIC_RELAXED));
 #endif
     aarch64_idle_wait_irq();     /* dsb sy; wfi; ret */
     arch_local_irq_enable();

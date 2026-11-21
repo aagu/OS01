@@ -7,6 +7,13 @@
 #ifdef AARCH64_USER_RUNTIME_TEST
 
 #include <stdbool.h>
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+#include <selftest/aarch64_user_runtime.h>
+void test_aarch64_user_runtime_run(void)
+{
+    test_aarch64_user_migration_run();
+}
+#else
 #include <stdint.h>
 #include <string.h>
 
@@ -84,7 +91,30 @@ static volatile uint32_t g_cow_arrived_mask;
 static uint64_t g_cow_test_old_pa;
 static uint64_t g_cow_last_free_count;
 static int g_waitpid_blocked_ok;
+static uint32_t g_comp_first_cpu[2];
+static uint64_t g_comp_first_mask[2];
+static bool g_comp_first_seen[2];
 #endif
+
+void aarch64_user_runtime_test_explicit_pin_el0(const struct task_struct *tsk)
+{
+#ifdef AARCH64_USER_RUNTIME_CASE_SMP
+    if (!g_urt_active || !tsk)
+        return;
+    int idx = -1;
+    if ((int)tsk->pid == g_pid_comp0)
+        idx = 0;
+    else if ((int)tsk->pid == g_pid_comp1)
+        idx = 1;
+    if (idx >= 0 && !g_comp_first_seen[idx]) {
+        g_comp_first_cpu[idx] = cpu_id();
+        g_comp_first_mask[idx] = tsk->allowed_cpus;
+        __atomic_store_n(&g_comp_first_seen[idx], true, __ATOMIC_RELEASE);
+    }
+#else
+    (void)tsk;
+#endif
+}
 
 bool aarch64_user_runtime_test_migration_veto(const struct task_struct *tsk)
 {
@@ -611,6 +641,17 @@ static uint64_t urt_worker(uint64_t arg)
         goto out;
     }
 
+    if (!g_comp_first_seen[0] || !g_comp_first_seen[1]) {
+        log_err("[user-runtime] FAIL case=smp reason=missing_explicit_pin (%d,%d)\n",
+                (int)g_comp_first_seen[0], (int)g_comp_first_seen[1]);
+        goto out;
+    }
+    log_info("[user-runtime] explicit_pin pid=%d cpu=%u mask=%lu\n",
+             g_pid_comp0, (unsigned)g_comp_first_cpu[0],
+             (unsigned long)g_comp_first_mask[0]);
+    log_info("[user-runtime] explicit_pin pid=%d cpu=%u mask=%lu\n",
+             g_pid_comp1, (unsigned)g_comp_first_cpu[1],
+             (unsigned long)g_comp_first_mask[1]);
     log_info("[user-runtime] smp-samples child_cpu=%d "
              "cpu0_eoi=%lu cpu1_eoi=%lu cpu0_sw=%lu cpu1_sw=%lu "
              "cow_last_free=%lu waitpid_blocked=%d waitpid_exit=42 "
@@ -767,5 +808,6 @@ void test_aarch64_user_runtime_run(void)
     selftest_record_late("aarch64_user_runtime_irq", rc);
 #endif
 }
+#endif /* !AARCH64_USER_RUNTIME_CASE_MIGRATION */
 
 #endif /* AARCH64_USER_RUNTIME_TEST */

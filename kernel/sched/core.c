@@ -18,6 +18,9 @@
 #include <selftest/aarch64_scheduler.h>
 #include <selftest/aarch64_ap_scheduler.h>
 #endif
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+#include <selftest/aarch64_user_runtime.h>
+#endif
 
 // ── Preemption flag ──────────────────────────────────────
 // Now per-CPU (percpu_t.need_resched, offset 8 from GS base).
@@ -117,6 +120,9 @@ bool task_finish_switch(task_t *prev)
 #endif
     }
     __atomic_store_n(&prev->on_cpu, 0, __ATOMIC_RELEASE);
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+    aarch64_user_mig_note_tail(prev);
+#endif
     spin_unlock_irqrestore(&rq->rq_lock, flags);
 
     if (is_zombie) {
@@ -648,6 +654,9 @@ void schedule(void)
             // the window: task_wake skips on_cpu tasks.
             // RELEASE: paired with task_wake's ACQUIRE on_cpu load.
             __atomic_store_n(&next->on_cpu, 1, __ATOMIC_RELEASE);
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+            aarch64_user_mig_note_pick(next, rq->cpu_id);
+#endif
             // [FIX-cpu-sync] keep t->cpu == the runqueue it sits on.
             // schedule() never updated next->cpu at pick time, so a
             // task could run on CPU0 with a stale t->cpu=1.  task_wake

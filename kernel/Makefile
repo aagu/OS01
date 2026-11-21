@@ -158,6 +158,9 @@ KERNEL_C_SOURCES += selftest/test_aarch64_user_signal.c
 endif
 ifneq ($(strip $(AARCH64_USER_RUNTIME_TEST)),)
 KERNEL_C_SOURCES += selftest/test_aarch64_user_runtime.c
+ifeq ($(AARCH64_USER_RUNTIME_TEST),migration)
+KERNEL_C_SOURCES += selftest/test_aarch64_user_migration.c
+endif
 endif
 # fs/elf_layout.c is shared ELF-layout validation: the M4 production
 # user-image constructor links it in every aarch64 build (normal and
@@ -197,7 +200,8 @@ KERNEL_C_SOURCES := \
                  selftest/boot_contract_fixture.c \
                  selftest/boot_failure_fixture.c \
                  selftest/boot_services_fixture.c \
-                 selftest/boot_irq_time_fixture.c,$(wildcard selftest/*.c)) \
+                 selftest/boot_irq_time_fixture.c \
+                 selftest/test_aarch64_user_migration.c,$(wildcard selftest/*.c)) \
     $(wildcard subsys/*.c) \
     $(filter-out device/test_fault.c,$(wildcard device/*.c)) \
     $(wildcard bus/pci/*.c) \
@@ -374,9 +378,14 @@ KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_signal_image.o
 endif
 ifeq ($(ARCH),aarch64)
 ifneq ($(strip $(AARCH64_USER_RUNTIME_TEST)),)
+ifeq ($(AARCH64_USER_RUNTIME_TEST),migration)
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_migration_image.o
+KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_migration_exec_image.o
+else
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_runtime_image.o
 ifeq ($(AARCH64_USER_RUNTIME_TEST),smp)
 KERNEL_EXTRA_OBJECTS += $(BUILD_DIR)/generated/aarch64_user_runtime_comp_image.o
+endif
 endif
 endif
 endif
@@ -636,6 +645,7 @@ ALL_CFLAGS += -DAARCH64_USER_RUNTIME_TEST=1
 ALL_CFLAGS += $(if $(filter irq,$(AARCH64_USER_RUNTIME_TEST)),-DAARCH64_USER_RUNTIME_CASE_IRQ=1)
 ALL_CFLAGS += $(if $(filter asid,$(AARCH64_USER_RUNTIME_TEST)),-DAARCH64_USER_RUNTIME_CASE_ASID=1)
 ALL_CFLAGS += $(if $(filter smp,$(AARCH64_USER_RUNTIME_TEST)),-DAARCH64_USER_RUNTIME_CASE_SMP=1)
+ALL_CFLAGS += $(if $(filter migration,$(AARCH64_USER_RUNTIME_TEST)),-DAARCH64_USER_RUNTIME_CASE_MIGRATION=1)
 endif
 endif
 
@@ -1028,6 +1038,29 @@ endif
 
 ifeq ($(ARCH),aarch64)
 ifneq ($(strip $(AARCH64_USER_RUNTIME_TEST)),)
+ifeq ($(AARCH64_USER_RUNTIME_TEST),migration)
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_migration.o: selftest/fixtures/aarch64_user_migration.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(filter-out -mgeneral-regs-only,$(ALL_CFLAGS)) -MD -MP -c $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_migration.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_migration.o selftest/fixtures/aarch64_user_task.ld
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_migration_image.o: $(BUILD_DIR)/generated/aarch64_user_migration.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+
+$(BUILD_DIR)/selftest/fixtures/aarch64_user_migration_exec.o: selftest/fixtures/aarch64_user_migration.S
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(filter-out -mgeneral-regs-only,$(ALL_CFLAGS)) -DAARCH64_USER_MIGRATION_EXEC=1 -MD -MP -c $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_migration_exec.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_migration_exec.o selftest/fixtures/aarch64_user_task.ld
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) $(RAW_LD_EMULATION) -z max-page-size=4096 -T $(word 2,$^) $< -o $@
+
+$(BUILD_DIR)/generated/aarch64_user_migration_exec_image.o: $(BUILD_DIR)/generated/aarch64_user_migration_exec.elf
+	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+else
 $(BUILD_DIR)/selftest/fixtures/aarch64_user_runtime.o: selftest/fixtures/aarch64_user_runtime.S
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(filter-out -mgeneral-regs-only,$(ALL_CFLAGS)) -MD -MP -c $< -o $@
@@ -1050,6 +1083,7 @@ $(BUILD_DIR)/generated/aarch64_user_runtime_comp.elf: $(BUILD_DIR)/selftest/fixt
 
 $(BUILD_DIR)/generated/aarch64_user_runtime_comp_image.o: $(BUILD_DIR)/generated/aarch64_user_runtime_comp.elf
 	cd $(dir $<) && $(TARGET_LD) $(RAW_LD_EMULATION) -r -b binary $(notdir $<) -o $@
+endif
 endif
 endif
 endif

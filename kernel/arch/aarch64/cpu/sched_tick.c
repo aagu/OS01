@@ -44,6 +44,9 @@
 #ifdef AARCH64_SCHED_TICK_TEST
 #include <selftest/aarch64_sched_tick.h>
 #endif
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+#include <selftest/aarch64_user_runtime.h>
+#endif
 
 /* Per-CPU "the local scheduler tick is really running" state.  The
  * array is static: no assembly-visible structure field is added.  The
@@ -143,6 +146,18 @@ bool aarch64_sched_tick_take_idle_balance(void)
     return pending;
 }
 
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+uint32_t aarch64_sched_tick_mig_cadence(uint32_t cpu)
+{
+    return (cpu < NR_CPUS) ? g_idle_balance_ticks[cpu] : 0;
+}
+
+bool aarch64_sched_tick_mig_pending(uint32_t cpu)
+{
+    return (cpu < NR_CPUS) ? g_idle_balance_pending[cpu] : false;
+}
+#endif
+
 bool aarch64_sched_tick_started(unsigned cpu)
 {
     if (cpu >= NR_CPUS)
@@ -216,6 +231,10 @@ void aarch64_sched_tick(void)
      * a schedule unconditionally. */
     if (cpu == 0)
         __atomic_store_n(&rq->need_resched, 1, __ATOMIC_RELEASE);
+
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+    aarch64_user_mig_idle_tick(cpu, 30);
+#endif
 
     /* Idle-balance cadence: only when current == idle, this CPU has
      * published online/ipi_ready/scheduler_ok, and at least one other

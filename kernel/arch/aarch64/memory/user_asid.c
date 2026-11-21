@@ -56,7 +56,26 @@ __attribute__((weak)) void aarch64_asid_tlbi(uint8_t asid)
 #ifdef AARCH64_USER_RUNTIME_TEST
     aarch64_user_runtime_test_note_asid_tlbi(asid);
 #endif
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+    aarch64_user_mig_note_tlbi(asid, asid == 0);
+#endif
 }
+
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+unsigned aarch64_asid_test_in_use_count(void)
+{
+    uint64_t daif = spin_lock_irqsave(&g_asid_lock);
+    unsigned cnt = 0;
+    for (unsigned word = 0; word < 4; word++) {
+        uint64_t bits = g_asid_bitmap[word];
+        if (word == 0)
+            bits &= ~1ULL; /* exclude reserved ASID 0 */
+        cnt += (unsigned)__builtin_popcountll(bits);
+    }
+    spin_unlock_irqrestore(&g_asid_lock, daif);
+    return cnt;
+}
+#endif
 
 uint8_t aarch64_asid_alloc(void)
 {

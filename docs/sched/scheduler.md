@@ -113,6 +113,8 @@ When a task wakes from blocking, its `vruntime` is raised to `min_vruntime - EEV
 6. Normalize each stolen task's `vruntime` to `max(vruntime, target.min_vruntime)`
 7. Enqueue on local runqueue
 
+**AArch64 pull-only user task migration**: On AArch64 (`pull_aarch64_user_task(dst, src)`), `sched_balance()` pulls at most one `PF_PROCESS` task per call from `src` (only when `src` has >1 runnable task, `(p->allowed_cpus >> dst) & 1`, `on_cpu == 0`, `p->irq_return_migratable == true`, and `!aarch64_vm_task_editing(p)`), without sending an SGI or resetting `src->min_vruntime`. Idle CPUs trigger `sched_idle_balance()` on an 8-tick per-CPU cadence (`aarch64_sched_tick_take_idle_balance()` in `arch_aarch64_idle_step()`).
+
 **CPU selection at creation time**: `sched_pick_cpu()` picks the CPU with the lowest `nr_running`. `sched_notify_remote()` sends an IPI reschedule to the target CPU if a task was placed on a remote idle CPU.
 
 ## Task states

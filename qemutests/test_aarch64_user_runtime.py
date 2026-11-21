@@ -56,6 +56,8 @@ def _good_smp_trace():
         "[TEST] BEGIN aarch64_user_runtime_smp\n"
         "[TEST] PASS aarch64_user_runtime_smp\n"
         "[TEST] END suite=kernel-selftest total=1 passed=1 failed=0 skipped=0\n"
+        "[INFO] [user-runtime] explicit_pin pid=10 cpu=0 mask=1\n"
+        "[INFO] [user-runtime] explicit_pin pid=11 cpu=1 mask=2\n"
         "[INFO] [user-runtime] smp-samples child_cpu=1 "
         "cpu0_eoi=3 cpu1_eoi=3 cpu0_sw=2 cpu1_sw=2 "
         "cow_last_free=1 waitpid_blocked=1 waitpid_exit=42 "
@@ -63,6 +65,106 @@ def _good_smp_trace():
         "[INFO] [user-runtime] PASS case=smp cpu_mask=3\n"
         "[selftest] done (failed=0)\n"
     )
+
+
+def _good_migration_trace():
+    lines = [
+        "[TEST] START v=1 suite=kernel-selftest expected=1",
+        "[TEST] SELECT aarch64_user_runtime_migration required=1",
+        "[TEST] BEGIN aarch64_user_runtime_migration",
+        "[TEST] PASS aarch64_user_runtime_migration",
+        "[TEST] END suite=kernel-selftest total=1 passed=1 failed=0 skipped=0",
+    ]
+    seq = 1
+
+    def ev(kind, **kw):
+        nonlocal seq
+        fields = " ".join(f"{k}={v}" for k, v in kw.items())
+        lines.append(
+            f"[INFO] [user-runtime] migration-event seq={seq} kind={kind} {fields}"
+        )
+        seq += 1
+
+    ev("baseline", roots=0, pages=100, asids=0)
+    ev("spawn", pid=20, cpu=1, mask=3)
+    ev("fork", pid=21, cpu=0, mask=3)
+    ev("fork", pid=22, cpu=1, mask=3)
+    ev("cow_check", pid=21, va="0x40001000", cow_val="0x2222")
+    ev("parent_check", pid=20, va="0x40000000", pa="0x50001000",
+       data="0x1111", cow_val="0x1111")
+    ev("old_load", pid=21, cpu=0, root="0x50010000", asid=2,
+       va="0x40000000", pa="0x50001000", data="0x1111")
+
+    # Move 1: 0 -> 1 (idle AP 8-tick window)
+    ev("irq_save", move_id=1, pid=21, cpu=0, root="0x50010000", asid=2, frame="0xffff00001000")
+    ev("hw_detach", move_id=1, pid=21, cpu=0, root="0x50010000", asid=2)
+    ev("root_unpublish", move_id=1, pid=21, cpu=0, root="0x50010000", asid=2)
+    ev("tail", move_id=1, pid=21, cpu=0, root="0x50010000", asid=2, on_cpu=0)
+    ev("idle_zero", cpu=1, rq_nr=0, pending=0, cadence=0)
+    ev("wfi_enter", cpu=1)
+    for i in range(1, 8):
+        ev("idle_tick", cpu=1, intid=30, idx=i)
+        ev("idle_check", cpu=1, idx=i, wfi=1, sgi=0, other_irq=0, ap_work=0, direct_sched=0)
+    ev("idle_tick", cpu=1, intid=30, idx=8)
+    ev("idle_take", cpu=1, sgi=0, other_irq=0, ap_work=0, direct_sched=0)
+    ev("commit", move_id=1, pid=21, cpu=1, root="0x50010000", asid=2, src=0, dst=1)
+    ev("pick", move_id=1, pid=21, cpu=1, root="0x50010000", asid=2, on_cpu=1)
+    ev("hw_install", move_id=1, pid=21, cpu=1, root="0x50010000", asid=2)
+    ev("irq_resume", move_id=1, pid=21, cpu=1, root="0x50010000", asid=2, frame="0xffff00001000", match=1)
+    ev("el0_after", move_id=1, pid=21, cpu=1, root="0x50010000", asid=2)
+
+    # Remap on CPU 1: munmap, mmap, demand fault, mprotect
+    ev("edit_begin", pid=21, cpu=1, root="0x50010000", asid=2, tx=1, op="munmap")
+    ev("tlbi_done", pid=21, cpu=1, root="0x50010000", asid=2, tx=1, op="munmap")
+    ev("edit_leaf", pid=21, cpu=1, root="0x50010000", asid=2, tx=1, op="munmap", old_pte="0x50001743", new_pte="0x0")
+    ev("edit_begin", pid=21, cpu=1, root="0x50010000", asid=2, tx=2, op="mmap")
+    ev("tlbi_done", pid=21, cpu=1, root="0x50010000", asid=2, tx=2, op="mmap")
+    ev("edit_vma", pid=21, cpu=1, root="0x50010000", asid=2, tx=2, op="mmap", leaf_absent=1)
+    ev("edit_begin", pid=21, cpu=1, root="0x50010000", asid=2, tx=3, op="fault")
+    ev("tlbi_done", pid=21, cpu=1, root="0x50010000", asid=2, tx=3, op="fault")
+    ev("edit_leaf", pid=21, cpu=1, root="0x50010000", asid=2, tx=3, op="fault", old_pte="0x0", new_pte="0x50020743")
+    ev("edit_begin", pid=21, cpu=1, root="0x50010000", asid=2, tx=4, op="mprotect")
+    ev("tlbi_done", pid=21, cpu=1, root="0x50010000", asid=2, tx=4, op="mprotect")
+    ev("edit_leaf", pid=21, cpu=1, root="0x50010000", asid=2, tx=4, op="mprotect", old_pte="0x50020743", new_pte="0x500207c3")
+    ev("remap", pid=21, cpu=1, root="0x50010000", asid=2, va="0x40000000", pa="0x50020000", data="0x3333")
+
+    # Move 2: 1 -> 0 (BSP tick schedule)
+    ev("irq_save", move_id=2, pid=21, cpu=1, root="0x50010000", asid=2, frame="0xffff00001000")
+    ev("hw_detach", move_id=2, pid=21, cpu=1, root="0x50010000", asid=2)
+    ev("root_unpublish", move_id=2, pid=21, cpu=1, root="0x50010000", asid=2)
+    ev("tail", move_id=2, pid=21, cpu=1, root="0x50010000", asid=2, on_cpu=0)
+    ev("bsp_tick_schedule", move_id=2, cpu=0, bsp_req=1, sgi=0, ap_work=0, direct_sched=0)
+    ev("commit", move_id=2, pid=21, cpu=0, root="0x50010000", asid=2, src=1, dst=0)
+    ev("pick", move_id=2, pid=21, cpu=0, root="0x50010000", asid=2, on_cpu=1)
+    ev("hw_install", move_id=2, pid=21, cpu=0, root="0x50010000", asid=2)
+    ev("irq_resume", move_id=2, pid=21, cpu=0, root="0x50010000", asid=2, frame="0xffff00001000", match=1)
+    ev("el0_after", move_id=2, pid=21, cpu=0, root="0x50010000", asid=2)
+
+    ev("new_load", pid=21, cpu=0, root="0x50010000", asid=2, va="0x40000000", pa="0x50020000", data="0x3333")
+    ev("permission_abort", pid=21, cpu=0, root="0x50010000", asid=2, va="0x40000000", pa="0x50020000", data="0x3333", ec="0x24", fsc="0xf", far="0x40000000", wnr=1)
+    ev("wait_status", child_pid=21, returned_pid=21, status=-14)
+
+    # Move 3: child 22 1 -> 0, copy_ok/copy_denied, exec
+    ev("irq_save", move_id=3, pid=22, cpu=1, root="0x50030000", asid=3, frame="0xffff00002000")
+    ev("hw_detach", move_id=3, pid=22, cpu=1, root="0x50030000", asid=3)
+    ev("root_unpublish", move_id=3, pid=22, cpu=1, root="0x50030000", asid=3)
+    ev("tail", move_id=3, pid=22, cpu=1, root="0x50030000", asid=3, on_cpu=0)
+    ev("bsp_tick_schedule", move_id=3, cpu=0, bsp_req=1, sgi=0, ap_work=0, direct_sched=0)
+    ev("commit", move_id=3, pid=22, cpu=0, root="0x50030000", asid=3, src=1, dst=0)
+    ev("pick", move_id=3, pid=22, cpu=0, root="0x50030000", asid=3, on_cpu=1)
+    ev("hw_install", move_id=3, pid=22, cpu=0, root="0x50030000", asid=3)
+    ev("irq_resume", move_id=3, pid=22, cpu=0, root="0x50030000", asid=3, frame="0xffff00002000", match=1)
+    ev("el0_after", move_id=3, pid=22, cpu=0, root="0x50030000", asid=3)
+
+    ev("copy_ok", pid=22, cpu=0, ret=16)
+    ev("copy_denied", pid=22, cpu=0, ret=-14)
+    ev("exec_commit", pid=22, cpu=0, old_root="0x50030000", new_root="0x50040000", old_mask=3, new_mask=3)
+    ev("exec_el0", pid=22, cpu=0, root="0x50040000", mask=3)
+    ev("wait_status", child_pid=22, returned_pid=22, status=10752)
+    ev("final", roots=0, pages=100, asids=0)
+    lines.append("[INFO] [user-runtime] PASS case=migration cpu_mask=3")
+    lines.append("[selftest] done (failed=0)")
+    return "\n".join(lines) + "\n"
 
 
 def _good_product_trace():
@@ -153,6 +255,84 @@ class UserRuntimeEvidenceTests(unittest.TestCase):
         ok, errors = runner.parse_product_boot_evidence(text, check_shell_io=True)
         self.assertFalse(ok)
         self.assertTrue(any("hi" in e for e in errors), errors)
+
+    def test_smp_missing_explicit_pin_fails(self):
+        text = "\n".join(
+            l for l in _good_smp_trace().splitlines() if "explicit_pin" not in l
+        ) + "\n"
+        ok, errors = runner.parse_user_runtime_evidence(text, "smp")
+        self.assertFalse(ok)
+        self.assertTrue(any("explicit_pin" in e for e in errors), errors)
+
+    def test_valid_migration_trace_passes(self):
+        ok, errors = runner.parse_user_runtime_evidence(_good_migration_trace(), "migration")
+        self.assertTrue(ok, errors)
+        self.assertEqual(errors, [])
+
+    def test_migration_deleted_line_fails(self):
+        text = "\n".join(
+            l for l in _good_migration_trace().splitlines() if "kind=el0_after move_id=1" not in l
+        ) + "\n"
+        ok, errors = runner.parse_user_runtime_evidence(text, "migration")
+        self.assertFalse(ok)
+
+    def test_migration_duplicate_seq_fails(self):
+        lines = _good_migration_trace().splitlines()
+        dup_line = next(l for l in lines if "kind=old_load" in l)
+        text = "\n".join(lines[:-2] + [dup_line] + lines[-2:]) + "\n"
+        ok, errors = runner.parse_user_runtime_evidence(text, "migration")
+        self.assertFalse(ok)
+
+    def test_migration_wrong_direction_fails(self):
+        text = _good_migration_trace().replace("src=0 dst=1", "src=1 dst=0")
+        ok, errors = runner.parse_user_runtime_evidence(text, "migration")
+        self.assertFalse(ok)
+
+    def test_migration_pa_or_tag_mismatch_fails(self):
+        text = _good_migration_trace().replace(
+            'kind=new_load pid=21 cpu=0 root=0x50010000 asid=2 va=0x40000000 pa=0x50020000',
+            'kind=new_load pid=21 cpu=0 root=0x50010000 asid=2 va=0x40000000 pa=0x50001000',
+        )
+        ok, errors = runner.parse_user_runtime_evidence(text, "migration")
+        self.assertFalse(ok)
+
+        text_tag0 = _good_migration_trace().replace("asid=2", "asid=0")
+        ok2, _ = runner.parse_user_runtime_evidence(text_tag0, "migration")
+        self.assertFalse(ok2)
+
+    def test_migration_sgi_in_idle_window_fails(self):
+        text = _good_migration_trace().replace(
+            "kind=idle_take cpu=1 sgi=0",
+            "kind=idle_take cpu=1 sgi=1",
+        )
+        ok, errors = runner.parse_user_runtime_evidence(text, "migration")
+        self.assertFalse(ok)
+
+    def test_migration_delayed_tlbi_or_full_flush_fails(self):
+        lines = _good_migration_trace().splitlines()
+        i_tlbi = next(i for i, l in enumerate(lines) if "kind=tlbi_done" in l and "tx=1" in l)
+        i_leaf = next(i for i, l in enumerate(lines) if "kind=edit_leaf" in l and "tx=1" in l)
+        lines[i_tlbi], lines[i_leaf] = lines[i_leaf], lines[i_tlbi]
+        ok, _ = runner.parse_user_runtime_evidence("\n".join(lines) + "\n", "migration")
+        self.assertFalse(ok)
+
+        lines2 = _good_migration_trace().splitlines()
+        lines2.insert(i_leaf + 1, "[INFO] [user-runtime] migration-event seq=999 kind=full_flush pid=21 cpu=0 root=0x50010000 asid=2")
+        ok2, _ = runner.parse_user_runtime_evidence("\n".join(lines2) + "\n", "migration")
+        self.assertFalse(ok2)
+
+    def test_migration_software_uaccess_instead_of_hw_fault_fails(self):
+        text = _good_migration_trace().replace("ec=0x24 fsc=0xf", "ec=0x15 fsc=0x0")
+        ok, _ = runner.parse_user_runtime_evidence(text, "migration")
+        self.assertFalse(ok)
+
+    def test_migration_pass_before_final_fails(self):
+        lines = _good_migration_trace().splitlines()
+        i_fin = next(i for i, l in enumerate(lines) if "kind=final" in l)
+        i_pass = next(i for i, l in enumerate(lines) if "PASS case=migration" in l)
+        lines[i_fin], lines[i_pass] = lines[i_pass], lines[i_fin]
+        ok, _ = runner.parse_user_runtime_evidence("\n".join(lines) + "\n", "migration")
+        self.assertFalse(ok)
 
 
 if __name__ == "__main__":

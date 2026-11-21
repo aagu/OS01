@@ -209,6 +209,9 @@ static bool pull_aarch64_user_task(percpu_t *dst, percpu_t *src)
             if (t->vruntime < dst_floor)
                 t->vruntime = dst_floor;
             enqueue_task(t, dst);
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+            aarch64_user_mig_note_commit(t, src->cpu_id, dst->cpu_id);
+#endif
             moved = true;
             break;
         }

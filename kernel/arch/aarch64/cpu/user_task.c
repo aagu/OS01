@@ -426,8 +426,17 @@ void aarch64_user_restore_kernel_root(void)
                                                need_full_flush);
 #endif
 
-    if (g_live_root_is_user[cpu])
-        aarch64_pt_root_unpublish_local(g_live_root_pa[cpu]);
+    if (g_live_root_is_user[cpu]) {
+        uint64_t old_pa = g_live_root_pa[cpu];
+        uint8_t old_asid = g_live_asid[cpu];
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+        aarch64_user_mig_note_hw_detach(arch_current_task(), old_pa, old_asid);
+#endif
+        aarch64_pt_root_unpublish_local(old_pa);
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+        aarch64_user_mig_note_root_unpublish(arch_current_task(), old_pa, old_asid);
+#endif
+    }
 
     g_live_ttbr0[cpu] = g_kernel_root_pa;
     g_live_root_pa[cpu] = g_kernel_root_pa;
@@ -462,10 +471,15 @@ void aarch64_user_switch_mm(struct task_struct *prev,
         next_ttbr0 = aarch64_user_ttbr0_value(next->mm);
 
     if (cpu < NR_CPUS && next_ttbr0 != g_live_ttbr0[cpu]) {
-        if (next_user_active)
+        if (next_user_active) {
             aarch64_user_install_mm(next->mm);
-        else
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+            aarch64_user_mig_note_hw_install(next, g_live_root_pa[cpu],
+                                             g_live_asid[cpu]);
+#endif
+        } else {
             aarch64_user_restore_kernel_root();
+        }
     }
 
     /* 3. Restore next's EL0 TLS (or zero for kernel / paused-edit
@@ -495,6 +509,12 @@ static void aarch64_user_first_entry(void)
         (struct pt_regs *)(uintptr_t)aarch64_user_task_frame(t);
 
     context_run_return_work(frame, CONTEXT_RETURN_SIGNAL_ONLY);
+#ifdef AARCH64_USER_RUNTIME_TEST
+    aarch64_user_runtime_test_explicit_pin_el0(t);
+#endif
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+    aarch64_user_mig_note_exec_el0(t);
+#endif
     aarch64_el0_restore(frame);
 }
 
@@ -524,6 +544,9 @@ bool arch_context_reschedule_return(struct pt_regs *frame)
         aarch64_user_runtime_test_irq_sched_before(
             cur, frame, &switches_before, &elr_before);
 #endif
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+        aarch64_user_mig_note_irq_save(cur, frame);
+#endif
         cur->irq_return_migratable = true;
         schedule();
         cur->irq_return_migratable = false;
@@ -537,6 +560,9 @@ bool arch_context_reschedule_return(struct pt_regs *frame)
         return false;
     if (!aarch64_user_frame_is_valid(frame))
         return false;
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+    aarch64_user_mig_note_irq_resume(cur, frame);
+#endif
 
     return true;
 }
@@ -611,6 +637,11 @@ void aarch64_user_task_sync(pt_regs_t *regs, const struct intr_event *event)
          * same PC is retried; every other fault keeps the old
          * termination path.  Policy exhaustion reports -ENOMEM. */
         int frc = aarch64_user_vm_fault(regs, event);
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+        aarch64_user_mig_note_sync_fault(
+            arch_current_task(), regs, esr,
+            event->fault_addr_valid ? event->fault_addr : 0, frc);
+#endif
 #if AARCH64_EL0_TEST
         aarch64_user_vm_test_fault(
             esr, event->fault_addr_valid ? event->fault_addr : 0,
@@ -641,6 +672,10 @@ void aarch64_user_task_sync(pt_regs_t *regs, const struct intr_event *event)
         /* Native syscall: `svc #0` with the number in the full x8.
          * The shared table owns the ABI; this entry only marshals the
          * frame and never moves the saved return PC. */
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+        if (regs->x8 == SYS_getpid || regs->x8 == SYS_exit)
+            aarch64_user_mig_note_el0_svc(arch_current_task(), regs);
+#endif
         aarch64_user_syscall(regs);
         return;
     case AARCH64_USER_SVC_YIELD:
@@ -728,11 +763,16 @@ static void aarch64_user_task_exec(pt_regs_t *regs)
      * exception frame follow.  An IRQ can never observe a state in
      * which the hardware root and the task metadata disagree. */
     struct aarch64_user_image *old_image = owner->image;
-#if AARCH64_EL0_TEST
     uint64_t old_root_pa = aarch64_user_image_root_pa(old_image);
-#endif
 
     aarch64_user_install_mm(aarch64_user_image_mm(image));
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+    aarch64_user_mig_note_exec_commit(
+        t, old_root_pa, aarch64_user_image_root_pa(image),
+        t->allowed_cpus, t->allowed_cpus);
+#else
+    (void)old_root_pa;
+#endif
 
     owner->image = image;
     owner->catalog_index = index;
@@ -866,11 +906,16 @@ int64_t arch_syscall_exec(void *arch_frame, const char *path,
     }
 
     struct aarch64_user_image *old_image = owner->image;
-#if AARCH64_EL0_TEST
     uint64_t old_root_pa = aarch64_user_image_root_pa(old_image);
-#endif
 
     aarch64_user_install_mm(aarch64_user_image_mm(image));
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+    aarch64_user_mig_note_exec_commit(
+        t, old_root_pa, aarch64_user_image_root_pa(image),
+        t->allowed_cpus, t->allowed_cpus);
+#else
+    (void)old_root_pa;
+#endif
 
     owner->image = image;
     owner->catalog_index = index;

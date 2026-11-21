@@ -51,7 +51,6 @@ aarch64 已有 EL0 用户态，但 ASLR 本项先不扩大到 aarch64。
 
 | 任务 | 内容与完成条件 | 前置 |
 |------|----------------|------|
-| 运行期跨核任务迁移 | 解除当前任务终身固定单核亲和限制，补全跨核负载均衡与 `TTBR0`/ASID/per-task VM 状态同步 | 固定单核亲和 SMP 用户调度 ✅（2026-11-20） |
 | EL0 FP/SIMD 上下文（剩余项） | **已落地部分**：CPACR_EL1.FPEN 放行 EL0/EL1（`kernel/arch/aarch64/cpu/user_task.c:290-298`、AP 侧 `kernel/arch/aarch64/cpu/ap_sched.c:192-196`）、per-task FP 保存区与 `switch_to()` 保存恢复（`kernel/arch/aarch64/cpu/fp_state.S`、`kernel/arch/aarch64/cpu/task_arch.c:388-390`）、userland 不再 `-mgeneral-regs-only`（`734f67bc`）。**剩余**：① EL0 任务 PSTATE 的 F 位仍掩码（`AARCH64_USER_TASK_PSTATE = 0x340`，bit4=0，`kernel/include/arch/aarch64/user_image.h:60`），且无 EC 0x2C/0x2D 陷入处理路径 → EL0 浮点指令仍会陷入；② signal 帧无 FP 区（`struct aarch64_sigframe` 仅 280 B 通用寄存器 + blocked 掩码，`kernel/include/arch/aarch64/syscall.h:28-34`）；③ `user/test_fp.c` 未接入构建与测试目录，无运行时证据 | SMP 用户调度 ✅ |
 | 跨进程 inode 级 `MAP_SHARED` | 引入 shmem/页缓存注册表，使非 fork 后代的独立进程间共享文件/匿名映射可见一致（目前共享仅靠 fork 的 COW 引用计数，`kernel/arch/aarch64/memory/user_vm_policy.c:338-366,715-722`） | 文件映射与 `MAP_SHARED` v1 ✅（2026-11-19） |
 
@@ -78,7 +77,7 @@ aarch64 已有 EL0 用户态，但 ASLR 本项先不扩大到 aarch64。
 | CPU 特性探测 | `arch_cpu_features()` 返回统一位图（has_fpu / has_virt / has_cache_coherency）；x86 CPUID 与 aarch64 ID_AA64* 各实现一份（仓库内目前无此接口；`kernel/include/arch/cpuid.h` 只是 CPUID 指令门面，`kernel/include/arch/features.h` 是编译期子系统开关，二者都不产出特性位图） | 独立 | Linux cpufeature |
 | GICv2 Phase 2 | SError/真机覆盖率（**SError 三个向量槽目前是自跳，无保存/诊断/恢复路径**——`kernel/arch/aarch64/intr/entry.S:61,89,105` 均为 `b .`）；handler 表扩容（生产路径只注册 SGI 3/4、CNTP PPI 与 PL011 console RX SPI（`kernel/arch/aarch64/platform/console.c:57-60`），SGI 0~2 仅自测用，SGI 5-15 与 PPI 16-29、31 未注册） | GICv2 Phase 1 ✅；`dtb_gicd_base` 解耦 ✅（2026-11-18） | |
 
-**距离「用户态就绪的统一内核」还差多远（粗估，一个人全职）**：剩余差距集中在运行期跨核任务迁移、EL0 FP/SIMD 剩余项与跨进程 inode 级 `MAP_SHARED`。详见 `docs/arch.md` §aarch64 用户态现状与末段、统一 kernel_main spec/plan。
+**距离「用户态就绪的统一内核」还差多远（粗估，一个人全职）**：剩余差距集中在 EL0 FP/SIMD 剩余项与跨进程 inode 级 `MAP_SHARED`。详见 `docs/arch.md` §aarch64 用户态现状与末段、统一 kernel_main spec/plan。
 
 **永远无法统一的（ISA/HW 差异）**：`head.S`/`entry.S` 指令集差异；MMU 页表格式（PTE bit-position）；
 中断控制器驱动；SoC 外设（UART/timer/GPIO 等）。靠 arch 抽象层封装，统一接口、不统一实现。
@@ -220,6 +219,7 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 | **libc 统一 libk.a 内核子集与审计基线**（x86_64 / aarch64 同一份 32 对象 / 77 符号，审计基线架构中立） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [libc.md](libc/libc.md) |
 | **libc aarch64 / x86_64 齐平**（`libc_arch` facade + per-arch override；setjmp 汇编 override、floatscan/strtod/vsscanf 经 float_abi 移植） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [libc.md](libc/libc.md) |
 | **ELF 分段 NX 细化**（W^X 叶策略：`.data`/`.bss` RW+NX、`.rodata` RO+NX、仅 `.text` 可执行） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [cow-mmap.md](memory/cow-mmap.md#elf-分段叶子-nx-细化2026-11-20) |
+| **aarch64 运行期跨核任务迁移**（多核 `allowed_cpus`、`pull_aarch64_user_task` 拉取式负载均衡、8-tick 空闲平衡、`aarch64_vm_edit_begin` 静默校验、`USER_RUNTIME_CASE=migration`） | 2026-11-21 | [arch.md](arch.md#aarch64-用户态现状m42026-11-11--2026-11-18-闭环) · [scheduler.md](sched/scheduler.md) · [plan](superpowers/plans/2026-11-21-aarch64-runtime-task-migration.md) |
 | **aarch64 正式 EL0 IRQ 抢占、8-bit ASID 与 SMP 用户调度**（固定每任务单核亲和、`user-runtime` irq/asid/smp/product 1/2/4/8 核） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [arch.md](arch.md#aarch64-用户态现状m42026-11-11--2026-11-18-闭环) · [plan](superpowers/plans/2026-11-20-intr-dispatch-remaining.md) |
 | **aarch64 硬件 FP/SIMD 放行**（CPACR_EL1.FPEN + per-task 保存恢复；剩余 PSTATE F 位与 signal 帧 FP 区见 roadmap P2） | 2026-11-20 | [changelog](changelog.md#2026-11-20) |
 | **损伤区域与批量 present**（`GFX_PRESENT_RECTS` + terminal / LVGL 双消费端） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [gui.md](gui/gui.md) · [spec](superpowers/specs/2026-11-19-gfx-damage-batch-present-design.md) |

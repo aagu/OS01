@@ -63,15 +63,26 @@ SMP_SAMPLES_RE = re.compile(
     r"cow_last_free=(\d+) waitpid_blocked=(\d+) waitpid_exit=(\d+) "
     r"leaked_roots=(\d+) leaked_pages=(\d+)\b"
 )
+SMP_EXPLICIT_PIN_RE = re.compile(
+    r"\[user-runtime\] explicit_pin pid=(\d+) cpu=(\d+) mask=(\d+)\b"
+)
+MIGRATION_EVENT_RE = re.compile(
+    r"\[user-runtime\] migration-event seq=(\d+) kind=([a-z0-9_]+)(.*)"
+)
 PASS_SUMMARY_RE = {
     "irq": re.compile(r"\[user-runtime\] PASS case=irq cpu_mask=1\b"),
     "asid": re.compile(r"\[user-runtime\] PASS case=asid cpu_mask=1\b"),
     "smp": re.compile(r"\[user-runtime\] PASS case=smp cpu_mask=3\b"),
+    "migration": re.compile(r"\[user-runtime\] PASS case=migration cpu_mask=3\b"),
 }
 SELFTEST_DONE_RE = re.compile(r"^\[selftest\] done \(failed=(\d+)\)$")
 
 REQUIRED_SYMBOLS = ("test_aarch64_user_runtime_run",)
-FORBIDDEN_PRODUCT_PREFIXES = ("aarch64_user_runtime_test_", "test_aarch64_user_runtime_")
+FORBIDDEN_PRODUCT_PREFIXES = (
+    "aarch64_user_runtime_test_",
+    "test_aarch64_user_runtime_",
+    "test_aarch64_user_migration_",
+)
 
 
 def _sha256(path):
@@ -115,6 +126,252 @@ def audit_elf(elf_path, llvm_nm, case="irq"):
         for sym in REQUIRED_SYMBOLS:
             if sym not in syms:
                 errors.append(f"missing required symbol {sym} in {path}")
+    return errors
+
+
+def _parse_kv(rest):
+    out = {}
+    for tok in rest.strip().split():
+        if "=" in tok:
+            k, v = tok.split("=", 1)
+            out[k] = v
+    return out
+
+
+def _as_int(val, default=None):
+    if val is None:
+        return default
+    try:
+        return int(val, 0)
+    except ValueError:
+        return default
+
+
+def _validate_migration_events(lines):
+    errors = []
+    events = []
+    pass_line_idx = None
+    final_line_idx = None
+
+    for idx, line in enumerate(lines):
+        if PASS_SUMMARY_RE["migration"].search(line):
+            pass_line_idx = idx
+        m = MIGRATION_EVENT_RE.search(line)
+        if not m:
+            continue
+        seq = int(m.group(1))
+        kind = m.group(2)
+        kv = _parse_kv(m.group(3))
+        events.append((idx, seq, kind, kv))
+        if kind == "final":
+            final_line_idx = idx
+
+    if not events:
+        return ["missing [user-runtime] migration-event records"]
+
+    for expected_seq, (_idx, seq, _kind, _kv) in enumerate(events, start=1):
+        if seq != expected_seq:
+            errors.append(f"migration-event seq mismatch: expected {expected_seq}, got {seq}")
+            break
+
+    if pass_line_idx is not None and final_line_idx is not None and pass_line_idx < final_line_idx:
+        errors.append("PASS summary appeared before final baseline check")
+
+    by_kind = {}
+    for pos, (_idx, seq, kind, kv) in enumerate(events):
+        by_kind.setdefault(kind, []).append((pos, seq, kv))
+
+    for req_one in ("baseline", "final", "spawn", "parent_check", "cow_check",
+                    "old_load", "remap", "new_load", "permission_abort",
+                    "idle_zero", "wfi_enter", "idle_take",
+                    "copy_ok", "copy_denied", "exec_commit", "exec_el0"):
+        cnt = len(by_kind.get(req_one, []))
+        if cnt != 1:
+            errors.append(f"expected exactly 1 {req_one} event, got {cnt}")
+
+    if by_kind.get("full_flush"):
+        errors.append(f"unexpected full_flush in migration window ({len(by_kind['full_flush'])})")
+
+    if errors:
+        return errors
+
+    base = by_kind["baseline"][0][2]
+    fin = by_kind["final"][0][2]
+    for f in ("roots", "pages", "asids"):
+        if _as_int(base.get(f)) != _as_int(fin.get(f)):
+            errors.append(f"baseline/final mismatch on {f}: {base.get(f)} vs {fin.get(f)}")
+
+    sp = by_kind["spawn"][0][2]
+    forks = by_kind.get("fork", [])
+    if len(forks) != 2:
+        errors.append(f"expected 2 fork events, got {len(forks)}")
+        return errors
+
+    sp_pid = _as_int(sp.get("pid"))
+    f0 = forks[0][2]
+    f1 = forks[1][2]
+    main_pid = _as_int(f0.get("pid"))
+    child2_pid = _as_int(f1.get("pid"))
+    if len({sp_pid, main_pid, child2_pid}) != 3:
+        errors.append("spawn and fork PIDs must be distinct")
+    if (_as_int(sp.get("cpu")), _as_int(sp.get("mask"))) != (1, 3):
+        errors.append(f"unexpected spawn placement: {sp}")
+    if (_as_int(f0.get("cpu")), _as_int(f0.get("mask"))) != (0, 3):
+        errors.append(f"unexpected fork[0] placement: {f0}")
+    if (_as_int(f1.get("cpu")), _as_int(f1.get("mask"))) != (1, 3):
+        errors.append(f"unexpected fork[1] placement: {f1}")
+
+    move_order = [
+        "irq_save", "hw_detach", "root_unpublish", "tail",
+        "commit", "pick", "hw_install", "irq_resume", "el0_after",
+    ]
+    move_expect = {
+        1: (main_pid, 0, 1),
+        2: (main_pid, 1, 0),
+        3: (child2_pid, 1, 0),
+    }
+    move_pos = {}
+    for mid, (exp_pid, exp_src, exp_dst) in move_expect.items():
+        positions = []
+        root0 = None
+        asid0 = None
+        for ev_name in move_order:
+            matches = [
+                (pos, kv) for pos, _s, k, kv in
+                [(p, s, kind, d) for p, s, kind, d in
+                 [(i, s, k, d) for i, (_x, s, k, d) in enumerate(events)]]
+                if k == ev_name and _as_int(kv.get("move_id")) == mid
+            ]
+            if len(matches) != 1:
+                errors.append(f"move {mid} expected 1 {ev_name}, got {len(matches)}")
+                return errors
+            pos, kv = matches[0]
+            if _as_int(kv.get("pid")) != exp_pid:
+                errors.append(f"move {mid} {ev_name} wrong pid: {kv.get('pid')}")
+            asid_val = _as_int(kv.get("asid"), 0)
+            root_val = kv.get("root")
+            if asid_val <= 0:
+                errors.append(f"move {mid} {ev_name} requires nonzero asid, got {asid_val}")
+            if root0 is None:
+                root0, asid0 = root_val, asid_val
+            elif root_val != root0 or asid_val != asid0:
+                errors.append(f"move {mid} {ev_name} root/asid changed")
+            if ev_name == "tail" and _as_int(kv.get("on_cpu")) != 0:
+                errors.append(f"move {mid} tail must have on_cpu=0")
+            if ev_name == "pick" and _as_int(kv.get("on_cpu")) != 1:
+                errors.append(f"move {mid} pick must have on_cpu=1")
+            if ev_name == "commit":
+                if (_as_int(kv.get("src")), _as_int(kv.get("dst"))) != (exp_src, exp_dst):
+                    errors.append(f"move {mid} wrong direction src={kv.get('src')} dst={kv.get('dst')}")
+            if ev_name == "irq_resume" and _as_int(kv.get("match")) != 1:
+                errors.append(f"move {mid} irq_resume frame/TLS match != 1")
+            positions.append(pos)
+        if positions != sorted(positions):
+            errors.append(f"move {mid} events out of order: {positions}")
+        move_pos[mid] = dict(zip(move_order, positions))
+
+    # Move 1 idle window checks
+    iz_pos, _, iz = by_kind["idle_zero"][0]
+    wfi_pos, _, wfi = by_kind["wfi_enter"][0]
+    take_pos, _, take = by_kind["idle_take"][0]
+    ticks = by_kind.get("idle_tick", [])
+    checks = by_kind.get("idle_check", [])
+    if len(ticks) != 8 or len(checks) != 7:
+        errors.append(f"expected 8 idle_tick and 7 idle_check, got {len(ticks)}/{len(checks)}")
+    if not (move_pos[1]["tail"] < iz_pos < wfi_pos < ticks[0][0]):
+        errors.append("idle_zero/wfi_enter must sit between move 1 tail and first idle_tick")
+    if not (ticks[-1][0] < take_pos < move_pos[1]["commit"] < move_pos[1]["pick"]):
+        errors.append("idle_take must sit after idle_tick 8 and before move 1 commit/pick")
+    if (_as_int(iz.get("cpu")), _as_int(iz.get("rq_nr")),
+        _as_int(iz.get("pending")), _as_int(iz.get("cadence"))) != (1, 0, 0, 0):
+        errors.append(f"unexpected idle_zero fields: {iz}")
+    for i, (_p, _s, tk) in enumerate(ticks, start=1):
+        if (_as_int(tk.get("cpu")), _as_int(tk.get("intid")), _as_int(tk.get("idx"))) != (1, 30, i):
+            errors.append(f"unexpected idle_tick {i}: {tk}")
+    for i, (_p, _s, ck) in enumerate(checks, start=1):
+        if (_as_int(ck.get("cpu")), _as_int(ck.get("idx")), _as_int(ck.get("wfi"))) != (1, i, 1):
+            errors.append(f"unexpected idle_check {i}: {ck}")
+        for zero_k in ("sgi", "other_irq", "ap_work", "direct_sched"):
+            if _as_int(ck.get(zero_k), -1) != 0:
+                errors.append(f"nonzero {zero_k} in idle_check {i}")
+    for zero_k in ("sgi", "other_irq", "ap_work", "direct_sched"):
+        if _as_int(take.get(zero_k), -1) != 0:
+            errors.append(f"nonzero {zero_k} in idle_take")
+
+    # Move 2 & 3 bsp_tick_schedule
+    bsp_scheds = by_kind.get("bsp_tick_schedule", [])
+    for mid in (2, 3):
+        m_bsp = [(p, d) for p, _s, d in bsp_scheds if _as_int(d.get("move_id")) == mid]
+        if len(m_bsp) != 1:
+            errors.append(f"expected 1 bsp_tick_schedule for move {mid}, got {len(m_bsp)}")
+        else:
+            bp, bd = m_bsp[0]
+            if not (move_pos[mid]["tail"] < bp < move_pos[mid]["commit"]):
+                errors.append(f"move {mid} bsp_tick_schedule out of order")
+            if _as_int(bd.get("bsp_req"), 0) < 1 or any(
+                _as_int(bd.get(k), -1) != 0 for k in ("sgi", "ap_work", "direct_sched")
+            ):
+                errors.append(f"invalid bsp_tick_schedule fields for move {mid}: {bd}")
+
+    # VM/TLBI checks
+    old_p, _, old_ev = by_kind["old_load"][0]
+    rem_p, _, rem_ev = by_kind["remap"][0]
+    new_p, _, new_ev = by_kind["new_load"][0]
+    abt_p, _, abt_ev = by_kind["permission_abort"][0]
+    if not (old_p < move_pos[1]["irq_save"] and move_pos[1]["el0_after"] < rem_p < move_pos[2]["irq_save"] < move_pos[2]["el0_after"] < new_p < abt_p):
+        errors.append("old_load/remap/new_load/permission_abort ordering invalid")
+    if old_ev.get("pa") == new_ev.get("pa"):
+        errors.append("old_load and new_load PA must differ")
+    if old_ev.get("data") == new_ev.get("data"):
+        errors.append("old_load and new_load data must differ")
+    if _as_int(old_ev.get("asid"), 0) <= 0 or old_ev.get("asid") != new_ev.get("asid"):
+        errors.append("main child ASID must stay nonzero and constant")
+    if (_as_int(abt_ev.get("ec")), _as_int(abt_ev.get("fsc")),
+        _as_int(abt_ev.get("far")), _as_int(abt_ev.get("wnr"))) != (0x24, 0x0f, 0x40000000, 1):
+        errors.append(f"unexpected permission_abort ESR/FAR fields: {abt_ev}")
+
+    # Edit tx ordering
+    expected_ops = {1: ("munmap", "edit_leaf"), 2: ("mmap", "edit_vma"),
+                    3: ("fault", "edit_leaf"), 4: ("mprotect", "edit_leaf")}
+    for tx_id, (op_name, leaf_kind) in expected_ops.items():
+        eb = [(p, d) for p, _s, d in by_kind.get("edit_begin", []) if _as_int(d.get("tx")) == tx_id]
+        td = [(p, d) for p, _s, d in by_kind.get("tlbi_done", []) if _as_int(d.get("tx")) == tx_id]
+        el = [(p, d) for p, _s, d in by_kind.get(leaf_kind, []) if _as_int(d.get("tx")) == tx_id]
+        if len(eb) != 1 or len(td) != 1 or len(el) != 1:
+            errors.append(f"tx {tx_id} ({op_name}) missing begin/tlbi_done/{leaf_kind}")
+        elif not (eb[0][0] < td[0][0] < el[0][0]):
+            errors.append(f"tx {tx_id} ({op_name}) out of order")
+        elif op_name == "mmap" and _as_int(el[0][1].get("leaf_absent")) != 1:
+            errors.append("mmap edit_vma must have leaf_absent=1")
+
+    for _p, _s, ttag in by_kind.get("tlbi_tag", []):
+        if _as_int(ttag.get("tx")) not in expected_ops:
+            errors.append(f"unexpected unrelated same-tag TLBI: {ttag}")
+
+    # Copy, exec, wait_status
+    cok_p, _, cok = by_kind["copy_ok"][0]
+    cden_p, _, cden = by_kind["copy_denied"][0]
+    ec_p, _, ec = by_kind["exec_commit"][0]
+    ee_p, _, ee = by_kind["exec_el0"][0]
+    if not (move_pos[3]["el0_after"] < cok_p < cden_p < ec_p < ee_p):
+        errors.append("copy/exec ordering invalid")
+    if _as_int(cok.get("ret"), 0) <= 0 or _as_int(cden.get("ret"), 0) != -14:
+        errors.append(f"unexpected copy return values: ok={cok.get('ret')} denied={cden.get('ret')}")
+    if ec.get("old_root") == ec.get("new_root") or _as_int(ec.get("old_mask")) != 3 or _as_int(ec.get("new_mask")) != 3:
+        errors.append(f"invalid exec_commit: {ec}")
+    if ee.get("root") != ec.get("new_root") or _as_int(ee.get("mask")) != 3:
+        errors.append(f"invalid exec_el0: {ee}")
+
+    waits = by_kind.get("wait_status", [])
+    if len(waits) != 2:
+        errors.append(f"expected 2 wait_status events, got {len(waits)}")
+    else:
+        wmap = {_as_int(d.get("child_pid")): (_as_int(d.get("returned_pid")), _as_int(d.get("status"))) for _p, _s, d in waits}
+        if wmap.get(main_pid) != (main_pid, -14):
+            errors.append(f"unexpected main child wait_status: {wmap.get(main_pid)}")
+        if wmap.get(child2_pid) != (child2_pid, 42 << 8):
+            errors.append(f"unexpected second child wait_status: {wmap.get(child2_pid)}")
+
     return errors
 
 
@@ -188,6 +445,17 @@ def parse_user_runtime_evidence(text, case="irq"):
             if reused < 1:
                 errors.append(f"ASID reuse not observed: reused={reused}")
     elif case == "smp":
+        pin_matches = []
+        for line in lines:
+            pm = SMP_EXPLICIT_PIN_RE.search(line)
+            if pm:
+                pin_matches.append(tuple(int(g) for g in pm.groups()))
+        if len(pin_matches) != 2:
+            errors.append(f"expected 2 explicit_pin records, got {len(pin_matches)}")
+        else:
+            seen_pins = {(cpu, mask) for _pid, cpu, mask in pin_matches}
+            if seen_pins != {(0, 1), (1, 2)}:
+                errors.append(f"unexpected explicit_pin cpu/mask pairs: {pin_matches}")
         if len(smp_matches) == 0:
             errors.append("missing [user-runtime] smp-samples line")
         elif len(smp_matches) > 1:
@@ -213,6 +481,8 @@ def parse_user_runtime_evidence(text, case="irq"):
                 errors.append(
                     f"reclaim leak: leaked_roots={leaked_roots} leaked_pages={leaked_pages}"
                 )
+    elif case == "migration":
+        errors.extend(_validate_migration_events(lines))
 
     if len(pass_matches) == 0:
         errors.append(f"missing [user-runtime] PASS case={case} summary")
@@ -410,7 +680,7 @@ def _run_product_cpu(args, cpus, archive, run_dir, budget, drain, dtb_factory):
 
 def run_boot(args, deadline_s=None, dtb_factory=None):
     started = time.monotonic()
-    cpus = 2 if args.case == "smp" else 1
+    cpus = 2 if args.case in ("smp", "migration") else 1
     variant = "product" if args.case == "product" else f"user-runtime-{args.case}"
     archive = None
     if args.build_dir and RunArchive is not None:
@@ -556,7 +826,7 @@ def run_boot(args, deadline_s=None, dtb_factory=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", default="irq", choices=("irq", "asid", "smp", "product"))
+    parser.add_argument("--case", default="irq", choices=("irq", "asid", "smp", "migration", "product"))
     parser.add_argument("--image", required=True)
     parser.add_argument("--firmware", required=True)
     parser.add_argument("--elf", required=True)

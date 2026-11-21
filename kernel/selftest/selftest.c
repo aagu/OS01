@@ -228,6 +228,8 @@ void selftest_register_builtin_tests(void)
     selftest_register_late("aarch64_user_runtime_smp");
 #elif defined(AARCH64_USER_RUNTIME_CASE_ASID)
     selftest_register_late("aarch64_user_runtime_asid");
+#elif defined(AARCH64_USER_RUNTIME_CASE_MIGRATION)
+    selftest_register_late("aarch64_user_runtime_migration");
 #else
     selftest_register_late("aarch64_user_runtime_irq");
 #endif

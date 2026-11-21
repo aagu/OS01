@@ -25,6 +25,9 @@
 #include <arch/aarch64/user_mm.h>
 #include <arch/aarch64/user_vm.h>
 #include <arch/aarch64/vmm_gate.h>
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+#include <selftest/aarch64_user_runtime.h>
+#endif
 #include <arch/aarch64/page_table.h>
 #include <arch/mmu.h>
 #include <arch/irq.h>
@@ -229,11 +232,19 @@ static ssize_t copy_user_common(uint64_t user_addr, const void *kern, size_t n,
     arch_local_irq_restore(state);
 
     if (rc < 0)
-        return user_copy_fault(on_fault, arg);
+        goto fault;
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+    if (!write && (user_addr == 0x40002040ULL || user_addr == 0x40003000ULL))
+        aarch64_user_mig_note_copy(arch_current_task(), (int64_t)n);
+#endif
     return (ssize_t)n;
 
 fault:
     arch_local_irq_restore(state);
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+    if (!write && (user_addr == 0x40002040ULL || user_addr == 0x40003000ULL))
+        aarch64_user_mig_note_copy(arch_current_task(), -EFAULT);
+#endif
     return user_copy_fault(on_fault, arg);
 }
 

@@ -29,6 +29,23 @@
 #ifdef AARCH64_USER_RUNTIME_TEST
 #include <selftest/aarch64_user_runtime.h>
 #endif
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+#include <arch/mmu.h>
+#include <arch/aarch64/vmm_backend.h>
+#include <memory/memory.h>
+static uint64_t user_vm_mig_query_pte(mm_t *mm, uint64_t va, bool *absent_out)
+{
+    uint64_t pa = 0;
+    uint32_t vm_flags = 0;
+    int qrc = (mm && mm->pgdir)
+        ? arch_vmm_query_4k((uint64_t *)Phy_To_Virt((uint64_t)(uintptr_t)mm->pgdir),
+                            va, &pa, &vm_flags)
+        : -ENOENT;
+    if (absent_out)
+        *absent_out = (qrc != 0);
+    return (qrc == 0) ? (pa | ((uint64_t)vm_flags & 0xfffULL) | 1ULL) : 0ULL;
+}
+#endif
 
 /* ══════════════════════════════════════════════════════════════
  * Transaction layer (M4 Task 3, per-task & per-CPU state)
@@ -200,6 +217,10 @@ int64_t arch_syscall_user_vm(uint64_t nr, const uint64_t args[6])
 #ifdef AARCH64_USER_RUNTIME_TEST
     aarch64_user_runtime_test_vm_edit_pause(mm);
 #endif
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+    bool old_absent = false;
+    uint64_t old_pte = user_vm_mig_query_pte(mm, args[0], &old_absent);
+#endif
 
     int64_t ret;
     switch (nr) {
@@ -220,6 +241,12 @@ int64_t arch_syscall_user_vm(uint64_t nr, const uint64_t args[6])
         break;
     }
 
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+    bool new_absent = false;
+    uint64_t new_pte = user_vm_mig_query_pte(mm, args[0], &new_absent);
+    aarch64_user_mig_note_vm_edit(aarch64_user_current_task(), nr, args[0],
+                                  false, old_pte, new_pte, new_absent);
+#endif
     aarch64_vm_edit_end();
 #ifdef AARCH64_USER_RUNTIME_TEST
     aarch64_user_runtime_test_vm_edit_after(mm);
@@ -272,8 +299,20 @@ int aarch64_user_vm_fault(pt_regs_t *regs, const struct intr_event *event)
 
     int rc = aarch64_vm_edit_begin(mm);
     if (rc == 0) {
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+        bool old_absent = false;
+        uint64_t old_pte = user_vm_mig_query_pte(mm, event->fault_addr, &old_absent);
+#endif
         rc = cow ? user_vm_cow_fault(mm, event->fault_addr)
                  : user_vm_fault(mm, event->fault_addr, write);
+#ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
+        bool new_absent = false;
+        uint64_t new_pte = user_vm_mig_query_pte(mm, event->fault_addr, &new_absent);
+        if (rc == 0) {
+            aarch64_user_mig_note_vm_edit(tsk, 0, event->fault_addr, true,
+                                          old_pte, new_pte, new_absent);
+        }
+#endif
         aarch64_vm_edit_end();
     }
 
