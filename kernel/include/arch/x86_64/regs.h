@@ -141,13 +141,18 @@ typedef struct pt_regs
 // ── CPUID Feature Bits (Leaf 1) ─────────────────────────
 
 // EDX bits
+#define CPUID_FEAT_EDX_FPU     (1U << 0)   // x87 FPU on-chip
 #define CPUID_FEAT_EDX_APIC    (1 << 9)    // APIC supported on chip
 
 // ECX bits
+#define CPUID_FEAT_ECX_VMX     (1U << 5)   // Virtual Machine Extensions
 #define CPUID_FEAT_ECX_X2APIC  (1 << 21)   // x2APIC supported
 #define CPUID_FEAT_ECX_RDRAND  (1 << 30)   // RDRAND instruction (leaf 1 ECX)
 
 // EBX bits (leaf 7, subleaf 0)
 #define CPUID_FEAT_EBX_RDSEED  (1 << 18)   // RDSEED instruction (leaf 7 EBX)
+
+// Extended leaf 0x80000001 ECX bits
+#define CPUID_EXT_FEAT_ECX_SVM (1U << 2)   // AMD Secure Virtual Machine (SVM)
 
 #endif /* _KERNEL_ARCH_REGS_H */

@@ -2158,6 +2158,19 @@
       "source": "qemutests/test_context_facade.py"
     },
     {
+      "id": "test_cpu_features",
+      "layer": "host",
+      "subsystem": "boot",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [
+        "arch.cpu_features"
+      ],
+      "link": "cpu-features",
+      "source": "hosttests/cases/test_cpu_features.c"
+    },
+    {
       "kind": "host_test",
       "id": "test_desktop_audit",
       "layer": "host",

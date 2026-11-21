@@ -80,4 +80,14 @@ _Static_assert(sizeof(pt_regs_t) == 34 * 8,
 #define ID_AA64ISAR0_EL1_RNDR_MASK   (0xFUL << ID_AA64ISAR0_EL1_RNDR_SHIFT)
 #define ID_AA64ISAR0_EL1_RNDR_RNDRRS (1UL << ID_AA64ISAR0_EL1_RNDR_SHIFT)
 
+/* ID_AA64PFR0_EL1.EL2 (bits[11:8]) and .FP (bits[19:16]):
+ *   EL2 == 0b0000: EL2 not implemented; != 0: EL2 (virt) implemented
+ *   FP  == 0b1111: FP not implemented;  != 0xF: FP implemented
+ */
+#define ID_AA64PFR0_EL1_EL2_SHIFT    8
+#define ID_AA64PFR0_EL1_EL2_MASK     (0xFUL << ID_AA64PFR0_EL1_EL2_SHIFT)
+#define ID_AA64PFR0_EL1_FP_SHIFT     16
+#define ID_AA64PFR0_EL1_FP_MASK      (0xFUL << ID_AA64PFR0_EL1_FP_SHIFT)
+#define ID_AA64PFR0_EL1_FP_NONE      0xFUL
+
 #endif /* _KERNEL_ARCH_AARCH64_REGS_H */

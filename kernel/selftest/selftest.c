@@ -7,6 +7,7 @@
 #include <fs/vfs.h>
 #include <sched/task.h>
 #include <arch/spinlock.h>
+#include <arch/cpu_features.h>
 #include <fs/file.h>
 #include <string.h>
 #include <stdlib.h>
@@ -96,6 +97,36 @@ static int test_spinlock_basic(void)
     return 0;
 }
 
+#if !defined(__aarch64__)
+static int test_cpu_features(void)
+{
+    uint64_t f1 = arch_cpu_features();
+    uint64_t f2 = arch_cpu_features();
+    if (f1 != f2) {
+        serial_printk("[selftest] cpu_features: non-deterministic bitmap 0x%llx != 0x%llx\n",
+                      (unsigned long long)f1, (unsigned long long)f2);
+        return -1;
+    }
+    if (!arch_cpu_has_fpu()) {
+        serial_printk("[selftest] cpu_features: expected FPU on x86_64/aarch64 (0x%llx)\n",
+                      (unsigned long long)f1);
+        return -1;
+    }
+    if (!arch_cpu_has_cache_coherency()) {
+        serial_printk("[selftest] cpu_features: expected cache coherency (0x%llx)\n",
+                      (unsigned long long)f1);
+        return -1;
+    }
+    uint64_t known = ARCH_CPU_FEAT_FPU | ARCH_CPU_FEAT_VIRT | ARCH_CPU_FEAT_CACHE_COHERENCY;
+    if ((f1 & ~known) != 0) {
+        serial_printk("[selftest] cpu_features: unknown bits set (0x%llx)\n",
+                      (unsigned long long)f1);
+        return -1;
+    }
+    return 0;
+}
+#endif /* !__aarch64__ */
+
 /* NOTE: the former no-op pipe test (which returned 0 and so produced a
  * bogus PASS) is deliberately gone from both the body list and the
  * registration below.  Spec §5.2: an unimplemented test must be removed
@@ -180,6 +211,7 @@ void selftest_register_builtin_tests(void)
 #endif /* !__aarch64__ */
     selftest_register("spinlock_basic",    test_spinlock_basic);
 #if !defined(__aarch64__)
+    selftest_register("cpu_features",      test_cpu_features);
     /* Bodies in selftest/test_sync.c (not in the aarch64 whitelist). */
     selftest_register("rwlock_basic",      test_rwlock_basic);
     selftest_register("seqlock_basic",     test_seqlock_basic);

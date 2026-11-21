@@ -13,7 +13,7 @@
 |-------|------|---------|------|
 | **P0** | 工程与测试基础设施 | 0 | flake 账本入库已于 2026-11-21 闭环（见 [`changelog.md`](changelog.md)） |
 | **P1** | 安全加固 | 3 | ASLR-A / ASLR-B / UBSan+KASan |
-| **P2** | aarch64 适配 | 15 | 内存与执行体 1 · 能力齐平 7 · 架构统一 2 · 真机阻断 5 |
+| **P2** | aarch64 适配 | 14 | 内存与执行体 1 · 能力齐平 7 · 架构统一 1 · 真机阻断 5 |
 | **P2** | 架构治理 / 扩展性 | 0 | 新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填该节 |
 | **P3** | GUI | 7 | GUI-4/5/6 + 优化与验证 4 |
 | **P4** | 硬件适配 | 6 | USB 3 · NVMe · HPET · ACPI S3 |
@@ -73,7 +73,6 @@ aarch64 已有 EL0 用户态，但 ASLR 本项先不扩大到 aarch64。
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| CPU 特性探测 | `arch_cpu_features()` 返回统一位图（has_fpu / has_virt / has_cache_coherency）；x86 CPUID 与 aarch64 ID_AA64* 各实现一份（仓库内目前无此接口；`kernel/include/arch/cpuid.h` 只是 CPUID 指令门面，`kernel/include/arch/features.h` 是编译期子系统开关，二者都不产出特性位图） | 独立 | Linux cpufeature |
 | GICv2 Phase 2 | SError/真机覆盖率（**SError 三个向量槽目前是自跳，无保存/诊断/恢复路径**——`kernel/arch/aarch64/intr/entry.S:62`（SP_EL0）、`:90`（SP_ELx）、`:106`（EL0）均为 `b .`）；handler 表扩容（生产路径只注册 SGI 3/4、CNTP PPI 与 PL011 console RX SPI（`kernel/arch/aarch64/intr/gic.c:75`/`:83`、`kernel/arch/aarch64/platform/time.c:333`、`kernel/arch/aarch64/platform/console.c:59`），SGI 0~2 仅自测用，SGI 5-15 与 PPI 16-29、31 未注册） | GICv2 Phase 1 ✅；`dtb_gicd_base` 解耦 ✅（2026-11-18） | |
 
 **距离「用户态就绪的统一内核」还差多远（粗估，一个人全职）**：剩余差距集中在跨进程 inode 级 `MAP_SHARED` 与 x86_64 signal 帧 FPU 区（见 P5）；aarch64 的 EL0 FP/SIMD 已于 2026-11-21 闭环。详见 `docs/arch.md` §aarch64 用户态现状与末段、统一 kernel_main spec/plan。
@@ -211,6 +210,7 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 
 | 闭环项 | 日期 | 详情 |
 |--------|------|------|
+| **CPU 特性探测**（`arch/cpu_features.h`：`arch_cpu_features()` 返回统一位图 `ARCH_CPU_FEAT_{FPU,VIRT,CACHE_COHERENCY}`；x86 CPUID 与 aarch64 `ID_AA64PFR0_EL1` 双实现 + 宿主/内核自测） | 2026-11-21 | [changelog](changelog.md#2026-11-21) · [arch.md](arch.md#facade--override-矩阵) |
 | **libm 基础代数集落地**（`usr/lib/libm.a` 独立发布，导出 16 个符号：`fabs/fabsf`、`copysign/copysignf`、`floor/floorf`、`ceil/ceilf`、`trunc/truncf`、`round/roundf`、`fmod/fmodf`、`sqrt/sqrtf`；来源 musl 1.2.5 vendored，全部整数位运算实现、无浮点算术指令；三层验证 = 宿主对拍 glibc、guest 实跑 `64_libm`、已发布归档反汇编审计） | 2026-11-21 | [changelog](changelog.md#2026-11-21) · [spec](superpowers/specs/2026-11-21-libm-design.md) · [libc](libc/libc.md#4-libm-基础代数集) |
 | **aarch64 产品镜像迁 ext2 根文件系统**（产品变体从整盘 FAT32 superfloppy 迁到与 x86 相同的 mkdisk GPT 双分区布局：ESP→/boot、ext2→/ 承载产品用户态；/bin/sh 改真软链，同日跟进后 /bin 装全部解锁用户程序 29 项（x86 同款过滤器）；内核零改动，`fs_boot_mounts` GUID 路径直挂。整盘 FAT32 回退挂载在 aarch64 失去产品级覆盖，FAT32 读覆盖经 ESP→/boot 保留） | 2026-11-21 | [changelog](changelog.md#2026-11-21) · [plan](superpowers/plans/2026-11-21-aarch64-ext2-product-image.md) |
 | **flake 账本入库**（账本文件 `config/flake-ledger.json` 入库：`runs` 机器写 + `decisions` 人写；报告器支持 `--merge`/`--update-ledger`/`--emit-fragment`；CI 夜间首次调用报告器并发布 `flake-ledger` artifact；契约门禁防回退。推翻 D8「无写回」，保留「不加权限」「不动 job 骨架」） | 2026-11-21 | [changelog](changelog.md#2026-11-21) · [spec](superpowers/specs/2026-11-21-flake-ledger-design.md) · [plan](superpowers/plans/2026-11-21-flake-ledger.md) · [testing-policy](testing/testing-policy.md#86-flake-账本) |

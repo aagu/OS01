@@ -7,6 +7,12 @@
 
 ## 2026-11-21
 
+- feat(arch): **CPU 特性探测门面 `arch_cpu_features()` 落地**（闭合 `docs/roadmap.md` P2「架构统一推进链 — CPU 特性探测」）：
+  - **架构中立门面**（`kernel/include/arch/cpu_features.h`）：定义 `ARCH_CPU_FEAT_FPU`、`ARCH_CPU_FEAT_VIRT`、`ARCH_CPU_FEAT_CACHE_COHERENCY` 三位统一位图及 `arch_cpu_features()` / `arch_cpu_has_{fpu,virt,cache_coherency}()`。
+  - **x86_64 实现**（`kernel/arch/x86_64/cpu/features.c`、`kernel/include/arch/x86_64/cpu_features.h`、`kernel/include/arch/x86_64/regs.h`）：经 CPUID leaf 1 `EDX.FPU` / `ECX.VMX` 与扩展 leaf `0x80000001 ECX.SVM` 探测 FPU 与虚拟化能力，结合 x86 架构缓存一致性产出位图并原子缓存。
+  - **aarch64 实现**（`kernel/arch/aarch64/cpu/features.c`、`kernel/include/arch/aarch64/cpu_features.h`、`kernel/include/arch/aarch64/regs.h`）：读取 `ID_AA64PFR0_EL1` 的 `FP`（`!= 0xF`）与 `EL2`（`!= 0`）字段探测 FPU 与虚拟化能力，结合 ARMv8-A 架构缓存一致性产出位图并原子缓存。
+  - **测试**：新增宿主测试 `hosttests/cases/test_cpu_features.c`（覆盖位布局、x86/aarch64 纯解码器及实时 `arch_cpu_features()` 探测）与内核自测 `cpu_features`（`kernel/selftest/selftest.c`）。
+
 - feat(libc): **libm 基础代数集落地（闭合 roadmap P3「libc / 可选 LVGL 能力」② libm 归档）**——sysroot 里的空桩 `libm.a` 换成会算的真实归档，musl 1.2.5 vendored（spec `docs/superpowers/specs/2026-11-21-libm-design.md`、plan `docs/superpowers/plans/2026-11-21-libm.md`）：
 
   **做了什么**

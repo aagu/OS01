@@ -98,3 +98,23 @@ $(TEST_BLD)/test_mock_core.elf: $(TEST_BLD)/test_mock_core.o $(TEST_BLD)/libmock
 	$(HOST_CC) -o $@ $^
 
 # Fixture v2 (test_fixture_v2.o / .elf rules generated in mk/generated/test-link-rules.mk)
+
+# CPU features facade (x86_64 + aarch64 decoders)
+$(TEST_BLD)/x86_cpu_features_production.o: $(TESTS_DIR)/kernel/arch/x86_64/cpu/features.c \
+		$(TESTS_DIR)/kernel/include/arch/cpu_features.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/cpu_features.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h \
+		$(TESTS_DIR)/kernel/include/arch/cpuid.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/kernel/include -c $< -o $@
+
+$(TEST_BLD)/aarch64_cpu_features_production.o: $(TESTS_DIR)/kernel/arch/aarch64/cpu/features.c \
+		$(TESTS_DIR)/kernel/include/arch/cpu_features.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/cpu_features.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -DOS01_HOST_TEST -I$(TESTS_DIR)/kernel/include -c $< -o $@
+
+LINK_CFLAGS_cpu-features = -I$(TESTS_DIR)/kernel/include $(FRAMEWORK_INC)
+LINK_GROUP_cpu-features := $(TEST_BLD)/x86_cpu_features_production.o \
+                           $(TEST_BLD)/aarch64_cpu_features_production.o

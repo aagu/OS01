@@ -36,6 +36,12 @@ $(TEST_BLD)/test_boot_devpath.o: $(TEST_CASES)/test_boot_devpath.c
 $(TEST_BLD)/test_boot_devpath.elf: $(TEST_BLD)/test_boot_devpath.o $(LINK_GROUP_boot-devpath)
 	$(HOST_CC) $(LINK_LDFLAGS_boot-devpath) -o $@ $^
 
+$(TEST_BLD)/test_cpu_features.o: $(TEST_CASES)/test_cpu_features.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_cpu-features)),$(LINK_CFLAGS_cpu-features),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_cpu_features.elf: $(TEST_BLD)/test_cpu_features.o $(LINK_GROUP_cpu-features)
+	$(HOST_CC) $(LINK_LDFLAGS_cpu-features) -o $@ $^
+
 $(TEST_BLD)/test_ext2_bmap.o: $(TEST_CASES)/test_ext2_bmap.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_fs-prod)),$(LINK_CFLAGS_fs-prod),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
