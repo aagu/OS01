@@ -107,6 +107,7 @@ void test_libc_printf_getopt(void);
 void test_libc_scan(void);
 void test_libc_stdio(void);
 void test_libc_time(void);
+void test_libm(void);
 void test_linux_abi_compat(void);
 void test_lseek(void);
 void test_mkdir_rmdir(void);

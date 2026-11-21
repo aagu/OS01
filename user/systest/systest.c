@@ -346,6 +346,7 @@ static const test_case_t tests[] = {
     {"61_libc_time",      "libc time",          test_libc_time,              1, 0},
     {"62_libc_path_exec", "libc path exec",     test_libc_path_exec,         1, 0},
     {"63_libc_dir",       "libc dir",           test_libc_dir,               1, 0},
+    {"64_libm",           "libm",               test_libm,                   1, 0},
     {"65_libc_append",    "libc append",        test_libc_append,            1, 0},
     {"stdio_modes",       "stdio modes",       test_stdio_modes,            1, 0},
     {"busybox_lines",     "busybox line applets", test_busybox_lines,      1, 0},
