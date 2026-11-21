@@ -11,7 +11,8 @@ LIBC_HOST_ORACLES := \
     $(TEST_BLD)/strtox_oracle \
     $(TEST_BLD)/floatscan_oracle \
     $(TEST_BLD)/scanf_oracle \
-    $(TEST_BLD)/time_oracle
+    $(TEST_BLD)/time_oracle \
+    $(TEST_BLD)/libm_oracle
 # ── libc completion: libm (base-algebra math subset) ──────────────
 # The sixteen public symbols live in the standalone usr/lib/libm.a,
 # built from libc/math/*.c.  The host test links the SAME production
@@ -55,9 +56,33 @@ $(TEST_BLD)/libm_cxx_probe.o: $(TEST_MOCK)/libm_cxx_probe.cpp
 # The link group: every renamed production object plus the probe.  The
 # generated rule (mk/generated/test-link-rules.mk) links the test object
 # first and the group after it, so the group's symbols resolve.
-LINK_CFLAGS_libc-math = $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) $(OS01_LIBM_PREFIX_DEFS)
+LINK_CFLAGS_libc-math = $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) $(OS01_LIBM_PREFIX_DEFS) \
+    -D'LIBM_ORACLE_PATH="$(TEST_BLD)/libm_oracle"'
 
-LINK_GROUP_libc-math := $(OS01_LIBM_OBJS) $(TEST_BLD)/libm_cxx_probe.o
+# The host side of the oracle: the test translation unit sees the OS01
+# <sys/syscall.h>, where fork() is the raw syscall wrapper.  This mock
+# provides the host_test_syscall hook that wrapper routes through.  It is
+# compiled WITHOUT the OS01 include paths on purpose: it must call the
+# HOST's fork().
+$(TEST_BLD)/libm_oracle_runtime.o: $(TEST_MOCK)/libm_oracle_runtime.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TEST_MOCK) -I$(TEST_INC) -c $< -o $@
+
+LINK_GROUP_libc-math := $(OS01_LIBM_OBJS) $(TEST_BLD)/libm_cxx_probe.o \
+    $(TEST_BLD)/libm_oracle_runtime.o
+
+# The glibc reference: a standalone host program with no OS01 include
+# paths.  -lm comes AFTER the source file -- the link order decides
+# whether the reference resolves to the host libm or to nothing at all.
+$(TEST_BLD)/libm_oracle: $(TESTS_DIR)/hosttests/oracle/libm_oracle.c \
+        $(TESTS_DIR)/hosttests/data/libm_cases.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) -O0 -Wall -fno-builtin -o $@ $< -lm
+
+# The test binary needs the oracle at RUN time, not at link time; the
+# order-only prerequisite makes sure a clean tree builds it first.
+$(TEST_BLD)/test_libc_math.elf: | $(TEST_BLD)/libm_oracle
+
 
 
 
