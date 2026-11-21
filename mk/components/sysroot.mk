@@ -215,16 +215,22 @@ $(STAMPS_DIR)/mbedtls-install.stamp: $(STAMPS_DIR)/libc-install.stamp FORCE
 	fi
 
 # ── compat-libs staging (R8) ─────────────────────────────────────
-# libm.a / librt.a stubs for the BusyBox link — staged ONLY here and
-# assembled into the generation by the publisher; the BusyBox recipe no
-# longer creates them. The stub archive is built from an empty TU inside
-# $(BUILD_DIR) (no /tmp).
+# librt.a stub for the BusyBox link — staged ONLY here and assembled into
+# the generation by the publisher; the BusyBox recipe no longer creates
+# it. The stub archive is built from an empty TU inside $(BUILD_DIR)
+# (no /tmp).
+#
+# libm.a is NOT a compat stub any more: the real archive is staged by
+# the libc stage (usr/lib/libm.a, built from the vendored musl math
+# subset).  A leftover stub here would collide with it in the generation
+# assembler ("ERROR: duplicate destination in generation"), so the old
+# stub is removed BEFORE the manifest is written.
 $(STAMPS_DIR)/compat-libs-install.stamp: FORCE
 	@mkdir -p $(STAGING_DIR)/compat-libs/usr/lib
-	@if [ ! -f $(STAGING_DIR)/compat-libs/usr/lib/libm.a ]; then \
+	@rm -f $(STAGING_DIR)/compat-libs/usr/lib/libm.a
+	@if [ ! -f $(STAGING_DIR)/compat-libs/usr/lib/librt.a ]; then \
 	  printf '' > $(BUILD_DIR)/.compat-libs-stub.c; \
 	  $(TARGET_CC) -c -x c $(BUILD_DIR)/.compat-libs-stub.c -o $(BUILD_DIR)/.compat-libs-stub.o 2>/dev/null; \
-	  $(LLVM_AR) rcs $(STAGING_DIR)/compat-libs/usr/lib/libm.a $(BUILD_DIR)/.compat-libs-stub.o; \
 	  $(LLVM_AR) rcs $(STAGING_DIR)/compat-libs/usr/lib/librt.a $(BUILD_DIR)/.compat-libs-stub.o; \
 	  rm -f $(BUILD_DIR)/.compat-libs-stub.c $(BUILD_DIR)/.compat-libs-stub.o; \
 	fi

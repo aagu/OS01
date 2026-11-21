@@ -84,6 +84,16 @@ LIBC_C_SOURCES := \
 LIBK_C_SOURCES := $(filter-out stdlib/free.c, $(LIBK_C_SOURCES))
 LIBC_C_SOURCES := $(filter-out stdlib/free.c, $(LIBC_C_SOURCES))
 
+# ── libm (vendored musl math subset) ──────────────────────────
+# The 16 base-algebra symbols live in their OWN archive: the sysroot
+# publishes it as usr/lib/libm.a and the linker resolves -lm against it.
+# libm is NOT part of libk.a (the kernel stays FP-free) and the math
+# sources are NOT part of LIBC_C_SOURCES (that list builds libc.a).
+# The sources use integer bit manipulation only; the floating-point unit
+# is never asked to do arithmetic.
+LIBM_C_SOURCES := $(wildcard math/*.c)
+LIBM_OBJS := $(addprefix $(BUILD_DIR)/, $(LIBM_C_SOURCES:.c=.o))
+
 # Object files (inside BUILD_DIR)
 # string/memcmp.c → build/x86_64/libc/string/memcmp.o     (libc)
 #                  → build/x86_64/libc/string/memcmp.libk.o (libk)
@@ -103,6 +113,7 @@ LIBK_ALL_OBJS := $(LIBK_OBJS) $(LIBK_ARCH_OBJS)
 # libc/ source tree.
 LIBC_ARCHIVE := $(LIBC_BUILD_DIR)/lib/libc.a
 LIBK_ARCHIVE := $(LIBC_BUILD_DIR)/lib/libk.a
+LIBM_ARCHIVE := $(LIBC_BUILD_DIR)/lib/libm.a
 # aarch64 cross-compile (2026-11-18): libc.a is now built alongside libk.a
 # — the userland capability stages both into the aarch64 sysroot.  The
 # historical x86-only blocker (syscall.h inline asm) is resolved at the
@@ -114,7 +125,7 @@ TARGET_AR ?= $(AR)
 # ── Targets ────────────────────────────────────────────────
 .PHONY: all clean install install-headers install-libs
 
-all: $(LIBC_ARCHIVE) $(LIBK_ARCHIVE)
+all: $(LIBC_ARCHIVE) $(LIBK_ARCHIVE) $(LIBM_ARCHIVE)
 
 $(LIBC_ARCHIVE): $(LIBC_ALL_OBJS)
 	@mkdir -p $(dir $@)
@@ -122,6 +133,14 @@ $(LIBC_ARCHIVE): $(LIBC_ALL_OBJS)
 
 $(LIBK_ARCHIVE): $(LIBK_ALL_OBJS)
 	@mkdir -p $(dir $@)
+	$(TARGET_AR) rcs $@ $^
+
+# The archive is rebuilt from scratch: `ar rcs` only adds and replaces
+# members, so a source list that shrank would leave the removed members
+# behind in the published libm.a.
+$(LIBM_ARCHIVE): $(LIBM_OBJS)
+	@mkdir -p $(dir $@)
+	@rm -f $@
 	$(TARGET_AR) rcs $@ $^
 
 # ── Compile keys ───────────────────────────────────────────
@@ -186,11 +205,12 @@ install-headers:
 # explicitly, like glibc/musl ship crt1.o.
 CRT0_OBJECT := $(BUILD_DIR)/arch/$(HOSTARCH)/crt0.o
 
-install-libs: $(LIBC_ARCHIVE) $(LIBK_ARCHIVE) $(CRT0_OBJECT)
+install-libs: $(LIBC_ARCHIVE) $(LIBK_ARCHIVE) $(LIBM_ARCHIVE) $(CRT0_OBJECT)
 	@test -n "$(INSTALL_ROOT)" || { echo "ERROR: install (profile mode) requires INSTALL_ROOT (staging tree)"; exit 1; }
 	mkdir -p $(INSTALL_ROOT)/usr/lib
 	cp $(LIBC_ARCHIVE) $(INSTALL_ROOT)/usr/lib/libc.a
 	cp $(LIBK_ARCHIVE) $(INSTALL_ROOT)/usr/lib/libk.a
+	cp $(LIBM_ARCHIVE) $(INSTALL_ROOT)/usr/lib/libm.a
 	cp $(CRT0_OBJECT) $(INSTALL_ROOT)/usr/lib/crt0.o
 
 # ── Clean ──────────────────────────────────────────────────
@@ -198,5 +218,5 @@ clean:
 	rm -rf $(BUILD_DIR)
 
 # ── Dependency tracking ────────────────────────────────────
-ALL_DEPS := $(patsubst %.o,%.d,$(LIBC_ALL_OBJS)) $(patsubst %.o,%.d,$(LIBK_ALL_OBJS))
+ALL_DEPS := $(patsubst %.o,%.d,$(LIBC_ALL_OBJS)) $(patsubst %.o,%.d,$(LIBK_ALL_OBJS)) $(patsubst %.o,%.d,$(LIBM_OBJS))
 -include $(ALL_DEPS)

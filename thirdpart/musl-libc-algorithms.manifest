@@ -79,3 +79,95 @@
 # wcsto*-family callers (need real FILE pushback semantics) — OS01 has
 # no wchar layer.
 # musl's locale-dependent scanning — musl floatscan has none.
+
+# The base-algebra math set (libm) — 2026-11-21
+# ---------------------------------------------
+# Provenance: the same archive and SHA256 as the floatscan entry above.
+#   Archive : https://musl.libc.org/releases/musl-1.2.5.tar.gz
+#   SHA256  : a9a118bbe84d8764da0ea0d28b3ab3fae8477fc7e4085d90102b8596fc7c75e4
+#   License : standard MIT (see musl-libc-algorithms/COPYRIGHT).
+#
+# Vendored into libc/math/ and built into the standalone usr/lib/libm.a
+# (NOT part of libc.a, NOT part of libk.a — the kernel stays FP-free).
+#
+# Upstream file -> vendored file, with the upstream SHA256:
+#   src/math/fabs.c      -> libc/math/fabs.c
+#     99880a7802d67077fa54a2bbb5d3388cf42b00c96d3e2b1c16d63f2918157754
+#   src/math/fabsf.c     -> libc/math/fabsf.c
+#     8fea1977b6b8913e7db76d8576f95f30fceb35e47122af299fb49dd452cf74c8
+#   src/math/copysign.c  -> libc/math/copysign.c
+#     7a5ae1fbedc6da808c69b1769f21624c20709c93eaa846fdf89546ab6bccecae
+#   src/math/copysignf.c -> libc/math/copysignf.c
+#     71d74b1169dbea28d12adbd98a30975777b79d951f03b1111480911922fe37d0
+#   src/math/trunc.c     -> libc/math/trunc.c
+#     2f2941542db65a5c3a8a6fa952b978a5ff757f8b14ffdaef8ad28e0cafead644
+#   src/math/truncf.c    -> libc/math/truncf.c
+#     dd67c4d71894da6c93bc41ec6a141de45124d3d3f4d012bc95aac4fc792abccb
+#   src/math/floorf.c    -> libc/math/floorf.c
+#     55a62f12a4bcd151ca3a82e9ec98b1744c15017f1b6cdea56b33220ffdb166f3
+#   src/math/ceilf.c     -> libc/math/ceilf.c
+#     691d3a8e183ebe5f09a68120766877872e10f9267fe6e2bba0341b93d2863cc8
+#   src/math/fmod.c      -> libc/math/fmod.c
+#     33fb61093e04783081b9e8f8a8a303456b2f919c215cd0c378c1ed0acf41934c
+#   src/math/fmodf.c     -> libc/math/fmodf.c
+#     eecc1cf499f143181880a33a95f1614be323aca704815a7b57d4969a7cacc2d4
+#   src/math/sqrt.c      -> libc/math/sqrt.c
+#     688908f94c3edf7a439cb64094034a596a1fbff08445b9158a22874cb52ead4f
+#   src/math/sqrtf.c     -> libc/math/sqrtf.c
+#     bd7c19c2c4efdbd1259f04a919c88f7119d9402cdd41584c7b0f854acb203b42
+#   src/math/sqrt_data.c -> libc/math/sqrt_data.c
+#     590aaadff964dcfc36ef9e5302423a779cda4f1608e15dbeee8e43e6e5f1c6fe
+#   src/math/sqrt_data.h -> libc/math/sqrt_data.h
+#     5fa47a8b8c1afbee4dcd10f71d2f6c433a24f9aa5ce7a90924cd1db236cbc03c
+#
+# New OS01 sources (no upstream counterpart):
+#   libc/math/musl_libm.h — the private helper header (asuint64/asdouble/
+#     asuint/asfloat, predict_true/predict_false, the fixed quiet NaN
+#     patterns).  It replaces musl's src/internal/libm.h, which carries
+#     musl-internal machinery (long double unions, fp_arch.h,
+#     WANT_ROUNDING) that OS01 does not have.
+#   libc/math/floor.c, ceil.c — integer ports of musl's float variants
+#     (the double variants use the 1/EPS toint trick, whose correctness
+#     depends on excess-precision semantics).
+#   libc/math/round.c, roundf.c — integer ports of musl's round.
+#
+# Adaptation diff (13 items, as specified in the design spec):
+#   1. #include "libm.h" -> #include "musl_libm.h" (private header).
+#   2. isnan(y) -> an integer bit test (exponent all ones, fraction
+#      non-zero).  "y != y" compiles to a compare instruction.
+#   3. __math_invalid(x) -> the fixed quiet NaN 0x7ff8000000000000
+#      (float: 0x7fc00000).
+#   4. the error paths are split per the errno contract: a NaN operand is
+#      not an error (errno untouched), an infinite dividend and a zero
+#      divisor are domain errors (EDOM).
+#   5. FENV_SUPPORT -> 0 (OS01 has no fenv).
+#   6. the FORCE_EVAL(x + 0x1p120f) inexact triggers are removed.
+#   7. floor/ceil (double) and round/roundf are ported to integer bit
+#      manipulation.
+#   8. fmod/fmodf: (x*y)/(x*y) -> the fixed quiet NaN.
+#   9. fmod/fmodf: 0*x -> an integer-built signed zero.
+#  10. sqrt/sqrtf: the subnormal normalization x * 0x1p52 (x * 0x1p23f)
+#      is rebuilt with integer operations (exponent from the mantissa's
+#      highest set bit); musl's exponent compensation is kept (top -= 52
+#      for binary64, ix -= 23U << 23 for binary32).
+#  11. the NaN result is the fixed quiet NaN for sqrt/sqrtf/fmod/fmodf;
+#      fabs/fabsf/copysign/copysignf only touch the sign bit and keep the
+#      payload; the rounding functions return a NaN unchanged.  The rules
+#      hold for quiet and signalling NaNs alike.
+#  12. the "hidden" visibility annotations are removed.
+#  13. __rsqrt_tab -> __os01_libm_rsqrt_tab (the table is a non-static
+#      global in the shipped archive; musl's name could collide).
+#
+# The OS01 libc/include/libc_arch/<arch>/float_abi.h fs_fabs helper is
+# the same bit operation as musl's fabs, with the arch's scanner working
+# type (x86_64 long double, aarch64 double).
+#
+# Verification recorded with this vendoring (2026-11-21):
+#   - all 16 symbols were differentially tested against the host glibc:
+#     6.6M cases (special-value cross products, 300k random doubles, the
+#     full float subnormal sweep and a sampled double subnormal sweep)
+#     with zero bit-level mismatches;
+#   - the errno contract table of the design spec was checked case by
+#     case (24 cases, all matching);
+#   - the compiled objects contain no FP arithmetic instruction and no
+#     soft-float helper symbol.
