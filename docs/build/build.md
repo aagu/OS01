@@ -55,7 +55,7 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 | `make test-qemu SUITE=phase-0\|systest\|inittab-phase\|network\|gfx\|resolution\|driver-model\|monitor\|terminal-present\|gui\|intr-x86\|boot-lifecycle\|boot-irq-time\|boot-failure\|boot-contract\|boot-services\|usb-boot\|arch10-capacity\|arch6-fsstress\|doom` | QEMU E2E against the matching variant image (or the normal image for `gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui`/`usb-boot`; `intr-x86`/`boot-lifecycle`/`boot-irq-time`/`boot-failure`/`boot-contract`/`boot-services`/`doom` build their own isolated fault/test variants). | `phase-0` |
 | `make test-host` | hosttests + PMM boot reservation | — |
 | `make test-static` | runtime / layout / canary / link-order audits (16 audits) | — |
-| `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault\|serror\|m3-probe\|sched\|sched-ap\|sched-wake\|sched-tick\|boot-contract\|m1-*\|lma-layout` | AArch64 PSCI / GIC / sync-fault / serror / scheduler / boot-contract acceptance harness | `smp` |
+| `make test-aarch64 MODE=smp\|no-ack\|gic-spi\|sync-fault\|serror\|exception-trace\|m3-probe\|sched\|sched-ap\|sched-wake\|sched-tick\|boot-contract\|m1-*\|lma-layout` | AArch64 PSCI / GIC / sync-fault / serror / exception-trace / scheduler / boot-contract acceptance harness | `smp` |
 | `make test-contract PROFILE=x86_64-clang\|aarch64-clang` | CI build-contract check | `x86_64-clang` |
 | `make test-kernel-selftest` | Boot selftest image + parse `[selftest]` markers | — |
 | `make test-harness` | Python unittest framework regression (no QEMU, never discovers QEMU scripts) | — |
@@ -390,7 +390,7 @@ make test-monitor-host CASE=file      # 只跑指定子系统的用例
 | `make test-qemu SUITE=terminal-present` | 隔离变体镜像 `build/<profile>/image/terminal-present/disk.img`（套件自带 `TERM_PRESENT_TEST=1` → `USER_DEBUG=1`，普通镜像串口保持干净） | Task 6 聚焦 QEMU 套件：GFX_PRESENT_RECT 像素正确性（QMP 截图）+ terminal 内 monitor ≥30 s 稳态字节/ns/窗口门控，对照 Task-3 baseline manifest；可通过 `TERMINAL_PRESENT_BASELINE_LOG` 覆盖 baseline 路径（默认 `qemutests/baselines/terminal-present/serial.log`，仓库内持久副本；原始 /tmp 证据已丢失）|
 | `make test-qemu SUITE=gui` | 普通镜像（`-snapshot` 只读启动，1/2 核各自拉 QEMU） | GUI-1 LVGL 平台后端与故障注入验收（SMP 1/2 矩阵；boot、smoke、normal_exit、wait_quit、busy_owner、killed_owner、fatal_owner） |
 | `make DOOM_TEST=1 test-qemu SUITE=doom` | 隔离变体镜像 `build/<profile>/image/doom-test/disk.img`（`DOOM_TEST=1`） | Doom SMP=1/2 QEMU 集成套件（真实按键注入、截图、生命周期与状态观测） |
-| `make test-qemu SUITE=intr-x86` | 隔离故障变体镜像 `build/<profile>/image/intr-x86-fault-{bp,nmi}/disk.img`（套件自建，普通镜像不受影响） | 中断分派第二期的两个**破坏性**入口验收：内核 `#BP`（`int3`）与 QMP `inject-nmi` 注入的**真实硬件 NMI**。每个用例单核启动、各自编译自己的 kernel/image 变体（选择器 `X86_INTR_FAULT_TEST=bp\|nmi`），判定只看 guest 串口里的完整原始 fatal 诊断（`do_int3(3)` / `do_nmi(2)`）+ ≥1 s 观察窗口；`#BP` 的保存 RIP 必须等于从**变体 ELF** 解析出的续执行标签 `x86_intr_fault_bp_resume`（绝不硬编码）。超时/静默/正常完成都不算通过。运行器：`qemutests/x86_intr_fault.py`（归档在 `build/<profile>/logs/tests/intr-x86/`） |
+| `make test-qemu SUITE=intr-x86` | 隔离故障变体镜像 `build/<profile>/image/intr-x86-fault-{bp,nmi,trace-read,trace-bad-fp}/disk.img`（套件自建，普通镜像不受影响） | x86_64 破坏性中断入口与异常回溯验收：内核 `#BP`（`int3`）、QMP `inject-nmi` 真实硬件 NMI、受保护帧读取修复（`trace-read`）与坏 FP 截断 3 帧回溯（`trace-bad-fp`）。每个用例单核启动、各自编译自己的 kernel/image 变体（选择器 `X86_INTR_FAULT_TEST=bp\|nmi\|trace-read\|trace-bad-fp`），判定只看 guest 串口里的完整原始 fatal 诊断（`do_int3(3)` / `do_nmi(2)` / 3 帧回溯与 `End Kernel Stack Backtrace`）+ ≥1 s 观察窗口；`#BP` 的保存 RIP 必须等于从**变体 ELF** 解析出的续执行标签 `x86_intr_fault_bp_resume`（绝不硬编码）。超时/静默/正常完成都不算通过。运行器：`qemutests/x86_intr_fault.py`（归档在 `build/<profile>/logs/tests/intr-x86/`） |
 | `make test-qemu SUITE=boot-lifecycle` | normal 组用普通镜像只读（`-snapshot`），故障组各自隔离 `build/<profile>/image/boot-lifecycle-<case>/disk.img`（套件自建，普通镜像 hash 前后受 cmp 校验） | BOOT-1 CPU 生命周期 8 组矩阵（串行）：normal 1/2/4/8、delay-online 2/4、no-online 2、no-scheduler 2。选择器 `X86_SMP_BOOT_TEST=none\|delay-online\|no-online\|no-scheduler`（经 `KERNEL_EXTRA_CFLAGS` 送达 smp.c 的注入宏；正常构建零注入）。判定只看 guest 串口：`[boot-1] ready/complete`（normal）或唯一 `[boot-1] FATAL cpu=1 stage=<online\|scheduler>`（fatal），≥1 s 观察窗口，runner 自行停止 QEMU，超时/静默/QEMU 自退一律 FAIL。运行器：`qemutests/boot_lifecycle.py`（归档在 `build/<profile>/logs/tests/boot-lifecycle/`）。每 case 90 s 是单次 QEMU 上限，不是矩阵预算 |
 | `make test-qemu SUITE=boot-failure` | normal 组用普通镜像只读（`-snapshot`），故障组各自隔离 `build/<profile>/image/boot-failure-<case>/disk.img`（套件自建，普通镜像 hash 前后受 cmp 校验） | BOOT-3 启动失败与降级策略 17 组矩阵（串行）：normal 1/2/4、required-subsys 1/2、optional-subsys 1/2、registration 1、root 1、tty 1、pty 1、stdio 1/2、init 1/2、child-fds 1/2。选择器 `BOOT_FAILURE_TEST=none\|required-subsys\|optional-subsys\|registration\|root\|tty\|pty\|stdio\|init\|child-fds`。判定只看 guest 串口结构化 `[boot-3] FATAL` / `[boot-3] WARN` 与能力哨兵，超时/静默/QEMU 自退一律 FAIL。运行器：`qemutests/boot_failure.py`（归档在 `build/<profile>/logs/tests/boot-failure/`） |
 | `make test-qemu SUITE=boot-contract` / `make PROFILE=aarch64-clang test-aarch64 MODE=boot-contract` | normal 组用普通镜像只读（`-snapshot`），变体组各自隔离 `build/<profile>/image/boot-contract-<case>/disk.img`（套件自建，普通镜像 hash 前后受 cmp 校验） | BOOT-4 跨架构阶段契约与依赖拓扑 14 组矩阵（双架构各 7 组：normal 1/2/4、reverse 1/2、missing 1、cycle 1）。选择器 `BOOT_CONTRACT_TEST=none\|reverse\|missing\|cycle`。判定验证三检查点 `[boot-4] checkpoint=<devices\|pre-smp\|runtime> status=ok` 全序、依赖预检与拓扑保序、missing/cycle 真实拒绝。运行器：`qemutests/boot_contract.py`（归档在 `build/<profile>/logs/tests/boot-contract/`） |
@@ -462,7 +462,7 @@ make test-monitor-host CASE=file      # 只跑指定子系统的用例
 
 `test-qemu SUITE=intr-x86` 不复用普通镜像，也不复用普通 `kernel-selftest` 路径：
 
-- **选择器**：`X86_INTR_FAULT_TEST=bp|nmi`（空 = 普通构建，无任何故障探针）。它经 `KERNEL_EXTRA_CFLAGS`（已在 `OS01_SUBMAKE_ALLOWED` 白名单内）把探针选择宏送进受控 sub-make 边界，再由 `kernel/Makefile` 决定是否把 `kernel/arch/x86_64/intr/fault_probe.c` 加进源文件列表——普通构建里既没有该目标文件，ELF 里也没有任何 `x86_intr_fault*` 符号。
+- **选择器**：`X86_INTR_FAULT_TEST=bp|nmi|trace-read|trace-bad-fp`（空 = 普通构建，无任何故障探针）。它经 `KERNEL_EXTRA_CFLAGS`（已在 `OS01_SUBMAKE_ALLOWED` 白名单内）把探针选择宏送进受控 sub-make 边界，再由 `kernel/Makefile` 决定是否把 `kernel/arch/x86_64/intr/fault_probe.c`（及 `fault_probe_bad_fp.S`）加进源文件列表——普通构建里既没有该目标文件，ELF 里也没有任何 `x86_intr_fault*` 符号。
 - **变体**：每个用例一个自己的 kernel/image 目录（`kernel/intr-x86-fault-<case>/`、`image/intr-x86-fault-<case>/`），两个用例互不共享对象与镜像；与 selftest/systest/nettest/canary/weak/resolution/driver-fault 模式的组合在解析期即被拒绝，aarch64 profile 也直接拒绝该选择器。
 - **探针位置**：`x86_64_boot_percpu()` 之后，AP bring-up、FS/TTY 与任务启动之前。此时 BSP per-CPU、IDT、串口和 APIC 已就绪；探针输出 `stage=post-percpu`，运行器要求该标记先于 armed/fatal。LAPIC 按 MADT type 4 的处理器 UID（或 `0xff` 全体）、LINT0/1 与极性/触发标志配置 NMI。此前 NMI 在 APIC 初始化后丢失的原因是内核屏蔽了 LINT1，不是 QEMU 的 early-boot 限制。
 - **判定**：见 `qemutests/x86_intr_fault.py` 的 `fault_evidence()`——串口流里恰好一个 `armed`、恰好一个完整 fatal 诊断、armed 在 fatal 之前、fatal 之后 ≥1 s 观察窗口内没有新的完整心跳/继续标记/二次 fatal/panic。QMP 响应的到达时刻**不**参与排序（只有 guest 串口顺序算数）。
@@ -566,7 +566,7 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 | --- | --- | --- | --- |
 | `test-qemu` | `SUITE=` | `phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`、`intr-x86`、`boot-lifecycle`、`boot-irq-time`、`boot-failure`、`boot-contract`、`boot-services`、`arch10-capacity`、`arch6-fsstress`、`doom` | `qemutests/run_test.py <SUITE>` 对匹配的 variant 镜像（`gfx`/`resolution`/`driver-model`/`monitor`/`terminal-present`/`gui` 用普通镜像；`resolution`/`monitor`/`terminal-present`/`gui`/`doom` 各自拉私有 QEMU 进程）；`intr-x86` 走专属目标 `test-qemu-intr-x86` → `qemutests/x86_intr_fault.py`，自建隔离 fault 变体 |
 | `test-qemu-usb-boot` | `USB_BOOT_CASE=` | `readonly`（默认）/ `dual` / `ahci` / `persistence` / `superspeed` / `hub` / `firmware`（过期的预期失败断言，仅 opt-in） | 运行器经共享构造器 `qemutests/harness/qemu_cmd.py::build_qemu_x86(storage="usb")` 生成 USB-only 拓扑；不经 `run_test.py`（它总会追加 AHCI 根盘）。已登记生成的 suite catalog 与 nightly bucket |
-| `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault`、`serror`、`m3-probe`、`sched`、`m1-ram`、`m1-sparse`、`m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` | `qemutests/aarch64_*.py` 之一 |
+| `test-aarch64` | `MODE=` | `smp`、`no-ack`、`gic-spi`、`sync-fault`、`serror`、`exception-trace`、`m3-probe`、`sched`、`m1-ram`、`m1-sparse`、`m1-arena-exhaust`、`m1-table-exhaust`、`m1-ap-bad-root` | `qemutests/aarch64_*.py` 之一 |
 | `test-contract` | `PROFILE=` | `x86_64-clang`、`aarch64-clang` | `qemutests/build_contract.sh <PROFILE> <mode>` 按 profile mode 列表 |
 | `test-host` | — | — | `os01_submake hosttests` + `pmm_boot_reservation_test.py` |
 | `test-static` | — | — | 16 项静态审计（runtime-audit、stack-canary-audit、validate-kernel、runtime-link-order、kernel-runtime-link、syscall-boundary、kernel-layout、kernel-canary-contract、header-object-audit、stack-frame-audit、driver-model-boundary、gui-build-audit、intr-dispatch-audit、arch10-capacity-audit、assertion-policy、user-canary） |
@@ -845,6 +845,7 @@ make PROFILE=aarch64-clang test-aarch64 MODE=sched  # EL1 调度器验收（正�
 make PROFILE=aarch64-clang test-aarch64 MODE=sched-ap  # AP 协作调度验收（7 case 生产矩阵）
 make PROFILE=aarch64-clang test-aarch64 MODE=sched-ap AP_SCHED_CASE=fatal-owner  # fatal 单 owner 故障 boot
 make PROFILE=aarch64-clang test-aarch64 MODE=sched-tick  # 每核 tick 记账验收（1/2/4/8 核各两次）
+make PROFILE=aarch64-clang test-aarch64 MODE=exception-trace  # AArch64 异常回溯与帧读取修复验收（read/bad-fp/task，可设 EXCEPTION_TRACE_CASE=<case>）
 make test-contract                  # CI 契约检查
 make test-harness                   # Python unittest 框架回归（TEST_HARNESS_MODULES 列表；不启动 QEMU）
 make test-doctor                    # 环境体检：比对本地 clang/ld.lld/qemu 与 ci/Dockerfile 钉值
@@ -866,7 +867,7 @@ make PROFILE=aarch64-clang aarch64-uefi-kernel  # aarch64 内核 ELF
 | `PROFILE=<name>` | 选择 profile（默认 `x86_64-clang`） |
 | `SUITE=<name>` | `test-qemu` 的 variant（`phase-0`、`systest`、`inittab-phase`、`network`、`gfx`、`resolution`、`driver-model`、`monitor`、`terminal-present`、`gui`、`doom`） |
 | `USB_BOOT_CASE=<name>` | `test-qemu-usb-boot` 的 case（`readonly` / `dual` / `ahci` / `persistence` / `superspeed` / `hub` / `firmware`，默认 `readonly`；`firmware` 是过期的预期失败断言，仅可显式 opt-in） |
-| `MODE=<name>` | `test-aarch64` 的 variant（`smp`、`no-ack`、`gic-spi`、`sync-fault`、`serror`、`m3-probe`、`sched`、`sched-ap`、`sched-wake`、`sched-tick`、`m1-*`） |
+| `MODE=<name>` | `test-aarch64` 的 variant（`smp`、`no-ack`、`gic-spi`、`sync-fault`、`serror`、`exception-trace`、`m3-probe`、`sched`、`sched-ap`、`sched-wake`、`sched-tick`、`m1-*`） |
 | `AP_SCHED_CASE=<name>` | `MODE=sched-ap` 的用例选择（`positive`、`fatal-owner`，默认 `positive`） |
 | `SCHED_CASE=<name>` | `MODE=sched` 的用例选择（`positive`、`sp-top`、`sp-low`、`pc-low`、`pc-data`、`all`，默认 `all`） |
 | `OS01_SYSTEST=1` | 启用 systest variant（影响编译旗标） |

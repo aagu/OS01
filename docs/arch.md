@@ -365,3 +365,13 @@ yield/deadline/global窗口在目标核的pinned worker上测量，remote窗口�
 - **AArch64 mini-formatter 兼容约束**：AArch64 early console/logger mini-formatter 仅保证稳定支持 `%s`，不保证通用整数说明符。因此 `boot_failure_stop` 与 `boot_failure_warn` 在栈上使用无堆分配的专用十进制格式化（带负号与 `INT64_MIN` 正确处理），生成固定栈缓冲区后统一通过 `%s` 传入 `log_err` / `log_warn`。
 - **HALT 边界**：致命退出直接调用 `arch_boot_fatal_halt()`（x86_64: cli + hlt 循环；aarch64: wfi 循环），不依赖已初始化的调度器，不在致命路径产生二次锁竞争或内存分配。
 
+## 双架构统一异常诊断与单段栈回溯（2026-11-21）
+
+x86_64 与 aarch64 共用一套无锁致命异常栈回溯与符号解析框架，保证在早期启动、中断上下文及异常修复路径下安全输出诊断信息，不依赖堆分配、调度器锁或常规控制台锁：
+
+- **统一符号表与代码段边界**：`kernel/core/kallsyms.c` 从 `llvm-nm -n` 生成按地址排序的符号表（半开区间 `[addr_i, addr_{i+1})`）；`kernel/core/trace_symbols.c::trace_lookup_symbol()` 通过链接器脚本边界 `__trace_text_start..__trace_text_end`（以及 x86_64 `.ltext` 的 `__trace_ltext_start..__trace_ltext_end`）校验 PC 归属，防止末条符号越界匹配非代码地址，同时过滤本地 `.L*` 标签、链接器标记与映射符号。
+- **受保护帧读取与单段回溯**：`kernel/core/trace.c::trace_exception()` 经 `arch_early_puts()` / `arch_early_putc()` 直接向早期串口输出。`TRACE_FULL` 模式在当前活跃栈边界内最多展开 4 帧（`frame[i] pc=... -> sym+0x...`，最终以 `End Kernel Stack Backtrace` 收尾），每一步均校验栈边界、16 字节对齐及单调递增，并通过 `arch_unwind_read_frame()` 执行两字受保护读取；若读取缺页，页故障入口在读取故障地址后优先调用架构修复例程，安全跳过坏帧并终止回溯。`TRACE_PC_ONLY` 模式仅解析异常 PC 符号并输出结束标记。
+- **架构接入**：x86_64 在 `kernel/arch/x86_64/intr/unwind_read.S` 与 `unwind.c` 中实现修复表与 `IA32_GS_BASE` / `TSS64_Table` / `init_tss` 栈边界解析，接入 `x86_fatal_exception()` 与 `x86_fatal_page_fault()`；aarch64 在 `kernel/arch/aarch64/intr/unwind_read.S` 与 `unwind.c` 中实现修复表与 `aarch64_unwind_publish_task_stack()` 任务栈边界发布，接入 `aarch64_el1_sync_fatal()`（`TRACE_FULL`）与 `aarch64_serror_fatal()`（`TRACE_PC_ONLY`）。
+- **已知限制**：回溯严格限定为**单段**内核栈（不跨 IRQ/IST 栈切换回溯被中断的任务栈，也不展开用户态栈帧）；最多输出 4 帧；内核编译统一启用 `-fno-omit-frame-pointer -mno-omit-leaf-frame-pointer`，但手写汇编或异常破坏 FP 时会在首个坏帧安全截断；AArch64 SError 入口统一使用 `TRACE_PC_ONLY`。
+
+
