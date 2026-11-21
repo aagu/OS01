@@ -326,6 +326,33 @@ class FlakeLedgerReportTests(unittest.TestCase):
             self.assertEqual(len(data["runs"]), 1)
             self.assertNotEqual(data["runs"][0]["run_id"], "old")
 
+    def test_emit_fragment_excludes_runs_already_in_the_ledger(self) -> None:
+        """A fragment is a delta against the ledger baseline."""
+        from qemutests import flake_report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "build" / "x86_64-clang" / "logs" / "tests"
+            self._write_result(
+                base / "gui" / "20261121-1", "gui", "FAIL", "2026-11-21T01:00:00Z", run_id="r1"
+            )
+            self._write_result(
+                base / "gfx" / "20261121-1", "gfx", "PASS", "2026-11-21T01:00:00Z", run_id="r2"
+            )
+            ledger = flake_ledger.Ledger(
+                runs=[flake_ledger.LedgerRun("gui", "r1", "2026-11-21T01:00:00Z", "FAIL")],
+                present=True,
+            )
+            flake_ledger.save_ledger(ledger, self._ledger_file(root))
+
+            fragment = root / "out" / "fragment.json"
+            buf = io.StringIO()
+            rc = flake_report.main([root], out=buf, root=str(root), emit_fragment=str(fragment))
+            self.assertEqual(rc, 0)
+
+            data = json.loads(fragment.read_text(encoding="utf-8"))
+            self.assertEqual([run["run_id"] for run in data["runs"]], ["r2"])
+
     def test_merge_fragment_adds_runs_to_the_ledger(self) -> None:
         from qemutests import flake_report
 

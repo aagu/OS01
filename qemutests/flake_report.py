@@ -281,7 +281,11 @@ def main(
         source_counts["local"] += len(local_runs)
 
     if emit_fragment:
-        flake_ledger.write_fragment(Path(emit_fragment), discovered)
+        # A fragment is a DELTA against the ledger baseline: runs already in
+        # the ledger are excluded, so merging it is idempotent.
+        baseline_keys = {run.key for run in ledger.runs}
+        delta = [run for run in discovered if run.key not in baseline_keys]
+        flake_ledger.write_fragment(Path(emit_fragment), delta)
 
     combined = flake_ledger.merge_runs(ledger.runs, discovered)
     rows = summarize_suites(combined, ledger.decisions)
