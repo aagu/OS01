@@ -5,6 +5,16 @@
 
 ---
 
+## 2026-11-22
+
+- feat(sanitizers): **x86_64 内核 UBSan + KASan 编译期插桩 v1 落地**（闭合 `docs/roadmap.md` P1「UBSan + KASan」，plan [`docs/superpowers/plans/2026-11-22-ubsan-kasan.md`](superpowers/plans/2026-11-22-ubsan-kasan.md)，文档见 [`docs/build/build.md`](build/build.md)）：
+  - **构建接入**：`KERNEL_UBSAN=1` / `KERNEL_KASAN=1` / `KERNEL_SANITIZER_TEST=ubsan|kasan` 三个 knob（`mk/project.mk` 解析期校验 + 组合拒绝 + `OS01_SUBMAKE_ALLOWED` 白名单）；`KERNEL_VARIANT`/`IMAGE_VARIANT` 双 slug `san-ubsan`/`san-kasan` 隔离产物；KASan 在 `kernel/Makefile` 内部把 `EFFECTIVE_CC` 重定向到 `x86_64-unknown-linux-gnu` 三元组（clang 23 驱动对 `x86_64-unknown-none` 拒收 `-fsanitize=kernel-address`，实测），不泄漏进 user/UEFI。flags 全部折进 `ALL_CFLAGS`（`.cflags` fingerprint stamp 自动失效）；运行时 TU（ubsan/kasan/kasan_shadow/kasan_boot）经对象特例规则去插桩，`-fno-sanitize=kernel-address`（`address` 不覆盖该组，实测）。
+  - **KASan 两阶段影子**：`shadow(VA)=(VA>>3)+0xdffffc0000000000`（clang 内联常量，Linux 同款）；head.S 静态零影子窗口（PML4 slot 472，1 GiB 影子 ⇔ 物理 ≤ 8 GiB，普通构建逐字节不变，二进制对照 `3e358518…` 验证）→ `kasan_shadow_install()`（消费 `arch_boot_direct_map_ranges()`，RAM + 帧缓冲（slot 476 链）+ early-MMIO 跨度，36 帧/512 MiB）原子换根 + `kasan_poison_arm()` 毒化门。运行期 MMIO（LAPIC/xhci 64 位 BAR 等）经 `x86_vmm_map_2m`/`x86_vmm_map_4k` 映射钩子按需补影子页。插桩代码不得触碰低半区（影子线性映射只规范内核半区）：`kasan_boot_entry`（去插桩）拷贝 UEFI handoff + 预置 BSP GS，`uaccess.c`/`pmm_arch.c` 整 TU 去插桩。
+  - **堆钩子**：`malloc→kmalloc`/`free→kfree` 直转发故只钩 slab：kmalloc unpoison payload + redzone（`0xfc`）、kfree 全对象 `0xfb`、slab 收缩回还 2 MiB 帧时清影子（防陈旧毒化误报）。
+  - **UBSan 运行时**：compiler-rt ABI 全量处理函数（`kernel/ubsan/ubsan.c` + ABI 头），违规 = `log_err`（源位置 file:line:column + 类型）→ `kpanic`；剔除 object-size/alignment（`gate.h:236` 自由指针转型写保守误报，probe 实证；Linux x86 同款 UBSAN_ALIGNMENT=n），保留 null/overflow/shift/bounds/pointer-overflow。
+  - **探针验收**：`KERNEL_SANITIZER_TEST=ubsan` 触发 `signed integer add overflow at selftest/test_kernel_sanitizers.c:25:19` + panic；`KERNEL_SANITIZER_TEST=kasan` 触发 `WRITE of 1 byte(s) ... heap redzone (past requested size)`（shadow=0xfc、影子字节 `fc 00 00 00 fc…`、影子帧 PA 诊断）+ panic；无探针插桩内核完整启动到用户态（网络 + DHCP）零违规；普通构建与 master 逐字节一致。
+  - **后续项**（记回 roadmap）：栈插桩（需 Linux 式早期文件排除清单）、全局红 zone（需 `.init_array.1` 扫描）、aarch64 接入、偶发 LAPIC 影子 0xff 诊断（报告已带影子帧 PA）。
+
 ## 2026-11-21
 
 - feat(arch): **CPU 特性探测门面 `arch_cpu_features()` 落地**（闭合 `docs/roadmap.md` P2「架构统一推进链 — CPU 特性探测」）：

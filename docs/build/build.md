@@ -467,6 +467,17 @@ make test-monitor-host CASE=file      # 只跑指定子系统的用例
 - **探针位置**：`x86_64_boot_percpu()` 之后，AP bring-up、FS/TTY 与任务启动之前。此时 BSP per-CPU、IDT、串口和 APIC 已就绪；探针输出 `stage=post-percpu`，运行器要求该标记先于 armed/fatal。LAPIC 按 MADT type 4 的处理器 UID（或 `0xff` 全体）、LINT0/1 与极性/触发标志配置 NMI。此前 NMI 在 APIC 初始化后丢失的原因是内核屏蔽了 LINT1，不是 QEMU 的 early-boot 限制。
 - **判定**：见 `qemutests/x86_intr_fault.py` 的 `fault_evidence()`——串口流里恰好一个 `armed`、恰好一个完整 fatal 诊断、armed 在 fatal 之前、fatal 之后 ≥1 s 观察窗口内没有新的完整心跳/继续标记/二次 fatal/panic。QMP 响应的到达时刻**不**参与排序（只有 guest 串口顺序算数）。
 
+### `san-ubsan` / `san-kasan`：内核编译期插桩（roadmap P1）
+
+两个独立构建开关给 x86_64 内核 C 源码加编译期 sanitizer（借鉴 ArvernOS 的 UBSan 运行时思路，影子几何与 clang 23 `kernel-address` 内联常量对齐）：
+
+- **选择器**：`KERNEL_UBSAN=1`（`-fsanitize=undefined`，剔除 object-size 与 alignment——probe 实证 `gate.h:236` 的自由指针整型转型写会触发保守的 `__builtin_object_size` 误报，且 object-size 检查挂在 alignment 组里；Linux 对 x86 同样默认关 UBSAN_ALIGNMENT）与 `KERNEL_KASAN=1`（`-fsanitize=kernel-address -mllvm -asan-globals=0 -mllvm -asan-stack=0`）。`KERNEL_SANITIZER_TEST=ubsan|kasan` 追加注入探针 fixture（`kernel/selftest/test_kernel_sanitizers.c`，普通构建零符号）。与 selftest/systest/nettest/capacity/doom/fault-probe 等变体的组合在 `mk/project.mk` 解析期拒绝；aarch64 profile 直接拒绝两个 knob。
+- **产物隔离**：kernel/image 变体目录 `san-ubsan/`、`san-kasan/`（`KERNEL_VARIANT` 与 `IMAGE_VARIANT` 双 slug）；KASan 把 kernel 编译重定向到 `x86_64-unknown-linux-gnu` 三元组（clang 驱动对 `x86_64-unknown-none` 拒收 `-fsanitize=kernel-address`），该重定向只发生在 `kernel/Makefile` 内部（`EFFECTIVE_CC` 替换），不泄漏进 user/UEFI 三元组。flags 进 `ALL_CFLAGS`，`.cflags` fingerprint stamp 自动失效。
+- **KASan 影子几何**：`shadow(VA) = (VA >> 3) + 0xdffffc0000000000`（clang 23 kernel-address 内联常量，Linux 同款）。影子区在 PML4 slot 472（`0xffffec0000000000` 起）与 remap 帧缓冲影子的 slot 476。两阶段：head.S 静态零影子（1 GiB 窗口 ⇔ 物理 ≤ 8 GiB，普通构建逐字节不变）→ `kasan_shadow_install()`（`x86_64_boot_memory` 内、直映射就绪后）换成真实 2 MiB 影子帧（RAM + 早期/重映射帧缓冲 + early-MMIO 跨度），随后 `kasan_poison_arm()` 才允许 slab 毒化。运行期 MMIO 经 `x86_vmm_map_2m`/`x86_vmm_map_4k` 的映射钩子按需补影子页。插桩代码不得触碰低半区 VA（影子线性映射数学上只规范内核半区）：UEFI handoff 由去插桩的 `kasan_boot_entry` 拷贝、BSP GS 预置；`uaccess.c` 与 `pmm_arch.c`（恒等映射读 E820）整 TU 去插桩。全局与栈插桩本期关闭（内核无 `.init_array` 迭代、栈毒化从第一条指令就写影子），为 roadmap 后续项。
+- **堆钩子**：`libc/stdlib/malloc.c` libk 模式 `malloc→kmalloc`、`free→kfree` 直转发，故只钩 `kernel/memory/slab.c` 即全覆盖；kmalloc unpoison `[ptr, ptr+req)` + redzone `[ptr+req, ptr+cache)`，kfree 毒化全对象 `0xfb`，slab 收缩回还 2 MiB 帧时清影子。
+- **违规语义**：任何 `__asan_report_*` / `__ubsan_handle_*` = `log_err`（分类 + 源位置 + 影子帧诊断）→ `kpanic`（fatal 回溯随出）。不 recover。
+- **验收**：普通构建与 master 逐字节一致；`KERNEL_SANITIZER_TEST=ubsan` 的探针在设备 bring-up 后触发 `signed integer add overflow at <file>:<line>` 并 panic；`KERNEL_SANITIZER_TEST=kasan` 触发 `WRITE of 1 byte(s) ... heap redzone (past requested size)`（shadow=0xfc、影子字节 `fc 00 00 00 fc…`）并 panic；无探针时两个插桩内核完整启动到用户态（网络 + DHCP）零违规。
+
 systest variant 是 **compile-affecting** 的：`OS01_SYSTEST=1` 给 user CFLAGS 加 `-DOS01_SYSTEST`，所以 variant 的用户程序构建到独立对象/artifact 目录（`build/<profile>/user/systest`，`build/<profile>/artifacts/user/systest`），variant 镜像包含 systest 编译的 `init.elf`，启动 `/bin/systest` 而不是 BusyBox shell。`USER_DEBUG=1` 同样是 compile-affecting 的（`-DUSER_DEBUG=1`），用户程序构建到 `build/<profile>/user/user-debug` 与 `build/<profile>/artifacts/user/user-debug`，因此开启/关闭用户态调试日志不会互相污染对方的对象文件。另两个 variant（nettest、inittab-test）只改 inittab 文件和镜像目录，其用户二进制与普通构建共享。
 
 也可以直接构建 variant 镜像：

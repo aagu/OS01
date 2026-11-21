@@ -8656,6 +8656,62 @@
     "action": "unique",
     "reason": "Primary host unit test verifying boot module smp_boot_unified behavior"
    }
+  },
+  {
+   "id": "sanitizers.build.contract",
+   "owner": "kernel",
+   "component": "kernel",
+   "behavior": "sanitizer-instrumentation",
+   "trigger": "make PROFILE=x86_64-clang test-kernel-sanitizers-contract",
+   "assertions": [
+    "KERNEL_UBSAN/KERNEL_KASAN/KERNEL_SANITIZER_TEST validated and whitelisted across the controlled sub-make boundary",
+    "san-ubsan/san-kasan variant slugs re-key kernel and image artifacts",
+    "aarch64 profile rejects both knobs",
+    "runtime TUs compile de-instrumented per sanitizer kind; KASan low-VA exclusions (uaccess, pmm_arch) gated",
+    "head.S static zero-shadow tables and the sanitizer boot entry gated by the knob defines",
+    "shadow geometry single-sourced in kasan.h; slab poison hooks and the poison-arm gate present"
+   ],
+   "failure_modes": [
+    "Knob drifts off the whitelist or variant slugs stop re-keying — instrumented builds share objects with the normal build",
+    "Runtime re-entering its own instrumentation, or low-VA accesses #GP in instrumented builds"
+   ],
+   "primary": {
+    "layer": "build-contract",
+    "source": "qemutests/test_kernel_sanitizers.py",
+    "selector": "SanitizerBuildContract",
+    "evidence": "UNITTEST_OK"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Only contract test pinning the sanitizer build plumbing"
+   }
+  },
+  {
+   "id": "sanitizers.probe.live_qemu",
+   "owner": "kernel",
+   "component": "kernel",
+   "behavior": "sanitizer-violation-detection",
+   "trigger": "make PROFILE=x86_64-clang test-kernel-sanitizers",
+   "assertions": [
+    "KERNEL_SANITIZER_TEST=ubsan probe boots and reports 'signed integer add overflow at selftest/test_kernel_sanitizers.c' before the kernel panic",
+    "KERNEL_SANITIZER_TEST=kasan probe boots and reports 'WRITE of 1 byte(s)' with 'heap redzone (past requested size)' before the kernel panic",
+    "armed marker precedes each report line on the serial log"
+   ],
+   "failure_modes": [
+    "Instrumentation silently absent (no report), report without armed marker, or panic path losing the serial evidence"
+   ],
+   "primary": {
+    "layer": "qemu-e2e",
+    "source": "qemutests/test_kernel_sanitizers.py",
+    "selector": "SanitizerLiveProbe.test_probe_reports_and_panics",
+    "evidence": "UNITTEST_OK"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Only live QEMU evidence for compiler-instrumented violation detection"
+   }
   }
  ]
 }

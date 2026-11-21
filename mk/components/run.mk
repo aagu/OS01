@@ -952,6 +952,18 @@ test-doom-assets:
 	$(call require_capability,rootfs)
 	@cd $(OS01_ROOT) && PROFILE=$(PROFILE) python3 -m unittest qemutests.test_doom_assets -v
 
+# Sanitizer instrumentation contract + live probe (roadmap P1 UBSan+KASan).
+# Static contract always runs; the live QEMU probe builds both instrumented
+# images and boots each probe — opt-in work guarded by OS01_SANITIZER_LIVE
+# inside the module itself.
+.PHONY: test-kernel-sanitizers
+test-kernel-sanitizers:
+	@cd $(OS01_ROOT) && OS01_SANITIZER_LIVE=1 PROFILE=$(PROFILE) python3 -m unittest qemutests.test_kernel_sanitizers -v
+
+.PHONY: test-kernel-sanitizers-contract
+test-kernel-sanitizers-contract:
+	@cd $(OS01_ROOT) && PROFILE=$(PROFILE) python3 -m unittest qemutests.test_kernel_sanitizers -v
+
 # gfx 2D API plan Task 1: per-file device ioctl/release lifecycle
 # (spec §3; full contract in hosttests/cases/test_gfx_file_lifecycle.c).
 test-gfx-file-lifecycle:

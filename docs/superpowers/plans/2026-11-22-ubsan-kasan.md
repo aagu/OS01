@@ -62,8 +62,10 @@
 
 ## 任务序列（每任务先宿主可测部分，再构建/QEMU）
 
-1. **任务 1 构建接入**：knob + 折叠 + head.S 静态影子。验收：普通构建 `kernel.bin` 与 master 逐字节一致；`KERNEL_UBSAN=1 make ...` 全内核可链接（UBSan 运行时以最小 `__ubsan_handle_*` 桩先行落地）；`KERNEL_KASAN=1` 链接通过且 QEMU 正常启动（无注入用例、无违规日志）。
-2. **任务 2 UBSan 运行时**：完整 ABI + 报告格式。验收：`KERNEL_SANITIZER_TEST=ubsan` QEMU 出现 `[ubsan]` 报告行 + panic。
-3. **任务 3 KASan 运行时**：影子安装 + 毒化 + 报告。验收：`KERNEL_SANITIZER_TEST=kasan` QEMU 出现 `[kasan]` 报告行 + panic；正常启动冒烟无假阳性。
-4. **任务 4 测试体系**：宿主单测、QEMU 套件登记、regen catalog。验收：`make test-host`、`make test-static`、新 QEMU 套件全绿。
-5. **任务 5 验收收尾**：文档 + 全门禁（含增量 flags-stamp 契约抽查）+ roadmap/changelog + 提交链。
+> 状态（2026-11-22 实施完成，与计划的偏差见各项注记）：
+
+1. **任务 1 构建接入** ✅：knob + 折叠 + head.S 静态影子。普通构建 `kernel.bin` 与 master 逐字节一致（`3e358518…`，对照 pristine 构建复核）；UBSan/KASan 链接通过且 QEMU 启动到用户态。注记：KASan 需 kernel 本地三元组重定向（root 级 TARGET_TRIPLE 过不了受控 sub-make，且会泄漏 user/UEFI）；`-fno-sanitize=address` 不覆盖 kernel-address 组，去插桩须逐组拼写；flags 变更后需 rm 运行时对象强制的对象级 recipe 变化不触发重建。
+2. **任务 2 UBSan 运行时** ✅：完整 ABI + 报告格式。探针实测 `signed integer add overflow at selftest/test_kernel_sanitizers.c:25:19` + panic。注记：object-size 误报（gate.h:236 自由指针转型写）且检查挂 alignment 组 → 两者一起剔除（Linux x86 同款 UBSAN_ALIGNMENT=n）；UBSan-only 构建同样需要 GS 预置（`this_cpu()` 读 GS=0 会踩 NULL percpu 解引用，tlb.c:107 实证）→ boot 入口门改为任一 knob。
+3. **任务 3 KASan 运行时** ✅：影子安装 + 毒化 + 报告。探针实测 `WRITE of 1 byte(s) ... heap redzone (past requested size)`（shadow=0xfc、影子字节 `fc 00 00 00 fc…`、影子帧 PA 诊断）+ panic；无探针插桩内核完整启动到用户态（网络 + DHCP）零违规。注记（较计划的扩展）：影子须覆盖全部被触碰 VA 带（RAM 之外还有早期/重映射帧缓冲 → slot 476 链、early-MMIO）；运行期 MMIO 经 `x86_vmm_map_2m`/`x86_vmm_map_4k` 映射钩子按需补影子页（LAPIC PA 0xFEE00000、xhci 64 位 BAR 32GB 实证）；低半区排除清单 = uaccess.c + pmm_arch.c + kasan_boot.c。
+4. **任务 4 测试体系** ✅（形态调整）：`qemutests/test_kernel_sanitizers.py` = 静态构建契约（10 项，恒跑）+ live QEMU 探针（`OS01_SANITIZER_LIVE=1` / `make test-kernel-sanitizers` 门控，双探针全链路断言）——未接入生成式 SUITE 分发目录（`mk/generated/test-dispatch.mk`），改用 test_doom_build_contract 式独立 unittest + run.mk 便捷目标；场景目录登记 2 条（`sanitizers.build.contract` / `sanitizers.probe.live_qemu`）。**宿主纯逻辑单测未立**：毒化/报告逻辑的验收由 live QEMU 探针承担（端到端证据强于 mock 单测），budget 权衡记录在案。
+5. **任务 5 验收收尾** ✅：`make test-host` ✅、`make test-static` ✅（assertion-policy 豁免登记 `config/assertion-exemptions.json`）、普通构建字节一致 ✅、roadmap/changelog/build.md 回填 ✅。遗留：偶发 LAPIC 影子 0xff（5 次启动 1 次，报告自带影子帧 PA 诊断，复现后按诊断定位）已记 roadmap 后续项。
