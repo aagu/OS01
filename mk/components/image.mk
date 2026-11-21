@@ -266,7 +266,7 @@ $(AARCH64_SELFTEST_MARKER): FORCE
 $(AARCH64_UEFI_DISK): $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
 		$(BUILD_DIR)/artifacts/kernel.elf $(AARCH64_UEFI_FIRMWARE) \
 		$(HOST_MKDISK) $(INITTAB_FILE) \
-		$(if $(filter userland,$(PROFILE_CAPABILITIES)),$(USER_ARTIFACT_DIR)/init.elf $(USER_ARTIFACT_DIR)/busybox.elf $(USER_ARTIFACT_DIR)/terminal.elf) \
+		$(if $(filter userland,$(PROFILE_CAPABILITIES)),$(USER_ARTIFACT_DIR)/init.elf $(USER_ARTIFACT_DIR)/busybox.elf $(USER_ARTIFACT_DIR)/terminal.elf $(USER_ARTIFACT_DIR)/test_fp.elf) \
 		$(if $(filter selftest,$(IMAGE_VARIANT)),$(AARCH64_SELFTEST_MARKER))
 ifeq ($(IMAGE_VARIANT),selftest)
 	@$(MAKE) -C tools check-deps HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools
@@ -300,6 +300,9 @@ else
 	@mcopy -i $@ $(USER_ARTIFACT_DIR)/busybox.elf ::/bin/busybox
 	@mcopy -i $@ $(USER_ARTIFACT_DIR)/busybox.elf ::/bin/sh
 	@mcopy -i $@ $(USER_ARTIFACT_DIR)/terminal.elf ::/bin/terminal
+	@# FP/SIMD runtime smoke (2026-11-21): run as /bin/test_fp from the
+	@# busybox ash in USER_RUNTIME_CASE=fp; extension-less like /bin/init.
+	@mcopy -i $@ $(USER_ARTIFACT_DIR)/test_fp.elf ::/bin/test_fp
 	@mcopy -i $@ $(INITTAB_FILE) ::/etc/inittab
 endif
 

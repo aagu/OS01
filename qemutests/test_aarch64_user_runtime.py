@@ -183,6 +183,21 @@ def _good_product_trace():
     )
 
 
+def _good_fp_trace():
+    # USER_RUNTIME_CASE=fp shape: same product boot, but the shell runs
+    # /bin/test_fp and its standalone PASS line is the required evidence.
+    return (
+        "[INFO] [boot-5] init-created pid=1\n"
+        "[INFO] init: inittab loaded\n"
+        "BusyBox v1.36.1 (2026-11-21 00:00:00 CST) built-in shell (ash)\n"
+        "# /bin/test_fp\n"
+        "test_fp: PASS\n"
+        "# exit\n"
+        "BusyBox v1.36.1 (2026-11-21 00:00:00 CST) built-in shell (ash)\n"
+        "# "
+    )
+
+
 class UserRuntimeEvidenceTests(unittest.TestCase):
     def test_valid_irq_trace_passes(self):
         ok, errors = runner.parse_user_runtime_evidence(_good_irq_trace(), "irq")
@@ -343,6 +358,29 @@ class UserRuntimeEvidenceTests(unittest.TestCase):
         self.assertIn("aarch64_user_mig_", runner.FORBIDDEN_PRODUCT_PREFIXES)
         self.assertIn("aarch64_sched_tick_mig_", runner.FORBIDDEN_PRODUCT_PREFIXES)
         self.assertIn("aarch64_asid_test_", runner.FORBIDDEN_PRODUCT_PREFIXES)
+
+    def test_valid_fp_trace_passes(self):
+        ok, errors = runner.parse_product_boot_evidence(
+            _good_fp_trace(), check_shell_io=True, test_fp_pass=True
+        )
+        self.assertTrue(ok, errors)
+        self.assertEqual(errors, [])
+
+    def test_fp_missing_pass_line_fails(self):
+        text = _good_fp_trace().replace("test_fp: PASS\n", "")
+        ok, errors = runner.parse_product_boot_evidence(
+            text, check_shell_io=True, test_fp_pass=True
+        )
+        self.assertFalse(ok)
+        self.assertTrue(any("test_fp: PASS" in e for e in errors), errors)
+
+    def test_fp_trace_without_pass_fails_plain_parse(self):
+        # The fp trace has no "hi" line: the plain product parse must
+        # not accept it (the two shells are distinguished by the flag).
+        ok, errors = runner.parse_product_boot_evidence(
+            _good_fp_trace(), check_shell_io=True
+        )
+        self.assertFalse(ok)
 
 
 if __name__ == "__main__":

@@ -90,7 +90,10 @@ static int check_fork_and_switch(void)
         if (child_val != 84.25)
             _exit(3);
         struct timespec ts = { .tv_sec = 0, .tv_nsec = 10000000L };
-        nanosleep(&ts, NULL);
+        /* aarch64 hides the time syscall group (roadmap 能力齐平):
+         * nanosleep returns -ENOSYS immediately, which is fine — the
+         * exit path itself forces the switch under test. */
+        (void)nanosleep(&ts, NULL);
         _exit(0);
     }
 

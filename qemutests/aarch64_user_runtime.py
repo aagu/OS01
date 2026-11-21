@@ -121,7 +121,7 @@ def audit_elf(elf_path, llvm_nm, case="irq"):
         parts = line.split()
         if len(parts) >= 3:
             syms.add(parts[-1])
-    if case == "product":
+    if case in ("product", "fp"):
         for sym in sorted(syms):
             if any(sym.startswith(pfx) for pfx in FORBIDDEN_PRODUCT_PREFIXES):
                 errors.append(f"forbidden test symbol {sym} in normal product ELF {path}")
@@ -529,7 +529,7 @@ def parse_user_runtime_evidence(text, case="irq"):
     return len(errors) == 0, errors
 
 
-def parse_product_boot_evidence(text, check_shell_io=False):
+def parse_product_boot_evidence(text, check_shell_io=False, test_fp_pass=False):
     """Validate serial output for normal product boot."""
     errors = []
     lines = [line.rstrip("\r") for line in text.splitlines()]
@@ -554,7 +554,12 @@ def parse_product_boot_evidence(text, check_shell_io=False):
         errors.append("missing initial '# ' prompt")
 
     if check_shell_io:
-        if not any(line.strip() == "hi" for line in lines):
+        if test_fp_pass:
+            if not any(line.strip() == "test_fp: PASS" for line in lines):
+                errors.append(
+                    "missing standalone 'test_fp: PASS' output line from /bin/test_fp"
+                )
+        elif not any(line.strip() == "hi" for line in lines):
             errors.append("missing standalone 'hi' output line from echo hi")
         if ash_banner_count < 2:
             errors.append(f"expected respawned busybox ash banner after exit, got {ash_banner_count}")
@@ -653,7 +658,7 @@ def _run_product_cpu(args, cpus, archive, run_dir, budget, drain, dtb_factory):
 
     session = None
     child_exited_before_runner_stop = False
-    check_shell_io = (cpus == 2)
+    check_shell_io = (cpus == 2) or (args.case == "fp")
     try:
         session = ProcessSession(
             argv=command,
@@ -666,10 +671,21 @@ def _run_product_cpu(args, cpus, archive, run_dir, budget, drain, dtb_factory):
             lambda text: parse_product_boot_evidence(text, check_shell_io=False)[0]
         )
         if check_shell_io and not session.timed_out:
-            session.send(b"echo hi\n")
-            session.wait_for(
-                lambda text: any(l.strip() == "hi" for l in text.splitlines())
-            )
+            if args.case == "fp":
+                # FP/SIMD runtime smoke: the product disk carries
+                # /bin/test_fp; run it from the busybox ash and require
+                # its standalone PASS line before exiting the shell.
+                session.send(b"/bin/test_fp\n")
+                session.wait_for(
+                    lambda text: any(
+                        l.strip() == "test_fp: PASS" for l in text.splitlines()
+                    )
+                )
+            else:
+                session.send(b"echo hi\n")
+                session.wait_for(
+                    lambda text: any(l.strip() == "hi" for l in text.splitlines())
+                )
             session.send(b"exit\n")
             # Respawn evidence: init's RESPAWN loop restarts terminal, which
             # execs a fresh busybox ash printing the banner again.  wait_for
@@ -695,7 +711,9 @@ def _run_product_cpu(args, cpus, archive, run_dir, budget, drain, dtb_factory):
 
     text = session.text
     timed_out = session.timed_out
-    accepted, why = parse_product_boot_evidence(text, check_shell_io=check_shell_io)
+    accepted, why = parse_product_boot_evidence(
+        text, check_shell_io=check_shell_io, test_fp_pass=(args.case == "fp")
+    )
     result = accepted and not timed_out and not child_exited_before_runner_stop
     errors = []
     if timed_out:
@@ -732,7 +750,7 @@ def run_boot(args, deadline_s=None, dtb_factory=None):
             print(f"FAIL: {err}", file=sys.stderr)
         return 1
 
-    if args.case == "product":
+    if args.case in ("product", "fp"):
         all_ok = True
         all_errors = []
         last_cmd = []
@@ -755,7 +773,7 @@ def run_boot(args, deadline_s=None, dtb_factory=None):
             errors=all_errors, extra={"case": args.case},
         )
         if all_ok:
-            print(f"PASS: user-runtime case=product cpus=1,2,4,8 ({run_dir})")
+            print(f"PASS: user-runtime case={args.case} cpus=1,2,4,8 ({run_dir})")
             return 0
         for err in all_errors:
             print(f"FAIL: {err}", file=sys.stderr)
@@ -854,7 +872,7 @@ def run_boot(args, deadline_s=None, dtb_factory=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", default="irq", choices=("irq", "asid", "smp", "migration", "product"))
+    parser.add_argument("--case", default="irq", choices=("irq", "asid", "smp", "migration", "product", "fp"))
     parser.add_argument("--image", required=True)
     parser.add_argument("--firmware", required=True)
     parser.add_argument("--elf", required=True)
