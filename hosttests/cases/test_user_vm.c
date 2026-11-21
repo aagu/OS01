@@ -16,6 +16,7 @@
 #include "test_framework.h"
 
 #include <errno.h>
+#include <setjmp.h>
 #include <stdint.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -42,6 +43,21 @@
 #define MAP_ANON_PRIVATE (MAP_PRIVATE | MAP_ANONYMOUS)
 
 /* ── Helpers ─────────────────────────────────────────────────── */
+
+static jmp_buf g_fatal_jb;
+static int g_fatal_armed;
+
+void vmm_gate_violation(const char *reason)
+{
+    (void)reason;
+    if (!g_fatal_armed) {
+        fprintf(stderr, "vmm_gate_violation outside armed test: %s\n",
+                reason ? reason : "(null)");
+        abort();
+    }
+    g_fatal_armed = 0;
+    longjmp(g_fatal_jb, 1);
+}
 
 static mm_t *new_mm(uint64_t heap_base)
 {
@@ -706,6 +722,116 @@ TEST_FUNC(test_transaction_policy_error_still_restores)
 
     aarch64_vm_native_leave();
     destroy_mm(mm);
+}
+
+TEST_FUNC(edit_quiesce_error_restores_context)
+{
+    user_vm_test_reset();
+    mm_t *mm = new_mm(HEAP_BASE);
+    int64_t mapped = test_mmap_call(mm, BASE, 0x1000, PROT_RW, MAP_ANON_PRIVATE);
+    assert_eq((int64_t)BASE, mapped);
+    tx_setup(mm);
+
+    pt_regs_t regs;
+    memset(&regs, 0, sizeof(regs));
+    regs.elr_el1 = 0x1234;
+    struct intr_event ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.origin = INTR_ORIGIN_USER;
+    ev.native_status = ((uint64_t)AARCH64_EC_DATA_ABORT_LOWER <<
+                        AARCH64_ESR_EC_SHIFT) |
+                       0x07ULL | AARCH64_ESR_ISS_WNR;
+    ev.fault_addr_valid = true;
+    ev.fault_addr = BASE;
+    assert_eq(0, aarch64_user_vm_fault(&regs, &ev));
+    assert_eq(1, user_vm_test_leaf_state(BASE));
+    uint64_t orig_pa = user_vm_test_leaf_pa(BASE);
+    uint32_t orig_vm = user_vm_test_leaf_vm(BASE);
+
+    struct task_struct *tsk = user_vm_test_task(0);
+    struct aarch64_user_task *owner = aarch64_user_task_owner(tsk);
+    assert_not_null(owner);
+
+    user_vm_test_set_tls(0x1111, 0x2222);
+    user_vm_test_set_irq(0);            /* entry IRQs enabled */
+    aarch64_vm_native_enter(&regs, SYS_munmap);
+
+    user_vm_test_set_quiesce_error(-EAGAIN);
+    uint64_t args[6] = { BASE, 0x1000, 0, 0, 0, 0 };
+    assert_eq(-EAGAIN, arch_syscall_user_vm(SYS_munmap, args));
+
+    assert_eq((uint64_t)(uintptr_t)mm->pgdir,
+              user_vm_test_installed_root());
+    assert_eq(0x1111, user_vm_test_live_tls(0));
+    assert_eq(0x2222, user_vm_test_live_tls(1));
+    assert_eq(0, user_vm_test_irq_masked());
+    assert_false(aarch64_vm_task_editing(tsk));
+    assert_eq(0ULL, owner->vm.edit_irq);
+    assert_eq(0ULL, owner->vm.edit_tpidr_el0);
+    assert_eq(0ULL, owner->vm.edit_tpidrro_el0);
+    assert_eq(0ULL, owner->vm.edit_root_pa);
+    assert_eq(1, user_vm_test_leaf_state(BASE));
+    assert_eq(orig_pa, user_vm_test_leaf_pa(BASE));
+    assert_eq(orig_vm, user_vm_test_leaf_vm(BASE));
+    assert_not_null(vm_area_lookup(mm, BASE));
+
+    /* Reset fault and retry with the same native authorization. */
+    user_vm_test_set_quiesce_error(0);
+    assert_eq(0, arch_syscall_user_vm(SYS_munmap, args));
+    assert_eq(0, user_vm_test_leaf_state(BASE));
+    assert_null(vm_area_lookup(mm, BASE));
+
+    aarch64_vm_native_leave();
+    destroy_mm(mm);
+}
+
+TEST_FUNC(edit_quiesce_busy_fails_stopped)
+{
+    int cases[2] = { -EBUSY, -EINVAL };
+    for (int i = 0; i < 2; i++) {
+        user_vm_test_reset();
+        mm_t *mm = new_mm(HEAP_BASE);
+        int64_t mapped = test_mmap_call(mm, BASE, 0x1000, PROT_RW,
+                                        MAP_ANON_PRIVATE);
+        assert_eq((int64_t)BASE, mapped);
+        tx_setup(mm);
+
+        pt_regs_t regs;
+        memset(&regs, 0, sizeof(regs));
+        regs.elr_el1 = 0x1234;
+        struct intr_event ev;
+        memset(&ev, 0, sizeof(ev));
+        ev.origin = INTR_ORIGIN_USER;
+        ev.native_status = ((uint64_t)AARCH64_EC_DATA_ABORT_LOWER <<
+                            AARCH64_ESR_EC_SHIFT) |
+                           0x07ULL | AARCH64_ESR_ISS_WNR;
+        ev.fault_addr_valid = true;
+        ev.fault_addr = BASE;
+        assert_eq(0, aarch64_user_vm_fault(&regs, &ev));
+        int installs_before = user_vm_test_root_installs();
+
+        user_vm_test_set_tls(0x5555, 0x6666);
+        user_vm_test_set_irq(0);
+        aarch64_vm_native_enter(&regs, SYS_munmap);
+        user_vm_test_set_quiesce_error(cases[i]);
+
+        uint64_t args[6] = { BASE, 0x1000, 0, 0, 0, 0 };
+        g_fatal_armed = 1;
+        int tripped = setjmp(g_fatal_jb);
+        if (tripped == 0) {
+            (void)arch_syscall_user_vm(SYS_munmap, args);
+        }
+        g_fatal_armed = 0;
+
+        assert_eq(1, tripped);
+        assert_eq(installs_before, user_vm_test_root_installs());
+        assert_eq(1, user_vm_test_irq_masked());
+        assert_eq(1, user_vm_test_leaf_state(BASE));
+        assert_not_null(vm_area_lookup(mm, BASE));
+
+        aarch64_vm_native_leave();
+        destroy_mm(mm);
+    }
 }
 
 TEST_FUNC(test_transaction_serial_interleaving_per_task)
@@ -2306,6 +2432,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_transaction_refuses_unverified_contexts),
     TEST_ENTRY(test_transaction_irq_depth_and_nesting_refused),
     TEST_ENTRY(test_transaction_policy_error_still_restores),
+    TEST_ENTRY(edit_quiesce_error_restores_context),
+    TEST_ENTRY(edit_quiesce_busy_fails_stopped),
     TEST_ENTRY(test_transaction_serial_interleaving_per_task),
     TEST_ENTRY(test_fault_entry_fills_and_refuses),
     TEST_ENTRY(test_map_image_page_records_source_and_ownership),

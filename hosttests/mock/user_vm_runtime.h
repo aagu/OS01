@@ -227,8 +227,10 @@ void user_vm_test_set_tls(uint64_t tpidr_el0, uint64_t tpidrro_el0);
 
 int      user_vm_test_irq_masked(void);
 int      user_vm_test_root_switches(void);
+int      user_vm_test_root_installs(void);
 uint64_t user_vm_test_installed_root(void);
 int      user_vm_test_tls_restores(void);
 uint64_t user_vm_test_live_tls(int which);
+void     user_vm_test_set_quiesce_error(int error);
 
 #endif /* OS01_USER_VM_RUNTIME_H */

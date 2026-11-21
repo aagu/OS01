@@ -415,6 +415,7 @@ static int      g_root_installs;
 static uint64_t g_installed_root;
 static uint64_t g_tls_live[2];
 static int      g_tls_restores;
+static int      g_quiesce_error;
 
 #define USER_VM_MOCK_TASKS 4
 struct task_struct {
@@ -469,12 +470,14 @@ void user_vm_test_set_tls(uint64_t tpidr_el0, uint64_t tpidrro_el0)
 
 int      user_vm_test_irq_masked(void)   { return g_irq_masked; }
 int      user_vm_test_root_switches(void){ return g_root_switches; }
+int      user_vm_test_root_installs(void){ return g_root_installs; }
 uint64_t user_vm_test_installed_root(void){ return g_installed_root; }
 int      user_vm_test_tls_restores(void) { return g_tls_restores; }
 uint64_t user_vm_test_live_tls(int which)
 {
     return (which == 0 || which == 1) ? g_tls_live[which] : 0;
 }
+void     user_vm_test_set_quiesce_error(int error) { g_quiesce_error = error; }
 
 unsigned long user_vm_test_irq_save(void)
 {
@@ -544,7 +547,7 @@ void aarch64_user_install_mm(const struct mm_struct *mm)
 int aarch64_user_mm_quiesce(struct mm_struct *mm)
 {
     (void)mm;
-    return 0;
+    return g_quiesce_error;
 }
 
 /* The AArch64 subset's served numbers: the four shared natives plus
@@ -599,6 +602,7 @@ void user_vm_test_reset(void)
     g_tls_live[0]  = 0;
     g_tls_live[1]  = 0;
     g_tls_restores = 0;
+    g_quiesce_error = 0;
     memset(g_mock_tasks, 0, sizeof(g_mock_tasks));
     current = &g_mock_tasks[0];
 }

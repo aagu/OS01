@@ -14,6 +14,8 @@
 #include <arch/aarch64/user_task.h>
 #include <arch/aarch64/user_vm.h>
 #include <arch/aarch64/user_vm_policy.h>  /* policy entry points */
+#include <arch/aarch64/vmm_gate.h>
+#include <arch/cpu.h>
 #include <arch/irq.h>
 #include <config/limits.h>
 #include <errno.h>
@@ -141,7 +143,27 @@ int aarch64_vm_edit_begin(mm_t *mm)
     aarch64_user_vm_save_tls(&owner->vm.edit_tpidr_el0,
                              &owner->vm.edit_tpidrro_el0);
     aarch64_user_restore_kernel_root();
-    aarch64_user_mm_quiesce(mm);
+    int rc = aarch64_user_mm_quiesce(mm);
+    if (rc != 0) {
+        if (rc == -EBUSY || rc == -EINVAL) {
+            /* Detached root is still busy or registration disappeared:
+             * fail-stop without re-publishing or enabling IRQs. */
+            vmm_gate_violation("aarch64_vm_edit_begin: quiesce failed");
+            for (;;)
+                arch_cpu_halt();
+        }
+        aarch64_user_install_mm(mm);
+        aarch64_user_vm_restore_tls(owner->vm.edit_tpidr_el0,
+                                    owner->vm.edit_tpidrro_el0);
+        arch_irq_state_t entry_irq = (arch_irq_state_t)owner->vm.edit_irq;
+        owner->vm.edit_active = false;
+        owner->vm.edit_irq = 0;
+        owner->vm.edit_tpidr_el0 = 0;
+        owner->vm.edit_tpidrro_el0 = 0;
+        owner->vm.edit_root_pa = 0;
+        arch_local_irq_restore(entry_irq);
+        return rc;
+    }
     aarch64_user_clear_tls();
     owner->vm.edit_active = true;         /* mark before IRQs on */
     arch_local_irq_enable();              /* policy runs with IRQs */
