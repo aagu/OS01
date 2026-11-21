@@ -37,15 +37,7 @@ $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)&: $(SYSROOT_STAMP) $(USER_RUNTIME_PREREQ
 	@+$(SHELL) -ec '\
 	  if [ -n "$(DRY_RUN)" ]; then \
 	    if [ -f "$(SYSROOT)/usr/lib/libc.a" ]; then \
-	      env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
-	        $(if $(COMPILER_LAUNCHER),COMPILER_LAUNCHER="$(COMPILER_LAUNCHER)") \
-	        $(if $(CCACHE_DIR),CCACHE_DIR="$(CCACHE_DIR)") \
-	        $(if $(CCACHE_BASEDIR),CCACHE_BASEDIR="$(CCACHE_BASEDIR)") \
-	        $(if $(CCACHE_COMPILERCHECK),CCACHE_COMPILERCHECK="$(CCACHE_COMPILERCHECK)") \
-	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
-	        -C user OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" \
-	        USER_RUNTIME_ARCHIVE="$(USER_RUNTIME_ARCHIVE)" \
-	        all SYSROOT_GENERATION_DIR="$(SYSROOT)" $(OS01_SUBMAKE_ARGS); \
+	      $(call os01_submake_cmd,user,USER_RUNTIME_ARCHIVE="$(USER_RUNTIME_ARCHIVE)" all SYSROOT_GENERATION_DIR="$(SYSROOT)" $(OS01_SUBMAKE_ARGS)); \
 	    else \
 	      echo "  [dry-run] user programs: skipped — bare tree lacks the sysroot a real build would provide"; \
 	    fi; \
@@ -61,15 +53,7 @@ $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)&: $(SYSROOT_STAMP) $(USER_RUNTIME_PREREQ
 	  rm -f "$(LOCK_DIR)/owner"; \
 	  rmdir "$(LOCK_DIR)" 2>/dev/null || true; \
 	  trap "rmdir \"$$lease\" 2>/dev/null || true" EXIT; \
-	  env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
-	    $(if $(COMPILER_LAUNCHER),COMPILER_LAUNCHER="$(COMPILER_LAUNCHER)") \
-	    $(if $(CCACHE_DIR),CCACHE_DIR="$(CCACHE_DIR)") \
-	    $(if $(CCACHE_BASEDIR),CCACHE_BASEDIR="$(CCACHE_BASEDIR)") \
-	    $(if $(CCACHE_COMPILERCHECK),CCACHE_COMPILERCHECK="$(CCACHE_COMPILERCHECK)") \
-	    MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" $(MAKE) MAKEOVERRIDES= \
-	    -C user OS01_PROFILE_FILE="$(OS01_PROFILE_FILE)" PROFILE="$(PROFILE)" \
-	    USER_RUNTIME_ARCHIVE="$(USER_RUNTIME_ARCHIVE)" \
-	    all SYSROOT_GENERATION_DIR="$(SYSROOT)" $(OS01_SUBMAKE_ARGS); \
+	  $(call os01_submake_cmd,user,USER_RUNTIME_ARCHIVE="$(USER_RUNTIME_ARCHIVE)" all SYSROOT_GENERATION_DIR="$(SYSROOT)" $(OS01_SUBMAKE_ARGS)); \
 	  for p in $(USER_PROGRAMS); do \
 	    cmp -s "$(USER_BUILD_DIR)/$$p.elf" "$(USER_ARTIFACT_DIR)/$$p.elf" || cp "$(USER_BUILD_DIR)/$$p.elf" "$(USER_ARTIFACT_DIR)/$$p.elf"; \
 	    test -f "$(USER_ARTIFACT_DIR)/$$p.elf" || { echo "ERROR: missing user artifact $$p.elf"; exit 1; }; \
