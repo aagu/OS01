@@ -12,6 +12,52 @@ LIBC_HOST_ORACLES := \
     $(TEST_BLD)/floatscan_oracle \
     $(TEST_BLD)/scanf_oracle \
     $(TEST_BLD)/time_oracle
+# ── libc completion: libm (base-algebra math subset) ──────────────
+# The sixteen public symbols live in the standalone usr/lib/libm.a,
+# built from libc/math/*.c.  The host test links the SAME production
+# sources, compiled host-native with every symbol renamed, so the host
+# glibc libm can never answer for the OS01 implementation.
+#
+# errno needs a rename too: the host's errno is a TLS symbol and the
+# OS01 one is a plain global, so linking both without the rename fails
+# with "TLS definition in ... section .tbss mismatches non-TLS
+# reference".  The rename works because -I$(LIBC_INC) puts OS01's own
+# errno.h (which declares a plain `extern int errno;` and defines no
+# macro) ahead of the host's, whose `#define errno (*__errno_location
+# ())` would otherwise win.
+OS01_LIBM_PREFIX_DEFS := \
+    -Dfabs=os01_fabs -Dfabsf=os01_fabsf \
+    -Dcopysign=os01_copysign -Dcopysignf=os01_copysignf \
+    -Dfloor=os01_floor -Dfloorf=os01_floorf \
+    -Dceil=os01_ceil -Dceilf=os01_ceilf \
+    -Dtrunc=os01_trunc -Dtruncf=os01_truncf \
+    -Dround=os01_round -Droundf=os01_roundf \
+    -Dfmod=os01_fmod -Dfmodf=os01_fmodf \
+    -Dsqrt=os01_sqrt -Dsqrtf=os01_sqrtf \
+    -Derrno=os01_errno
+
+OS01_LIBM_DIR   := $(TEST_BLD)/user-libm
+OS01_LIBM_SRCS := $(wildcard $(LIBC_SRC)/math/*.c)
+OS01_LIBM_OBJS := $(patsubst $(LIBC_SRC)/math/%.c,$(OS01_LIBM_DIR)/%.o,$(OS01_LIBM_SRCS))
+
+$(OS01_LIBM_DIR)/%.o: $(LIBC_SRC)/math/%.c
+	@mkdir -p $(OS01_LIBM_DIR)
+	$(HOST_CC) $(HOST_CFLAGS) $(OS01_LIBM_PREFIX_DEFS) $(LIBC_INC) -MMD -MP -c $< -o $@
+
+# The C++ linkage probe: it includes the PUBLIC math.h and calls fabs,
+# compiled with the same rename as the production objects.  The link
+# succeeds only when the header gives the declaration C linkage.
+$(TEST_BLD)/libm_cxx_probe.o: $(TEST_MOCK)/libm_cxx_probe.cpp
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) -x c++ -std=c++17 -ffreestanding -fno-exceptions -fno-rtti \
+	    $(OS01_LIBM_PREFIX_DEFS) $(LIBC_INC) -c $< -o $@
+
+# The link group: every renamed production object plus the probe.  The
+# generated rule (mk/generated/test-link-rules.mk) links the test object
+# first and the group after it, so the group's symbols resolve.
+LINK_CFLAGS_libc-math = $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) $(OS01_LIBM_PREFIX_DEFS)
+
+LINK_GROUP_libc-math := $(OS01_LIBM_OBJS) $(TEST_BLD)/libm_cxx_probe.o
 
 
 
@@ -545,6 +591,7 @@ $(TEST_BLD)/test_libc_float_parse.elf: $(TEST_BLD)/test_libc_float_parse.o \
         $(TEST_BLD)/user-float/fabs_probe.o \
         $(TEST_BLD)/user-int/strtod.o \
         $(TEST_BLD)/user-int/floatscan.o \
+        $(OS01_LIBM_DIR)/fabs.o \
         $(OS01_LIBC_STREAM_OBJS) \
         $(TEST_BLD)/libc_stream_runtime.o
 	$(HOST_CC) -o $@ $^

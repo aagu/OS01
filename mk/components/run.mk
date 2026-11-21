@@ -2309,4 +2309,5 @@ test-libc-api-audit: $(LIBC_API_AUDIT_PREREQ)
 	    $(if $(strip $(LIBC_GROUPS)),--groups $(LIBC_GROUPS)) \
 	    --include-dir $(OS01_ROOT)/libc/include \
 	    $(if $(wildcard $(LIBC_BUILD_DIR)/lib/libc.a),--libc-archive $(LIBC_BUILD_DIR)/lib/libc.a) \
+	    $(if $(wildcard $(LIBC_BUILD_DIR)/lib/libm.a),--libm-archive $(LIBC_BUILD_DIR)/lib/libm.a) \
 	    --libk-archive $(LIBC_BUILD_DIR)/lib/libk.a

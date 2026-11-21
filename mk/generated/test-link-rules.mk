@@ -54,6 +54,12 @@ $(TEST_BLD)/test_gpt_bootdev.o: $(TEST_CASES)/test_gpt_bootdev.c
 $(TEST_BLD)/test_gpt_bootdev.elf: $(TEST_BLD)/test_gpt_bootdev.o $(LINK_GROUP_gpt-bootdev)
 	$(HOST_CC) $(LINK_LDFLAGS_gpt-bootdev) -o $@ $^
 
+$(TEST_BLD)/test_libc_math.o: $(TEST_CASES)/test_libc_math.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_libc-math)),$(LINK_CFLAGS_libc-math),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_libc_math.elf: $(TEST_BLD)/test_libc_math.o $(LINK_GROUP_libc-math)
+	$(HOST_CC) $(LINK_LDFLAGS_libc-math) -o $@ $^
+
 $(TEST_BLD)/test_sched_aarch64_migration.o: $(TEST_CASES)/test_sched_aarch64_migration.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_sched-aarch64-migration)),$(LINK_CFLAGS_sched-aarch64-migration),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@

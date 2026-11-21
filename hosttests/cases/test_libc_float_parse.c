@@ -22,10 +22,13 @@
  *
  * Layer 4 — the absolute value of a binary64: fabs() clears the sign
  * bit, so -0.0 becomes +0.0, the infinities lose their sign and a NaN
- * keeps its payload.  The header inline is renamed in this translation
- * unit, so the host libc's fabs can never answer for it, and a SECOND
- * translation unit (the same source compiled with -DOS01_FABS_PROBE_TU
- * and -fno-builtin) links against the same header.
+ * keeps its payload.  fabs() is no longer a header inline: it is one of
+ * the sixteen symbols of the standalone usr/lib/libm.a.  The
+ * translation unit renames it to os01_fabs, so the host libc's fabs can
+ * never answer for it, and the renamed production object is linked into
+ * this binary.  A SECOND translation unit (the same source compiled
+ * with -DOS01_FABS_PROBE_TU and -fno-builtin) links against the same
+ * declaration.
  */
 
 #include "test_framework.h"
@@ -246,10 +249,11 @@ TEST_FUNC(test_errno_and_consumption_contract) {
  *   NaN    → NaN      (the payload survives, the sign bit is cleared)
  *   -7.5   → +7.5
  *
- * The header inline is renamed to os01_fabs in this translation unit (see
- * the make rule), so the host libc's fabs can never answer for it: the
- * link would fail if <math.h> did not carry the implementation.  The
- * signbit()/isfinite() macros of the same header are used unchanged. */
+ * fabs() is renamed to os01_fabs in this translation unit (see the make
+ * rule), so the host libc's fabs can never answer for it: the link
+ * resolves the reference to the renamed production object of
+ * usr/lib/libm.a.  The signbit()/isfinite() macros of the same header
+ * are used unchanged. */
 TEST_FUNC(fabs_bit_contract) {
     union { double d; uint64_t u; } v;
 

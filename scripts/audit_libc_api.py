@@ -161,6 +161,23 @@ vsnprintf vsprintf
     """.split()
 )
 
+# ── The base-algebra math set ─────────────────────────────────────────
+# The sixteen symbols live in the standalone usr/lib/libm.a (the vendored
+# musl math subset), NOT in libc.a and NOT in libk.a: the kernel stays
+# FP-free.  This list is the single source of truth for the header
+# declaration check (the api group) AND for the archive ownership check
+# (the --libm-archive audit), so the two can never disagree.
+LIBM_SYMBOLS: tuple[str, ...] = (
+    "fabs", "fabsf",
+    "copysign", "copysignf",
+    "floor", "floorf",
+    "ceil", "ceilf",
+    "trunc", "truncf",
+    "round", "roundf",
+    "fmod", "fmodf",
+    "sqrt", "sqrtf",
+)
+
 # ── The api group inventory ────────────────────────────────────────────
 # header -> the public functions the header declares.  These are the
 # user-facing interfaces the completion plan covers.  The script verifies
@@ -234,12 +251,7 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "posix_memalign",
         "aligned_alloc",
     ],
-    "math.h": [
-        # NOTE: fabs() is a header inline (a static inline in math.h), so it
-        # is not an externally linked function and the audit does not
-        # require the archive to export it.  The interface inventory of this
-        # header therefore stays empty on purpose.
-    ],
+    "math.h": list(LIBM_SYMBOLS),
     "mntent.h": [
         "setmntent",
         "getmntent",
@@ -1387,7 +1399,8 @@ def infer_profile(*paths: str | None) -> str | None:
 
 
 def audit(include_dir: str, libc_archive: str | None, libk_archive: str | None,
-          profile: str = "x86_64-clang", groups: list[str] | None = None) -> int:
+          profile: str = "x86_64-clang", groups: list[str] | None = None,
+          libm_archive: str | None = None) -> int:
     errors: list[str] = []
     notes: list[str] = []
     if groups is None:
@@ -1493,6 +1506,38 @@ def audit(include_dir: str, libc_archive: str | None, libk_archive: str | None,
                     f"symbols: {', '.join(gained)}"
                 )
 
+    if libm_archive:
+        # The math symbols are owned by libm.a and by nothing else.  The
+        # check is an EXCLUSIVITY check: libm.a must export all sixteen,
+        # and neither libc.a nor libk.a may define any of them (the
+        # kernel stays FP-free and the user libc must not shadow the
+        # archive with a second definition).
+        libm_syms = archive_exports(libm_archive)
+        libm_want = set(LIBM_SYMBOLS)
+        missing = sorted(libm_want - libm_syms)
+        print(f"[audit] libm '{libm_archive}': "
+              f"{len(libm_want & libm_syms)}/{len(libm_want)} "
+              f"math symbols exported")
+        if missing:
+            errors.append(
+                f"libm archive is missing required exports: "
+                f"{', '.join(missing)}"
+            )
+        for label, path, syms in (
+            ("user libc", libc_archive,
+             archive_exports(libc_archive) if libc_archive else set()),
+            ("libk", libk_archive,
+             archive_exports(libk_archive) if libk_archive else set()),
+        ):
+            if not path:
+                continue
+            overlap = sorted(libm_want & syms)
+            if overlap:
+                errors.append(
+                    f"{label} archive must not define the libm symbols: "
+                    f"{', '.join(overlap)}"
+                )
+
     for note in notes:
         print(f"[audit] note: {note}")
     if errors:
@@ -1574,6 +1619,10 @@ def main(argv: list[str]) -> int:
     ap.add_argument("--include-dir", default=os.path.join(REPO_ROOT, "libc", "include"))
     ap.add_argument("--libc-archive", default="")
     ap.add_argument("--libk-archive", default="")
+    ap.add_argument("--libm-archive", default="",
+                    help="the standalone libm archive that owns the sixteen "
+                         "math symbols; they must be exported here and "
+                         "defined in neither libc.a nor libk.a")
     ap.add_argument("--profile", default="",
                     help="build profile whose libk baseline applies "
                          "(default: inferred from the archive path, "
@@ -1637,7 +1686,8 @@ def main(argv: list[str]) -> int:
         return 0
     if args.audit:
         return audit(args.include_dir, args.libc_archive or None,
-                     args.libk_archive or None, profile, groups)
+                     args.libk_archive or None, profile, groups,
+                     args.libm_archive or None)
     return list_manifest(profile)
 
 

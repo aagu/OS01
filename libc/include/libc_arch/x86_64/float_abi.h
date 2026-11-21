@@ -26,9 +26,14 @@ union fs_ldshape {
     } i;
 };
 
+/* The absolute value is the number with the sign bit cleared and every
+ * other bit unchanged, so it is computed with integer bit operations:
+ * the scanner core never asks the FPU to do arithmetic. */
 static inline fs_float_t fs_fabs(fs_float_t x)
 {
-    return __builtin_fabsl(x);
+    union fs_ldshape ux = {x};
+    ux.i.se &= 0x7fff;          /* clear the x87 80-bit sign bit */
+    return ux.f;
 }
 
 static inline fs_float_t fs_copysignl(fs_float_t x, fs_float_t y)
