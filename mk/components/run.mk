@@ -11,33 +11,15 @@
 # instead of "No rule to make target".
 
 # ── Firmware (x86 run targets) ─────────────────────────────────
-# Root-owned, profile-private real-file rule. OVMF_FIRMWARE_SOURCE accepts
-# ONLY an https:// URL (wget to "$@.tmp", then an atomic rename) or an
-# existing absolute local path (content-guarded copy). Every other value —
-# relative path, bad scheme, missing file — is rejected with a clear error
-# BEFORE any download/copy. wget's exit status is checked via set -e, so a
-# failed download never leaves a half-written file (and never reaches the
-# mv). Never calls boot/uefi for firmware. Capability-gated on rootfs: the
-# x86-only OVMF_FIRMWARE variable is undefined for aarch64-clang, so without
-# the guard this rule expands to an empty-target rule with a recipe — a
-# make-version-sensitive parse hazard.
+# Root-owned, profile-private real-file rule. Same acquisition contract as
+# the aarch64 QEMU_EFI rule (mk/components/image.mk) — both expand the
+# firmware_fetch_cmd canned recipe defined there. Capability-gated on
+# rootfs: the x86-only OVMF_FIRMWARE variable is undefined for
+# aarch64-clang, so without the guard this rule expands to an empty-target
+# rule with a recipe — a make-version-sensitive parse hazard.
 ifeq ($(filter rootfs,$(PROFILE_CAPABILITIES)),rootfs)
 $(OVMF_FIRMWARE):
-	@set -e; \
-	mkdir -p "$(dir $@)"; \
-	case "$(OVMF_FIRMWARE_SOURCE)" in \
-	https://*) \
-	  wget -q -O "$@.tmp" "$(OVMF_FIRMWARE_SOURCE)"; \
-	  mv "$@.tmp" "$@";; \
-	/*) \
-	  test -f "$(OVMF_FIRMWARE_SOURCE)" || { \
-	    echo "ERROR: OVMF_FIRMWARE_SOURCE '$(OVMF_FIRMWARE_SOURCE)' is not an existing file" >&2; \
-	    exit 1; }; \
-	  cmp -s "$(OVMF_FIRMWARE_SOURCE)" "$@" || cp "$(OVMF_FIRMWARE_SOURCE)" "$@";; \
-	*) \
-	  echo "ERROR: OVMF_FIRMWARE_SOURCE '$(OVMF_FIRMWARE_SOURCE)' must be an https:// URL or an existing absolute local file path" >&2; \
-	  exit 1;; \
-	esac
+	@$(call firmware_fetch_cmd,OVMF_FIRMWARE_SOURCE)
 
 # $(OVMF_FIRMWARE) is absolute (BUILD_DIR is profile-absolute), so the same
 # on-disk file is also reachable through its relative spelling. This alias

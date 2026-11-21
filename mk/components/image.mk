@@ -15,6 +15,57 @@
 # `ifdef AARCH64_UEFI_DISK` gates below keep aarch64-only rules out of
 # x86_64-clang now that both profiles share the `uefi` capability.
 
+# ── UEFI firmware acquisition (shared: x86 OVMF + aarch64 QEMU_EFI) ──
+# One canned recipe for both per-arch firmware rules (this file's aarch64
+# rule below and the x86 OVMF rule in mk/components/run.mk). The contract:
+# the *_SOURCE variable accepts ONLY an https:// URL (wget to "$@.tmp", then
+# an atomic rename) or an existing absolute local file path (content-guarded
+# copy). Every other value — relative path, bad scheme, missing file — is
+# rejected with a clear error BEFORE any download/copy. wget's exit status
+# is checked via set -e, so a failed download never leaves a half-written
+# file (and never reaches the mv). Never calls boot/uefi for firmware.
+#   $(1) = NAME of the *_SOURCE variable (indirect, so the error messages
+#          spell the variable the user actually set); the target path is $@
+# Every newline in the body is backslash-escaped, so the expansion stays one
+# logical shell line (same shape as os01_submake_cmd); call sites keep a
+# single @-prefixed recipe line. Capability gates stay at the call sites —
+# on a profile whose firmware variable is undefined an unguarded rule would
+# expand to an empty-target rule with a recipe (a make-version-sensitive
+# parse hazard).
+define firmware_fetch_cmd
+set -e; \
+mkdir -p "$(dir $@)"; \
+case "$($(1))" in \
+https://*) \
+  wget -q -O "$@.tmp" "$($(1))"; \
+  mv "$@.tmp" "$@";; \
+/*) \
+  test -f "$($(1))" || { \
+    echo "ERROR: $(1) '$($(1))' is not an existing file" >&2; \
+    exit 1; }; \
+  cmp -s "$($(1))" "$@" || cp "$($(1))" "$@";; \
+*) \
+  echo "ERROR: $(1) '$($(1))' must be an https:// URL or an existing absolute local file path" >&2; \
+  exit 1;; \
+esac
+endef
+
+# aarch64-only companion: QEMU `virt` machine cfi.pflash01 requires the
+# block backend to be exactly 64 MiB (67108864 bytes) — edk2-nightly
+# distributes the combined CODE+VARS image either pre-padded or code-only
+# (~2-3 MiB), and any source file smaller than 64 MiB causes qemu to abort
+# with `requires 67108864 bytes, pflash0 block backend provides N bytes`.
+# Normalize the size after every fetch/copy so the QEMU topology in
+# mk/components/run.mk works regardless of upstream packaging. The x86 OVMF
+# rule does not need this step.
+define firmware_size_normalize_64m
+sz="$$(stat -c '%s' "$@")"; \
+if [ "$$sz" != "67108864" ]; then \
+  echo "  [aarch64-uefi] QEMU_EFI.fd is $$sz bytes, truncating/padding to 64 MiB for cfi.pflash01"; \
+  truncate -s 64M "$@"; \
+fi
+endef
+
 # ── Host mkdisk binary (profile-private: build/<profile>/host-tools) ──
 HOST_MKDISK := $(BUILD_DIR)/host-tools/mkdisk
 
@@ -197,45 +248,16 @@ $(BUILD_DIR)/artifacts/kernel.elf: $(LIBC_BUILD_DIR)/lib/libk.a FORCE
 	@cmp -s $(KERNEL_BUILD_DIR)/kernel.elf $@ || cp $(KERNEL_BUILD_DIR)/kernel.elf $@
 
 # ── aarch64 UEFI firmware (profile build dir) ───────────────
-# Mirrors the x86 OVMF contract (mk/components/run.mk):
-#   AARCH64_UEFI_FIRMWARE_SOURCE accepts ONLY an https:// URL
-#   (wget to "$@.tmp", then atomic rename) or an existing absolute local
-#   path (content-guarded copy). Every other value is rejected with a clear
-#   error before any download/copy, so a missing or misspelled source
-#   never reaches QEMU and never leaves a half-written file (and never
-#   reaches the mv). Capability-gated on uefi: the aarch64-only
-#   AARCH64_UEFI_FIRMWARE variable is undefined for x86_64-clang, so
-#   without the guard this rule expands to an empty-target rule with a
-#   recipe — a make-version-sensitive parse hazard.
+# Same acquisition contract as the x86 OVMF rule (mk/components/run.mk) —
+# both expand the firmware_fetch_cmd canned recipe above, and this rule
+# appends the 64 MiB cfi.pflash01 size normalization. Capability-gated on
+# uefi: the aarch64-only AARCH64_UEFI_FIRMWARE variable is undefined for
+# x86_64-clang, so without the guard this rule expands to an empty-target
+# rule with a recipe — a make-version-sensitive parse hazard.
 ifdef AARCH64_UEFI_DISK
 $(AARCH64_UEFI_FIRMWARE):
-	@set -e; \
-	mkdir -p "$(dir $@)"; \
-	case "$(AARCH64_UEFI_FIRMWARE_SOURCE)" in \
-	https://*) \
-	  wget -q -O "$@.tmp" "$(AARCH64_UEFI_FIRMWARE_SOURCE)"; \
-	  mv "$@.tmp" "$@";; \
-	/*) \
-	  test -f "$(AARCH64_UEFI_FIRMWARE_SOURCE)" || { \
-	    echo "ERROR: AARCH64_UEFI_FIRMWARE_SOURCE '$(AARCH64_UEFI_FIRMWARE_SOURCE)' is not an existing file" >&2; \
-	    exit 1; }; \
-	  cmp -s "$(AARCH64_UEFI_FIRMWARE_SOURCE)" "$@" || cp "$(AARCH64_UEFI_FIRMWARE_SOURCE)" "$@";; \
-	*) \
-	  echo "ERROR: AARCH64_UEFI_FIRMWARE_SOURCE '$(AARCH64_UEFI_FIRMWARE_SOURCE)' must be an https:// URL or an existing absolute local file path" >&2; \
-	  exit 1;; \
-	esac; \
-	# QEMU `virt` machine cfi.pflash01 requires the block backend to be
-	# exactly 64 MiB (67108864 bytes) — edk2-nightly distributes the
-	# combined CODE+VARS image either pre-padded or code-only (~2-3 MiB),
-	# and any source file smaller than 64 MiB causes qemu to abort with
-	# `requires 67108864 bytes, pflash0 block backend provides N bytes`.
-	# Normalize the size after every fetch/copy so the QEMU topology in
-	# mk/components/run.mk works regardless of upstream packaging.
-	@sz="$$(stat -c '%s' "$@")"; \
-	if [ "$$sz" != "67108864" ]; then \
-	  echo "  [aarch64-uefi] QEMU_EFI.fd is $$sz bytes, truncating/padding to 64 MiB for cfi.pflash01"; \
-	  truncate -s 64M "$@"; \
-	fi
+	@$(call firmware_fetch_cmd,AARCH64_UEFI_FIRMWARE_SOURCE)
+	@$(call firmware_size_normalize_64m)
 
 # $(AARCH64_UEFI_FIRMWARE) is absolute (BUILD_DIR is profile-absolute), so the
 # same on-disk file is also reachable through its relative spelling. This
