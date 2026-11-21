@@ -1,9 +1,12 @@
 #!/usr/bin/env python3
 """Flake ledger report: summarize per-suite runs/fails/consecutive-fail streaks.
 
-Reads local `build/*/logs/tests/**/result.json` archives or (with `--from-ci N`)
-downloads artifacts from the last N scheduled `ci.yml` runs via `gh`.
-Always exits 0 (reporting tool, never a gate).
+Reads local `build/*/logs/tests/**/result.json` archives, CI artifacts
+(with `--from-ci N`), or fragment/ledger files (with `--merge FILE`), and
+combines them with the in-repo ledger (`config/flake-ledger.json`).
+
+Report mode always exits 0 (reporting tool, never a gate).  Ledger write
+mode (`--update-ledger`) refuses to overwrite a malformed ledger.
 """
 
 from __future__ import annotations
@@ -15,6 +18,15 @@ import subprocess
 import sys
 import tempfile
 from typing import Any, Callable, Sequence, TextIO
+
+# Invoked as a script by mk/components/run.mk — put the repo root on sys.path
+# so the sibling ledger module resolves the same way in both entry paths.
+_ROOT = Path(__file__).resolve().parents[1]
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
+from qemutests import flake_ledger
+from qemutests.flake_ledger import Ledger, LedgerRun
 
 QUARANTINE_STREAK_THRESHOLD = 3
 
@@ -38,9 +50,13 @@ def collect_result_files(paths: Sequence[Path]) -> list[Path]:
     return sorted(found)
 
 
-def parse_results(result_files: Sequence[Path]) -> dict[str, list[tuple[str, bool]]]:
-    """Parse result.json files into chronological (timestamp, passed) lists per suite."""
-    runs_by_suite: dict[str, list[tuple[str, str, bool]]] = {}
+def runs_from_result_files(
+    result_files: Sequence[Path],
+    source: str = "local",
+    ci_run_id: int | None = None,
+) -> list[LedgerRun]:
+    """Parse result.json files into ledger runs."""
+    runs: list[LedgerRun] = []
     for path in result_files:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -48,6 +64,7 @@ def parse_results(result_files: Sequence[Path]) -> dict[str, list[tuple[str, boo
             continue
         if not isinstance(data, dict):
             continue
+
         suite = data.get("suite")
         if not isinstance(suite, str) or not suite.strip():
             suite = path.parent.parent.name if path.parent.parent.name else "unknown"
@@ -57,42 +74,61 @@ def parse_results(result_files: Sequence[Path]) -> dict[str, list[tuple[str, boo
         if not isinstance(ts, str):
             ts = str(ts)
 
-        if "status" in data:
-            passed = data["status"] == "PASS"
+        if isinstance(data.get("status"), str) and data["status"].strip():
+            status = data["status"].strip()
         elif "ok" in data:
-            passed = bool(data["ok"])
+            status = "PASS" if bool(data["ok"]) else "FAIL"
         else:
-            passed = False
+            status = "FAIL"
 
-        runs_by_suite.setdefault(suite, []).append((ts, str(path), passed))
+        cpu_count = data.get("cpu_count")
+        runs.append(
+            LedgerRun(
+                suite=suite,
+                run_id=str(data.get("run_id") or path.parent.name),
+                utc_started_at=ts,
+                status=status,
+                profile=str(data.get("profile") or ""),
+                cpu_count=cpu_count if isinstance(cpu_count, int) else None,
+                git_revision=str(data.get("git_revision") or ""),
+                source=source,
+                ci_run_id=ci_run_id,
+            )
+        )
+    return runs
 
-    ordered: dict[str, list[tuple[str, bool]]] = {}
-    for suite, items in runs_by_suite.items():
-        items.sort(key=lambda item: (item[0], item[1]))
-        ordered[suite] = [(ts, ok) for ts, _, ok in items]
-    return ordered
 
+def summarize_suites(
+    runs: Sequence[LedgerRun], decisions: dict[str, dict[str, str]]
+) -> list[dict[str, Any]]:
+    """Compute runs, fails, recent consecutive failures, and quarantine status."""
+    by_suite: dict[str, list[LedgerRun]] = {}
+    for run in runs:
+        by_suite.setdefault(run.suite, []).append(run)
+    for suite in decisions:
+        by_suite.setdefault(suite, [])
 
-def summarize_suites(runs_by_suite: dict[str, list[tuple[str, bool]]]) -> list[dict[str, Any]]:
-    """Compute runs, fails, recent consecutive failures, and quarantine status per suite."""
     rows: list[dict[str, Any]] = []
-    for suite in sorted(runs_by_suite):
-        items = runs_by_suite[suite]
-        runs = len(items)
-        fails = sum(1 for _, ok in items if not ok)
+    for suite in sorted(by_suite):
+        items = sorted(by_suite[suite], key=lambda run: (run.utc_started_at, run.run_id))
         consec_fails = 0
-        for _, ok in reversed(items):
-            if not ok:
-                consec_fails += 1
-            else:
+        for run in reversed(items):
+            if run.passed:
                 break
+            consec_fails += 1
+        decision = flake_ledger.normalize_decision((decisions.get(suite) or {}).get("decision"))
+        candidate = consec_fails >= QUARANTINE_STREAK_THRESHOLD
         rows.append(
             {
                 "suite": suite,
-                "runs": runs,
-                "fails": fails,
+                "runs": len(items),
+                "fails": sum(1 for run in items if not run.passed),
                 "consec_fails": consec_fails,
-                "quarantine_candidate": consec_fails >= QUARANTINE_STREAK_THRESHOLD,
+                "quarantine_candidate": candidate,
+                "decision": decision,
+                "decision_note": str((decisions.get(suite) or {}).get("note") or ""),
+                "decided_at": str((decisions.get(suite) or {}).get("decided_at") or ""),
+                "pending_adjudication": candidate and decision == "open",
             }
         )
     return rows
@@ -100,19 +136,41 @@ def summarize_suites(runs_by_suite: dict[str, list[tuple[str, bool]]]) -> list[d
 
 def render_report(rows: Sequence[dict[str, Any]], out: TextIO) -> None:
     """Render TSV summary table and any QUARANTINE-CANDIDATE notices."""
-    out.write("SUITE\tRUNS\tFAILS\tCONSEC_FAILS\tSTATUS\n")
+    out.write("SUITE\tRUNS\tFAILS\tCONSEC_FAILS\tSTATUS\tDECISION\n")
     for row in rows:
         status = "QUARANTINE-CANDIDATE" if row["quarantine_candidate"] else "OK"
         out.write(
-            f"{row['suite']}\t{row['runs']}\t{row['fails']}\t{row['consec_fails']}\t{status}\n"
+            f"{row['suite']}\t{row['runs']}\t{row['fails']}\t{row['consec_fails']}"
+            f"\t{status}\t{row['decision']}\n"
         )
+    pending = [row for row in rows if row["pending_adjudication"]]
+    if pending:
+        out.write("PENDING-ADJUDICATION\tSUITE\tCONSEC_FAILS\tDECISION\n")
+        for row in pending:
+            out.write(
+                f"PENDING-ADJUDICATION\t{row['suite']}\t{row['consec_fails']}\t{row['decision']}\n"
+            )
+
+
+def render_json_report(
+    rows: Sequence[dict[str, Any]], out: TextIO, meta: dict[str, Any]
+) -> None:
+    """Render the machine-readable report."""
+    payload = {
+        "schema_version": flake_ledger.LEDGER_SCHEMA_VERSION,
+        "quarantine_threshold": QUARANTINE_STREAK_THRESHOLD,
+        **meta,
+        "suites": list(rows),
+        "pending_adjudication": [row["suite"] for row in rows if row["pending_adjudication"]],
+    }
+    out.write(json.dumps(payload, indent=2, sort_keys=True, ensure_ascii=False) + "\n")
 
 
 def _fetch_ci_logs(
     limit: int,
     dest_root: Path,
     gh_runner: Callable[..., subprocess.CompletedProcess[str]],
-) -> list[Path]:
+) -> list[tuple[Path, int]]:
     list_cmd = [
         "gh",
         "run",
@@ -136,7 +194,7 @@ def _fetch_ci_logs(
         print(f"flake_report: warning: invalid gh run list JSON: {exc}", file=sys.stderr)
         return []
 
-    downloaded: list[Path] = []
+    downloaded: list[tuple[Path, int]] = []
     for item in runs:
         run_id = item.get("databaseId")
         if run_id is None:
@@ -146,7 +204,7 @@ def _fetch_ci_logs(
         dl_cmd = ["gh", "run", "download", str(run_id), "--dir", str(run_dir)]
         dl_res = gh_runner(dl_cmd, capture_output=True, text=True, check=False)
         if dl_res.returncode == 0:
-            downloaded.append(run_dir)
+            downloaded.append((run_dir, int(run_id)))
         else:
             print(
                 f"flake_report: warning: gh run download {run_id} failed: {dl_res.stderr.strip()}",
@@ -162,10 +220,39 @@ def main(
     gh_runner: Callable[..., subprocess.CompletedProcess[str]] | None = None,
     out: TextIO | None = None,
     root: str | Path = ".",
+    ledger_path: str | Path | None = None,
+    merge_paths: Sequence[str | Path] | None = None,
+    update_ledger: bool = False,
+    emit_fragment: str | Path | None = None,
+    fmt: str = "table",
 ) -> int:
-    """Summarize flake runs from local paths or CI artifacts; always exits 0."""
+    """Summarize flake runs from the ledger, local paths or CI artifacts.
+
+    Report mode always exits 0.  Ledger write mode exits 1 (without
+    touching the file) when the ledger cannot be parsed.
+    """
     stream = out if out is not None else sys.stdout
     runner = gh_runner if gh_runner is not None else subprocess.run
+
+    root_path = Path(root)
+    ledger_file = (
+        Path(ledger_path) if ledger_path else root_path / flake_ledger.LEDGER_RELATIVE_PATH
+    )
+
+    ledger, ledger_error = flake_ledger.load_ledger(ledger_file)
+    if ledger_error:
+        print(f"flake_report: warning: {ledger_error}", file=sys.stderr)
+
+    discovered: list[LedgerRun] = []
+    source_counts = {"local": 0, "ci": 0, "merged": 0}
+
+    for merge_path in merge_paths or []:
+        runs, error = flake_ledger.load_fragment(Path(merge_path))
+        if error:
+            print(f"flake_report: warning: {error}", file=sys.stderr)
+            continue
+        discovered.extend(runs)
+        source_counts["merged"] += len(runs)
 
     if from_ci is not None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -174,22 +261,56 @@ def main(
             except OSError as exc:
                 print(f"flake_report: warning: gh unavailable: {exc}", file=sys.stderr)
                 ci_dirs = []
-            result_files = collect_result_files(ci_dirs)
-            runs_by_suite = parse_results(result_files)
-            rows = summarize_suites(runs_by_suite)
-            render_report(rows, stream)
-        return 0
-
-    if paths:
-        scan_paths = [Path(p) for p in paths]
+            for ci_dir, ci_run_id in ci_dirs:
+                ci_runs = runs_from_result_files(
+                    collect_result_files([ci_dir]), source="ci", ci_run_id=ci_run_id
+                )
+                discovered.extend(ci_runs)
+                source_counts["ci"] += len(ci_runs)
     else:
-        build_dir = Path(root) / "build"
-        scan_paths = sorted(build_dir.glob("*/logs/tests")) if build_dir.is_dir() else []
+        if paths:
+            scan_paths = [Path(p) for p in paths]
+        else:
+            build_dir = root_path / "build"
+            scan_paths = sorted(build_dir.glob("*/logs/tests")) if build_dir.is_dir() else []
+        local_runs = runs_from_result_files(collect_result_files(scan_paths), source="local")
+        discovered.extend(local_runs)
+        source_counts["local"] += len(local_runs)
 
-    result_files = collect_result_files(scan_paths)
-    runs_by_suite = parse_results(result_files)
-    rows = summarize_suites(runs_by_suite)
-    render_report(rows, stream)
+    if emit_fragment:
+        flake_ledger.write_fragment(Path(emit_fragment), discovered)
+
+    combined = flake_ledger.merge_runs(ledger.runs, discovered)
+    rows = summarize_suites(combined, ledger.decisions)
+    meta = {
+        "ledger": {
+            "path": str(ledger_file),
+            "present": ledger.present,
+            "runs": len(ledger.runs),
+            "updated_at": ledger.updated_at,
+        },
+        "sources": source_counts,
+    }
+    if fmt == "json":
+        render_json_report(rows, stream, meta)
+    else:
+        render_report(rows, stream)
+
+    if update_ledger:
+        if ledger_error:
+            print(
+                "flake_report: error: refusing to overwrite an unreadable ledger: "
+                f"{ledger_error}",
+                file=sys.stderr,
+            )
+            return 1
+        merged = Ledger(
+            runs=combined,
+            decisions=ledger.decisions,
+            updated_at=flake_ledger.utc_now(),
+            present=True,
+        )
+        flake_ledger.save_ledger(merged, ledger_file)
     return 0
 
 
@@ -198,8 +319,46 @@ def cli_main(argv: list[str] | None = None) -> int:
     parser.add_argument("paths", nargs="*", help="Optional log directories or result.json paths")
     parser.add_argument("--from-ci", type=int, default=None, help="Fetch last N scheduled CI runs via gh")
     parser.add_argument("--root", default=".", help="Repository root for default build/*/logs/tests scan")
+    parser.add_argument(
+        "--ledger",
+        default=None,
+        help="Ledger file (default: <root>/config/flake-ledger.json)",
+    )
+    parser.add_argument(
+        "--merge",
+        action="append",
+        default=None,
+        dest="merge",
+        help="Merge a fragment/ledger JSON file into the report (repeatable)",
+    )
+    parser.add_argument(
+        "--update-ledger",
+        action="store_true",
+        help="Write the merged ledger back to the ledger file",
+    )
+    parser.add_argument(
+        "--emit-fragment",
+        default=None,
+        help="Write the newly discovered runs as a fragment JSON file",
+    )
+    parser.add_argument(
+        "--format",
+        choices=("table", "json"),
+        default="table",
+        dest="fmt",
+        help="Report format (default: table)",
+    )
     args = parser.parse_args(argv)
-    return main(args.paths or None, from_ci=args.from_ci, root=args.root)
+    return main(
+        args.paths or None,
+        from_ci=args.from_ci,
+        root=args.root,
+        ledger_path=args.ledger,
+        merge_paths=args.merge,
+        update_ledger=args.update_ledger,
+        emit_fragment=args.emit_fragment,
+        fmt=args.fmt,
+    )
 
 
 if __name__ == "__main__":

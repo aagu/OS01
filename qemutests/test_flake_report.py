@@ -57,7 +57,7 @@ class FlakeReportTests(unittest.TestCase):
             _write_result(base / "network" / "20261111-1", "network", "PASS", "2026-11-11T01:00:00Z")
 
             buf = io.StringIO()
-            rc = flake_report.main([root], out=buf)
+            rc = flake_report.main([root], out=buf, root=str(root))
             self.assertEqual(rc, 0)
             out = buf.getvalue()
             lines = {line.split("\t")[0]: line for line in out.splitlines() if "\t" in line}
@@ -73,7 +73,7 @@ class FlakeReportTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as tmp:
             buf = io.StringIO()
-            rc = flake_report.main([Path(tmp)], out=buf)
+            rc = flake_report.main([Path(tmp)], out=buf, root=str(tmp))
             self.assertEqual(rc, 0)
             out = buf.getvalue()
             self.assertIn("SUITE", out)
@@ -102,7 +102,8 @@ class FlakeReportTests(unittest.TestCase):
             raise AssertionError(f"unexpected gh invocation: {cmd}")
 
         buf = io.StringIO()
-        rc = flake_report.main([], from_ci=3, gh_runner=fake_gh, out=buf)
+        with tempfile.TemporaryDirectory() as tmp:
+            rc = flake_report.main([], from_ci=3, gh_runner=fake_gh, out=buf, root=str(tmp))
         self.assertEqual(rc, 0)
         out = buf.getvalue()
         self.assertIn("terminal-present", out)
@@ -212,6 +213,202 @@ class FlakeLedgerModelTests(unittest.TestCase):
     def test_unknown_decision_value_normalizes_to_open(self) -> None:
         ledger = flake_ledger.Ledger(decisions={"gui": {"decision": "bogus"}})
         self.assertEqual(ledger.decision_for("gui"), "open")
+
+
+class FlakeLedgerReportTests(unittest.TestCase):
+    """Report/merge/write-back behaviour against the in-repo ledger."""
+
+    def _write_result(self, run_dir: Path, suite: str, status: str, ts: str, run_id: str = "") -> None:
+        run_dir.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "schema_version": 1,
+            "suite": suite,
+            "status": status,
+            "utc_started_at": ts,
+        }
+        if run_id:
+            payload["run_id"] = run_id
+        (run_dir / "result.json").write_text(json.dumps(payload), encoding="utf-8")
+
+    def _ledger_file(self, root: Path) -> Path:
+        return root / "config" / "flake-ledger.json"
+
+    def test_ledger_baseline_extends_the_consecutive_failure_streak(self) -> None:
+        from qemutests import flake_report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ledger = flake_ledger.Ledger(
+                runs=[
+                    flake_ledger.LedgerRun("gui", "r1", "2026-11-19T01:00:00Z", "FAIL"),
+                    flake_ledger.LedgerRun("gui", "r2", "2026-11-20T01:00:00Z", "FAIL"),
+                ],
+                present=True,
+            )
+            flake_ledger.save_ledger(ledger, self._ledger_file(root))
+            base = root / "build" / "x86_64-clang" / "logs" / "tests"
+            self._write_result(base / "gui" / "20261121-1", "gui", "FAIL", "2026-11-21T01:00:00Z")
+
+            buf = io.StringIO()
+            rc = flake_report.main([root], out=buf, root=str(root))
+            self.assertEqual(rc, 0)
+            lines = {line.split("\t")[0]: line for line in buf.getvalue().splitlines() if "\t" in line}
+            self.assertIn("QUARANTINE-CANDIDATE", lines["gui"])
+
+    def test_update_ledger_is_idempotent(self) -> None:
+        from qemutests import flake_report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "build" / "x86_64-clang" / "logs" / "tests"
+            self._write_result(base / "gui" / "20261121-1", "gui", "FAIL", "2026-11-21T01:00:00Z")
+
+            for _ in range(2):
+                buf = io.StringIO()
+                rc = flake_report.main([root], out=buf, root=str(root), update_ledger=True)
+                self.assertEqual(rc, 0)
+
+            data = json.loads(self._ledger_file(root).read_text(encoding="utf-8"))
+            self.assertEqual(data["schema_version"], 1)
+            self.assertEqual(len(data["runs"]), 1)
+            self.assertEqual(data["runs"][0]["suite"], "gui")
+
+    def test_update_ledger_preserves_human_decisions(self) -> None:
+        from qemutests import flake_report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ledger = flake_ledger.Ledger(
+                runs=[],
+                decisions={"gui": {"decision": "waive", "note": "known family"}},
+                present=True,
+            )
+            flake_ledger.save_ledger(ledger, self._ledger_file(root))
+            base = root / "build" / "x86_64-clang" / "logs" / "tests"
+            self._write_result(base / "gui" / "20261121-1", "gui", "FAIL", "2026-11-21T01:00:00Z")
+
+            buf = io.StringIO()
+            rc = flake_report.main([root], out=buf, root=str(root), update_ledger=True)
+            self.assertEqual(rc, 0)
+
+            data = json.loads(self._ledger_file(root).read_text(encoding="utf-8"))
+            self.assertEqual(data["decisions"]["gui"]["decision"], "waive")
+            self.assertEqual(len(data["runs"]), 1)
+
+    def test_emit_fragment_contains_only_new_runs(self) -> None:
+        from qemutests import flake_report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ledger = flake_ledger.Ledger(
+                runs=[flake_ledger.LedgerRun("gui", "old", "2026-11-20T01:00:00Z", "PASS")],
+                present=True,
+            )
+            flake_ledger.save_ledger(ledger, self._ledger_file(root))
+            base = root / "build" / "x86_64-clang" / "logs" / "tests"
+            self._write_result(base / "gui" / "20261121-1", "gui", "FAIL", "2026-11-21T01:00:00Z")
+
+            fragment = root / "out" / "fragment.json"
+            buf = io.StringIO()
+            rc = flake_report.main([root], out=buf, root=str(root), emit_fragment=str(fragment))
+            self.assertEqual(rc, 0)
+
+            data = json.loads(fragment.read_text(encoding="utf-8"))
+            self.assertEqual(data["kind"], "fragment")
+            self.assertEqual(len(data["runs"]), 1)
+            self.assertNotEqual(data["runs"][0]["run_id"], "old")
+
+    def test_merge_fragment_adds_runs_to_the_ledger(self) -> None:
+        from qemutests import flake_report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            fragment = root / "fragment.json"
+            flake_ledger.write_fragment(
+                fragment,
+                [flake_ledger.LedgerRun("gui", "r9", "2026-11-21T01:00:00Z", "FAIL")],
+            )
+            buf = io.StringIO()
+            rc = flake_report.main(
+                [root], out=buf, root=str(root), merge_paths=[str(fragment)], update_ledger=True
+            )
+            self.assertEqual(rc, 0)
+
+            data = json.loads(self._ledger_file(root).read_text(encoding="utf-8"))
+            self.assertEqual(len(data["runs"]), 1)
+            self.assertEqual(data["runs"][0]["run_id"], "r9")
+
+    def test_malformed_ledger_blocks_the_write_back(self) -> None:
+        from qemutests import flake_report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ledger_path = self._ledger_file(root)
+            ledger_path.parent.mkdir(parents=True, exist_ok=True)
+            ledger_path.write_text("{ broken", encoding="utf-8")
+            base = root / "build" / "x86_64-clang" / "logs" / "tests"
+            self._write_result(base / "gui" / "20261121-1", "gui", "FAIL", "2026-11-21T01:00:00Z")
+
+            buf = io.StringIO()
+            rc = flake_report.main([root], out=buf, root=str(root), update_ledger=True)
+            self.assertEqual(rc, 1)
+            self.assertEqual(ledger_path.read_text(encoding="utf-8"), "{ broken")
+
+    def test_malformed_ledger_still_reports_and_exits_zero(self) -> None:
+        from qemutests import flake_report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ledger_path = self._ledger_file(root)
+            ledger_path.parent.mkdir(parents=True, exist_ok=True)
+            ledger_path.write_text("{ broken", encoding="utf-8")
+
+            buf = io.StringIO()
+            rc = flake_report.main([root], out=buf, root=str(root))
+            self.assertEqual(rc, 0)
+            self.assertIn("SUITE", buf.getvalue())
+
+    def test_json_report_is_machine_readable(self) -> None:
+        from qemutests import flake_report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "build" / "x86_64-clang" / "logs" / "tests"
+            self._write_result(base / "gui" / "20261121-1", "gui", "FAIL", "2026-11-21T01:00:00Z")
+
+            buf = io.StringIO()
+            rc = flake_report.main([root], out=buf, root=str(root), fmt="json")
+            self.assertEqual(rc, 0)
+            data = json.loads(buf.getvalue())
+            self.assertEqual(data["quarantine_threshold"], 3)
+            self.assertEqual(data["suites"][0]["suite"], "gui")
+            self.assertIn("pending_adjudication", data)
+
+    def test_quarantine_candidate_is_pending_until_adjudicated(self) -> None:
+        from qemutests import flake_report
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            base = root / "build" / "x86_64-clang" / "logs" / "tests"
+            for day in ("19", "20", "21"):
+                self._write_result(
+                    base / "gui" / f"202611{day}-1", "gui", "FAIL", f"2026-11-{day}T01:00:00Z"
+                )
+
+            buf = io.StringIO()
+            flake_report.main([root], out=buf, root=str(root), fmt="json")
+            data = json.loads(buf.getvalue())
+            self.assertEqual(data["pending_adjudication"], ["gui"])
+
+            ledger = flake_ledger.Ledger(
+                decisions={"gui": {"decision": "fix", "note": "owner assigned"}}, present=True
+            )
+            flake_ledger.save_ledger(ledger, self._ledger_file(root))
+
+            buf = io.StringIO()
+            flake_report.main([root], out=buf, root=str(root), fmt="json")
+            data = json.loads(buf.getvalue())
+            self.assertEqual(data["pending_adjudication"], [])
 
 
 if __name__ == "__main__":
