@@ -220,6 +220,11 @@ static const order_check_t k_a64_runtime_checks[] = {
 /* aarch64 hook bodies (kernel/arch/aarch64/smp/smp.c). */
 static const order_check_t k_a64_cpu_init_checks[] = {
     {
+        "aarch64 cpu_init: gic_cpu_init before gic_target_bit_init",
+        "gic_cpu_init();",
+        "gic_target_bit_init(cpu_id);",
+    },
+    {
         "aarch64 cpu_init: percpu_init before the page-table AP verify",
         "percpu_init(cpu_id, mpidr_ap)",
         "aarch64_page_table_ap_verify(cpu_id)",
@@ -228,9 +233,9 @@ static const order_check_t k_a64_cpu_init_checks[] = {
 
 static const order_check_t k_a64_post_online_checks[] = {
     {
-        "aarch64 post_online: boot ACK before gic_target_bit_init",
+        "aarch64 post_online: boot ACK before go wait",
         "boot_online_set(cpu_id)",
-        "gic_target_bit_init(cpu_id)",
+        "boot_go_get(cpu_id)",
     },
 };
 
@@ -468,7 +473,7 @@ static void suite_ap_tail_order(void)
     }
 
     char *post_online = extract_scope(buf, "void arch_smp_ap_post_online(",
-                                      "gic_target_bit_init(cpu_id)");
+                                      "boot_go_get(cpu_id)");
     assert_true(post_online != NULL);
     if (post_online) {
         assert_true(run_order_checks(post_online, k_a64_post_online_checks,

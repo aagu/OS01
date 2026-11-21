@@ -8,6 +8,7 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <arch/aarch64/gic.h>
+#include <arch/aarch64/ipi.h>
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/boot_log.h>
 
@@ -34,9 +35,10 @@ static void pl011_rx_handler(uint32_t intid, uint64_t param, struct pt_regs *reg
 void gic_spi_test_init(void)
 {
     uint32_t intid = dtb_pl011_spi();     /* 33 on QEMU virt, from DTB */
-    if (intid == 0 ||
+    uint8_t bsp_target = gic_target_bit_get(0);
+    if (intid == 0 || bsp_target == 0 ||
         gic_register_handler(intid, pl011_rx_handler, 0, "pl011-rx") != 0 ||
-        gic_irq_configure(intid, true, 0x00, 0x01) != 0) { /* route BSP(bit0), R1-2 */
+        gic_irq_configure(intid, true, 0x00, bsp_target) != 0) { /* route BSP, R1-2 */
         log_err("[gic] spi-test arm FAIL\n");
         return;
     }

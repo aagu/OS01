@@ -234,7 +234,7 @@ $(TEST_BLD)/test_aarch64_gic_target_probe.o: \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(AARCH64_IPI_HOST_CFLAGS) \
 		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
-		$(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
+		$(FRAMEWORK_INC) -idirafter $(TESTS_DIR)/libc/include -c $< -o $@
 
 $(TEST_BLD)/test_aarch64_gic_target_probe.elf: \
 		$(TEST_BLD)/test_aarch64_gic_target_probe.o \

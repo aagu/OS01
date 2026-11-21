@@ -23,6 +23,7 @@
 #include <arch/atomic.h>
 #include <arch/cpu.h>
 #include <arch/aarch64/gic.h>
+#include <arch/aarch64/ipi.h>
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/boot_log.h>
 #include <arch/aarch_percpu.h>
@@ -61,8 +62,11 @@ static void ipi_handler(uint32_t intid, uint64_t param, struct pt_regs *regs)
     if (cpu >= AARCH64_BOOT_MAX_CPUS) return;
     arch_atomic_fetch_add(&ipi_received[cpu], 1);   /* 原子计数 (atomic.h:47-58) */
     ipi_flag_release(&ipi_done[cpu], 1);            /* RELEASE：计数先于标志 */
-    if (cpu == 1)                                   /* AP1 回发 SGI 1 → BSP (R1-9) */
-        gic_send_sgi(gic_dev_current(), IPI_REPLY_SGI, 0x01, GICD_SGIR_FILTER_LIST);
+    if (cpu == 1) {                                 /* AP1 回发 SGI 1 → BSP (R1-9) */
+        uint8_t bsp_target = gic_target_bit_get(0);
+        if (bsp_target != 0)
+            gic_send_sgi(gic_dev_current(), IPI_REPLY_SGI, bsp_target, GICD_SGIR_FILTER_LIST);
+    }
 }
 
 static void bsp_reply_handler(uint32_t intid, uint64_t param, struct pt_regs *regs)

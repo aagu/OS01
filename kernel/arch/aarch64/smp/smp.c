@@ -292,6 +292,7 @@ void arch_smp_ap_cpu_init(uint32_t cpu_id, struct percpu *cpu)
      * in the admission handoff, never here. */
     cntp_ctl_el0_write(0);
     gic_cpu_init();
+    gic_target_bit_init(cpu_id);
     /* Phase 2 #3: install real per-CPU data for AP. head.S:649
      * already set TPIDR_EL1 = &percpu_data[cpu_id]; percpu_install_gs
      * re-confirms (idempotent) and percpu_init populates
@@ -325,10 +326,6 @@ void arch_smp_ap_post_online(uint32_t cpu_id, struct percpu *cpu)
     } while (command == AARCH64_BOOT_GO_WAIT);
     if (command == AARCH64_BOOT_GO_TEST)
         smp_bench_iter(cpu_id, 1000000);
-
-    /* GIC target-bit validation completes BEFORE the common entry
-     * unmaskes IRQs (M3 Task 8: 单核也安全（RAZ/WI 例外）). */
-    gic_target_bit_init(cpu_id);
 }
 
 void arch_smp_ap_publish_ipi_ready(uint32_t cpu_id, struct percpu *cpu)

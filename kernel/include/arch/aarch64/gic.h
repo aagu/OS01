@@ -31,6 +31,7 @@ int  gic_dev_init(struct gic_dev *dev, volatile uint32_t *gicd, volatile uint32_
 void gic_dev_dist_enable(struct gic_dev *dev);    /* GICD_CTLR = 1 */
 void gic_dev_dist_disable(struct gic_dev *dev);
 int  gic_dev_cpu_enable(struct gic_dev *dev);     /* PMR=0xff + 读回校验 + GICC_CTLR=1 */
+uint8_t gic_cpu_target_mask(const struct gic_dev *dev, bool single_cpu_topology);
 enum gic_irq_type gic_irq_type(uint32_t intid);
 int  gic_irq_config(struct gic_dev *dev, uint32_t intid, bool enable,
                     uint8_t prio, uint8_t targets); /* IGROUPR0+ISENABLER/ICENABLER

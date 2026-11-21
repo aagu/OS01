@@ -35,6 +35,7 @@
 #include <arch/cpu.h>
 #include <arch/aarch64/boot_log.h>
 #include <arch/aarch64/gic.h>
+#include <arch/aarch64/ipi.h>
 
 #define PROBE_SGI_ID           2u      /* clobber 探针专用自发 SGI */
 #define PROBE_UNEXPECTED_INTID 40u
@@ -139,8 +140,10 @@ void gic_unexpected_probe(void)
 {
     probe_unexpected_count = 0;
     probe_unexpected_flag = 0;
+    uint8_t bsp_target = gic_target_bit_get(0);
     gic_driver_set_unexpected(probe_unexpected_cb);  /* R2-5: 观察递送本身 */
-    if (gic_irq_configure(PROBE_UNEXPECTED_INTID, true, 0x00, 0x01) != 0) {
+    if (bsp_target == 0 ||
+        gic_irq_configure(PROBE_UNEXPECTED_INTID, true, 0x00, bsp_target) != 0) {
         kputs("[gic-probe] unexpected intid=40 TIMEOUT\n");
         return;
     }
@@ -149,13 +152,13 @@ void gic_unexpected_probe(void)
     while (probe_flag_acquire(&probe_unexpected_flag) == 0) {  /* 等递送证据 */
         if ((uint64_t)arch_cycle_counter() > deadline) {
             kputs("[gic-probe] unexpected intid=40 TIMEOUT\n");
-            gic_irq_configure(PROBE_UNEXPECTED_INTID, false, 0x00, 0x01);
+            gic_irq_configure(PROBE_UNEXPECTED_INTID, false, 0x00, bsp_target);
             gic_clear_pending_irq(PROBE_UNEXPECTED_INTID);
             return;
         }
         arch_cpu_pause();
     }
-    gic_irq_configure(PROBE_UNEXPECTED_INTID, false, 0x00, 0x01);  /* 拆除 */
+    gic_irq_configure(PROBE_UNEXPECTED_INTID, false, 0x00, bsp_target);  /* 拆除 */
     gic_clear_pending_irq(PROBE_UNEXPECTED_INTID);
     if (probe_unexpected_count == 1)
         kputs("[gic-probe] unexpected intid=40 survived\n");     /* 恰一次 */

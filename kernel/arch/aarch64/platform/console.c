@@ -9,6 +9,7 @@
 
 #include <arch/console.h>
 #include <arch/aarch64/gic.h>
+#include <arch/aarch64/ipi.h>
 #include <arch/aarch64/dtb.h>
 #include <driver/serial.h>
 #include <tty/tty.h>
@@ -55,10 +56,11 @@ void arch_console_input_attach(struct tty_struct *tty)
 #endif
 
     uint32_t intid = dtb_pl011_spi();   /* QEMU virt: 33 (SPI 1), from DTB */
-    if (intid == 0 ||
+    uint8_t bsp_target = gic_target_bit_get(0);
+    if (intid == 0 || bsp_target == 0 ||
         gic_register_handler(intid, pl011_console_rx_handler, 0,
                              "pl011-console") != 0 ||
-        gic_irq_configure(intid, true, 0x00, 0x01) != 0) {
+        gic_irq_configure(intid, true, 0x00, bsp_target) != 0) {
         /* Input is a degrade, not a boot failure: the console still works
          * for output (same wire as printk). */
         log_warn("aarch64: PL011 console RX IRQ not armed (intid=%u)\n",

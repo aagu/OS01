@@ -59,6 +59,17 @@ void gic_cpu_init(void)                                /* 每核各跑一次（b
 uint32_t gic_trace_cpu(void) { return cpu_id(); }
 #endif
 
+void ipi_fatal_itargets(uint32_t cpu_id, uint8_t byte)
+{
+    __asm__ __volatile__("msr daifset, #0xf\n\tisb" ::: "memory");
+    log_err("[gic] FATAL: invalid/duplicate GIC target cpu=");
+    kputu(cpu_id);
+    kputs(" target=0x");
+    kputx(byte);
+    kputs("\n");
+    for (;;) __asm__ __volatile__("wfi" ::: "memory");
+}
+
 void gic_init(void)
 {
     uintptr_t gicd = dtb_gicd_base();
@@ -78,6 +89,7 @@ void gic_init(void)
     gic_driver_set_cpu_index(k_cpu_index);            /* R2-6: per-CPU IAR trace */
     gic_dev_dist_enable(&g_gic);
     gic_cpu_init();
+    gic_target_bit_init(0);
     /* M3 (Task 10): SGI 3 = TLB shootdown handler. Handler 表是全局的，
      * BSP 注册一次即覆盖所有 CPU（AP 只跑 gic_cpu_init 的 banked enable）。 */
     if (gic_register_handler(3, aarch64_tlb_sgi_handler, 0,

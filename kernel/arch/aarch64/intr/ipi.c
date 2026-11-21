@@ -50,6 +50,8 @@ __attribute__((weak)) void ipi_panic_unsupported_vector(uint32_t vector)
  * no other CPU can observe a broadcast-targeting this one while its
  * entry is still zero. */
 static uint8_t gic_target_bit[AARCH64_BOOT_MAX_CPUS];
+static uint8_t gic_target_claimed_mask;
+static uint8_t gic_target_committed[AARCH64_BOOT_MAX_CPUS];
 
 /* FATAL path for gic_target_bit_init (M3 Task 8): the banked
  * GICD_ITARGETSR0 byte did not match the required identity topology.
@@ -73,38 +75,26 @@ __attribute__((weak)) void ipi_warn_mask_bit_out_of_range(uint64_t mask)
 
 void gic_target_bit_init(uint32_t cpu_id)
 {
-    /* Bounds guard (review fix round 1): same capacity check as
-     * gic_target_bit_inject/get. The multi-core path below already
-     * FATALs for cpu_id >= AARCH64_BOOT_MAX_CPUS only by coincidence
-     * (sgi_byte == 1u << cpu_id can never match); the single-core path
-     * would write out of bounds. Route to the fatal hook. */
     if (cpu_id >= AARCH64_BOOT_MAX_CPUS) {
         ipi_fatal_itargets(cpu_id, 0);
         return; /* unreachable: hook does not return */
     }
-    if (dtb_cpu_count() == 1) {
-        /* Spec §6.3: on a single-core GICv2, GICD_ITARGETSR0 may be
-         * RAZ/WI — reading it back 0 proves nothing. Skip the check. */
-        gic_target_bit[cpu_id] = 1u;
+    if (__atomic_exchange_n(&gic_target_committed[cpu_id], 1u, __ATOMIC_ACQ_REL) != 0u) {
+        ipi_fatal_itargets(cpu_id, gic_target_bit[cpu_id]);
         return;
     }
-    /* Multi-core: read this CPU's banked GICD_ITARGETSR0 (offset 0x800),
-     * SGI byte 0 (SGI INTIDs 0..3 share byte 0 of ITARGETSR0). The GICD
-     * base comes from the parsed DTB — never a fixed GIC_DIST_BASE
-     * constant. QEMU virt must give exactly one bit = 1u << cpu_id;
-     * anything else (0, multiple bits, or non-identity) is FATAL, not
-     * WARN (v1 review item 11): a wrong target byte silently drops IPIs,
-     * which we refuse to boot with. The store happens only after the
-     * byte is validated (see M7.2 above for the publish ordering). */
-    volatile uint8_t *itargets =
-        (volatile uint8_t *)((uintptr_t)dtb_gicd_base() + 0x800);
-    uint8_t sgi_byte = itargets[0];
-    if (sgi_byte == 0 || (sgi_byte & (sgi_byte - 1)) != 0 ||
-        sgi_byte != (1u << cpu_id)) {
-        ipi_fatal_itargets(cpu_id, sgi_byte);
+    const struct gic_dev *dev = gic_dev_current();
+    uint8_t mask = gic_cpu_target_mask(dev, dtb_cpu_count() == 1u);
+    if (mask == 0u) {
+        ipi_fatal_itargets(cpu_id, 0);
         return; /* unreachable: hook does not return */
     }
-    gic_target_bit[cpu_id] = sgi_byte;
+    uint8_t prev = __atomic_fetch_or(&gic_target_claimed_mask, mask, __ATOMIC_ACQ_REL);
+    if ((prev & mask) != 0u) {
+        ipi_fatal_itargets(cpu_id, mask);
+        return; /* unreachable: hook does not return */
+    }
+    __atomic_store_n(&gic_target_bit[cpu_id], mask, __ATOMIC_RELEASE);
 }
 
 void gic_target_bit_inject(uint32_t cpu, uint8_t byte)

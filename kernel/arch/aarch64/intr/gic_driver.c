@@ -153,6 +153,32 @@ int gic_dev_cpu_enable(struct gic_dev *dev)
     return 0;
 }
 
+uint8_t gic_cpu_target_mask(const struct gic_dev *dev, bool single_cpu_topology)
+{
+    if (!dev || !dev->gicd) return 0;
+    uint8_t mask = 0;
+    for (uint32_t w = 0; w < 8u; w++) {
+        uint32_t word = r32(dev->gicd, GICD_ITARGETSR + w * 4u);
+        for (uint32_t b = 0; b < 4u; b++) {
+            uint8_t val = (uint8_t)((word >> (b * 8u)) & 0xffu);
+            if (val == 0u) continue;
+            if ((val & (uint8_t)(val - 1u)) != 0u) return 0;
+            if (mask == 0u) {
+                mask = val;
+            } else if (mask != val) {
+                return 0;
+            }
+        }
+    }
+    if (mask == 0u) {
+        if (single_cpu_topology && dev->nr_cpu_interfaces == 1u) {
+            return 1u;
+        }
+        return 0;
+    }
+    return mask;
+}
+
 /* per-CPU IAR trace (R2-6)：跨核 ack 只写本 CPU 槽——BSP 在 handler 上下文
  * 读到的必是本核最近一次 ack（同核 dispatch 串行 + IRQ masked, 无嵌套），
  * AP 的 ack 写各自槽，互不覆写。hosttest 用 mock hook 覆盖。 */
