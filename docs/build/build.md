@@ -18,7 +18,7 @@
 | Profile | 能力 | 产物 |
 | --- | --- | --- |
 | `x86_64-clang`（默认） | `kernel userland rootfs uefi` | `kernel.bin`、用户 ELF + BusyBox、`image/disk.img`、BOOTX64.EFI |
-| `aarch64-clang` | `kernel uefi userland` | `kernel.elf`、BOOTAA64.EFI、用户 ELF + BusyBox（2026-11-21 起；无 mbedTLS/gfx 应用）、192 MiB GPT 双分区 `image/aarch64-uefi.img`（2026-11-21 起与 x86 同布局：ESP FAT32 = BOOTAA64.EFI + kernel.elf → /boot，ext2 rootfs → / 含 /bin/init、/bin/busybox、/bin/sh、/bin/terminal、/bin/test_fp、/etc/inittab；/bin/sh 为 busybox 软链） |
+| `aarch64-clang` | `kernel uefi userland` | `kernel.elf`、BOOTAA64.EFI、用户 ELF + BusyBox（2026-11-21 起；无 mbedTLS/gfx 应用）、192 MiB GPT 双分区 `image/aarch64-uefi.img`（2026-11-21 起与 x86 同布局：ESP FAT32 = BOOTAA64.EFI + kernel.elf → /boot，ext2 rootfs → / 含全部解锁用户程序（x86 `ROOTFS_USER_PROGRAMS` 同款过滤器：除 sh/压测/probe 外的 USER_PROGRAMS）、/bin/busybox、/etc/inittab；/bin/sh 为 busybox 软链） |
 
 **能力契约**：每个入口 target 都是能力感知的。在缺少对应能力的 profile 上执行会立即失败（解析期报错，不会等到编译）：
 

@@ -63,3 +63,18 @@ ESP FAT32（BOOTAA64.EFI + kernel.elf）→ `/boot`，ext2 rootfs → `/` 承载
 - 不动 `run.mk`（无 pin 影响；no-ack 是编译期选择器，非二进制注入，不受迁移影响）
 - 不动内核 C 代码与 `config/rootfs.mk`
 - 不回改历史 spec/plan
+
+## 后续跟进（同日）：rootfs 内容对齐
+
+产品 manifest 从 4 程序扩展为**全部解锁用户程序**（`AARCH64_ROOTFS_PROGRAMS` =
+`USER_PROGRAMS` 减 x86 同款过滤器：sh（软链承载）/test_arch10_capacity/
+test_arch6_fsstress/usb_boot_probe），prereq 挂 `AARCH64_ROOTFS_PROGRAM_ELFS`
+保证任一程序变更触发镜像重建。29 项程序（含 nettest/lspci/lsusb/mousetest 等
+跨架构通用 EL0 程序——aarch64 上缺对应 syscall 的程序可在盘上存在，与 x86
+同类）+ busybox + inittab + `/bin/sh` 软链，共 33 行 manifest（上限 128）。
+applet 软链集仍不装（悬空软链是 roadmap 待决缺陷）。
+
+验证：镜像重建后 ext2 `/bin` 32 项核对（与 artifacts 差异恰为 4 项过滤器 +
+非 USER_PROGRAM 的 user_udivti3_link_probe）；product/fp user-runtime 1/2/4/8 核
+回归 PASS；QEMU 手动 smoke：ash 实跑 `/bin/hello` 输出 `hello: pid=3` 后 respawn
+正常。

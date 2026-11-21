@@ -255,11 +255,23 @@ endif
 # Both variants are the mkdisk GPT dual-partition layout (ESP FAT32 with
 # BOOTAA64.EFI + kernel.elf → /boot, ext2 rootfs → /); they differ only in
 # the ext2 manifest: the selftest variant carries the VFS selftest marker
-# files, the product variant carries the product userspace.  See mkdisk
+# files, the product variant carries the product userspace — every
+# unlocked aarch64 user program (mk/profiles/aarch64-clang.mk
+# USER_EXCLUDED_PROGRAMS is the build-side gate; the image-side filter
+# below mirrors the x86 ROOTFS_USER_PROGRAMS contract).  See mkdisk
 # --esp-kernel for why the ESP kernel is named kernel.elf on aarch64.
 # (2026-11-21: the product variant moved from the whole-disk FAT32
 # superfloppy to this layout — the whole-disk FAT32 fallback mount path
 # lost its aarch64 product coverage; see docs/changelog.md.)
+
+# Product rootfs program list: USER_PROGRAMS minus the x86-parity image
+# filter.  sh is dropped because /bin/sh is the busybox applet symlink
+# (sh.c stays buildable for development, exactly like x86); the stress /
+# probe programs are dropped from the NORMAL image on x86 too
+# (config/rootfs.mk applies the same filter).  Requires userland: user.mk
+# defines USER_PROGRAMS and is included before this file.
+AARCH64_ROOTFS_PROGRAMS := $(filter-out sh test_arch10_capacity test_arch6_fsstress usb_boot_probe,$(USER_PROGRAMS))
+AARCH64_ROOTFS_PROGRAM_ELFS := $(addprefix $(USER_ARTIFACT_DIR)/,$(addsuffix .elf,$(AARCH64_ROOTFS_PROGRAMS)))
 AARCH64_SELFTEST_MARKER := $(BUILD_DIR)/image$(if $(IMAGE_VARIANT),/$(IMAGE_VARIANT))/vfs-selftest.txt
 
 $(AARCH64_SELFTEST_MARKER): FORCE
@@ -270,7 +282,7 @@ $(AARCH64_SELFTEST_MARKER): FORCE
 $(AARCH64_UEFI_DISK): $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
 		$(BUILD_DIR)/artifacts/kernel.elf $(AARCH64_UEFI_FIRMWARE) \
 		$(HOST_MKDISK) $(INITTAB_FILE) \
-		$(if $(filter userland,$(PROFILE_CAPABILITIES)),$(USER_ARTIFACT_DIR)/init.elf $(USER_ARTIFACT_DIR)/busybox.elf $(USER_ARTIFACT_DIR)/terminal.elf $(USER_ARTIFACT_DIR)/test_fp.elf) \
+		$(if $(filter userland,$(PROFILE_CAPABILITIES)),$(AARCH64_ROOTFS_PROGRAM_ELFS) $(USER_ARTIFACT_DIR)/busybox.elf) \
 		$(if $(filter selftest,$(IMAGE_VARIANT)),$(AARCH64_SELFTEST_MARKER))
 ifeq ($(IMAGE_VARIANT),selftest)
 	@$(MAKE) -C tools check-deps HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools
@@ -287,16 +299,16 @@ else
 	@$(MAKE) -C tools check-deps HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools
 	@mkdir -p $(dir $@) $(dir $@)tmp
 	@rm -f $@.tmp
-	@# Product manifest (2026-11-21): the same product userspace the
-	@# superfloppy carried, now on the ext2 rootfs.  /kernel.elf doubles
-	@# as the mkdisk --esp-kernel source (the aarch64 loader reads
-	@# \kernel.elf from the ESP) — mirroring the x86 /kernel.bin contract.
+	@# Product manifest (2026-11-21): the full unlocked aarch64 product
+	@# userspace on the ext2 rootfs.  /kernel.elf doubles as the mkdisk
+	@# --esp-kernel source (the aarch64 loader reads \kernel.elf from the
+	@# ESP) — mirroring the x86 /kernel.bin contract.
 	@printf 'file\t/kernel.elf\t$(BUILD_DIR)/artifacts/kernel.elf\t0644\n' > $@.tmp
 	@printf 'file\t/etc/inittab\t$(INITTAB_FILE)\t0644\n' >> $@.tmp
-	@printf 'file\t/bin/init\t$(USER_ARTIFACT_DIR)/init.elf\t0755\n' >> $@.tmp
 	@printf 'file\t/bin/busybox\t$(USER_ARTIFACT_DIR)/busybox.elf\t0755\n' >> $@.tmp
-	@printf 'file\t/bin/terminal\t$(USER_ARTIFACT_DIR)/terminal.elf\t0755\n' >> $@.tmp
-	@printf 'file\t/bin/test_fp\t$(USER_ARTIFACT_DIR)/test_fp.elf\t0755\n' >> $@.tmp
+	@for p in $(AARCH64_ROOTFS_PROGRAMS); do \
+	  printf 'file\t/bin/%s\t$(USER_ARTIFACT_DIR)/%s.elf\t0755\n' "$$p" "$$p" >> $@.tmp; \
+	done
 	@# ext2 enables the real /bin/sh→busybox symlink (FAT had to carry a
 	@# copy); busybox dispatches on argv[0], terminal.elf's /bin/sh
 	@# fallback exec resolves through the link.

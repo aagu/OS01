@@ -7,6 +7,8 @@
 
 ## 2026-11-21
 
+- feat(aarch64): **产品 rootfs 内容对齐——全部解锁用户程序上盘**（ext2 迁移的同日跟进；plan「后续跟进」节）：产品 manifest 由 4 程序扩展为 `AARCH64_ROOTFS_PROGRAMS` = `USER_PROGRAMS` 减 x86 `ROOTFS_USER_PROGRAMS` 同款过滤器（sh → `/bin/sh` 软链承载、test_arch10_capacity / test_arch6_fsstress / usb_boot_probe 为压测/probe 不进常规镜像），29 项程序全部经 manifest 落 ext2 `/bin`（含 nettest/lspci/lsusb/mousetest 等跨架构通用 EL0 程序——缺对应 syscall 的程序可存在于盘，与 x86 同类）；prereq 挂 `AARCH64_ROOTFS_PROGRAM_ELFS`，任一程序变更触发镜像重建。applet 软链集仍不装（悬空软链缺陷待决，不复制）。验收：ext2 `/bin` 32 项与 artifacts 精确核对（差异恰为 4 项过滤器 + 非 USER_PROGRAM 的 link probe）；product/fp user-runtime 1/2/4/8 核回归 PASS；QEMU smoke 实跑 `/bin/hello` 成功 exec 并 respawn。
+
 - feat(aarch64): **产品镜像迁 ext2 根文件系统（VFS 门收尾：产品布局与 x86_64 对齐）**——aarch64 产品变体镜像从无分区表 64 MiB FAT32 superfloppy 迁到 mkdisk GPT 双分区布局（2026-11-18「VFS 门」时 ext2 内核侧已工作，本项消掉镜像层最后的架构差距；plan `docs/superpowers/plans/2026-11-21-aarch64-ext2-product-image.md`）：
 
   **做了什么**
