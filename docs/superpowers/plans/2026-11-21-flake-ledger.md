@@ -1389,6 +1389,21 @@ git commit -m "docs: close the roadmap P0 flake ledger item (AAGU-36)"
 
 ---
 
+## 实施偏差记录（2026-11-21 落地时）
+
+计划与最终实现有 6 处偏差，均为实施中发现的事实驱动调整，不改变设计意图：
+
+| # | 计划 | 实际 | 原因 |
+|---|---|---|---|
+| 1 | Task 1 两个损坏账本用例直接 `write_text` | 需先 `path.parent.mkdir(parents=True)` | 临时目录没有 `config/` 子目录 |
+| 2 | Task 2 既有 3 个用例保持原样 | 全部补 `root=str(tmp)`；`test_from_ci_shares_parser_with_fake_gh` 需包一层 `TemporaryDirectory` | 否则既有用例会读到仓库里已提交的账本，输出随账本内容漂移（`test_no_logs_...` 会失真） |
+| 3 | Make 目标只有 5 个变量 | 增加 `EMIT_FRAGMENT=<path>` | 维护者需要在本地产出 fragment 验证合并链路；CI 侧也用同一开关 |
+| 4 | 时间戳按字符串排序 | 新增 `flake_ledger.timestamp_key()`，解析 ISO-8601 后按真实时间排序 | 真实归档用 `+00:00` 偏移（`datetime.isoformat()`），手写夹具用 `Z`，纯字符串序在混用时会错序 |
+| 5 | fragment = 「本次新发现的所有 run」 | fragment = 新发现 **减去账本基线已有** 的 run | spec 要求「不含账本基线」；否则重复合并会反复携带已在账本里的条目 |
+| 6 | roadmap 只改 P0 表与计数 | 另加：近期闭环索引新增一行、文档日期改为 2026-11-21；并把**并发编辑**（另一路工作删除「测试框架重构」行）单独提交 `bff36013`，不与本次闭环混在一个 commit | 保留他人改动的归属 |
+
+---
+
 ## 收尾验证（全部任务完成后执行）
 
 - [ ] `make test-harness` —— 框架回归（含 `qemutests.test_flake_report`、`qemutests.test_ci_schedule_check`）
