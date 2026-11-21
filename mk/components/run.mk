@@ -1405,6 +1405,28 @@ $(USB_BOOT_AHCI_IMAGE): $(ROOTFS_MANIFEST) $(UEFI_EFI) $(HOST_MKDISK)
 	  --temp-dir $(dir $@)tmp-ahci --rootfs-manifest $(ROOTFS_MANIFEST)
 endif
 
+# Hash-sandwich halves shared by test-qemu-usb-boot / test-qemu-usb-hid:
+# record the normal image sha before the run, and after the run compare it
+# again — any mismatch means the runner modified the source image and fails.
+# The python runner stays between the two expansions with its own
+# multi-line command (kept out of the $(call) arguments: case-specific
+# $(if) flags would make the argument commas fragile).
+#   usb_hash_before $(1)=job dir
+#   usb_hash_after  $(1)=job dir  $(2)=target label for the error message
+define usb_hash_before
+mkdir -p "$(1)"; \
+sha256sum "$(NORMAL_IMAGE)" > "$(1)/image.before";
+endef
+define usb_hash_after
+status=$$?; \
+sha256sum "$(NORMAL_IMAGE)" > "$(1)/image.after"; \
+if ! cmp -s "$(1)/image.before" "$(1)/image.after"; then \
+  echo "ERROR: $(2) modified the source image $(NORMAL_IMAGE)" >&2; \
+  exit 1; \
+fi; \
+exit $$status
+endef
+
 .PHONY: test-qemu-usb-boot
 test-qemu-usb-boot: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE) $(if $(filter dual ahci,$(USB_BOOT_CASE)),$(USB_BOOT_AHCI_IMAGE)) $(if $(filter persistence,$(USB_BOOT_CASE)),$(USER_ARTIFACT_DIR)/usb_boot_probe.elf))
 	$(call require_capability,rootfs)
@@ -1413,8 +1435,7 @@ test-qemu-usb-boot: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE
 	  *) echo "USB_BOOT_CASE must be firmware, readonly, dual, ahci, persistence, superspeed, or hub, got '$(USB_BOOT_CASE)'" >&2; exit 2;; \
 	esac
 	@set +e; \
-	mkdir -p "$(USB_BOOT_JOB_DIR)"; \
-	sha256sum "$(NORMAL_IMAGE)" > "$(USB_BOOT_JOB_DIR)/image.before"; \
+	$(call usb_hash_before,$(USB_BOOT_JOB_DIR)) \
 	python3 qemutests/usb_boot.py --case "$(USB_BOOT_CASE)" \
 	  --qemu "$(QEMU_BIN)" --firmware "$(OVMF_FIRMWARE)" \
 	  --disk "$(NORMAL_IMAGE)" \
@@ -1423,13 +1444,7 @@ test-qemu-usb-boot: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE
 	  --smp "$(SMP)" \
 	  --timeout "$(USB_BOOT_TIMEOUT)" \
 	  --log-dir "$(USB_BOOT_JOB_DIR)"; \
-	status=$$?; \
-	sha256sum "$(NORMAL_IMAGE)" > "$(USB_BOOT_JOB_DIR)/image.after"; \
-	if ! cmp -s "$(USB_BOOT_JOB_DIR)/image.before" "$(USB_BOOT_JOB_DIR)/image.after"; then \
-	  echo "ERROR: test-qemu-usb-boot modified the source image $(NORMAL_IMAGE)" >&2; \
-	  exit 1; \
-	fi; \
-	exit $$status
+	$(call usb_hash_after,$(USB_BOOT_JOB_DIR),test-qemu-usb-boot)
 
 .PHONY: test-qemu-usb-hid
 test-qemu-usb-hid: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE) $(USER_ARTIFACT_DIR)/usb_hid_probe.elf)
@@ -1439,8 +1454,7 @@ test-qemu-usb-hid: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE)
 	  *) echo "USB_HID_CASE must be direct or hub, got '$(USB_HID_CASE)'" >&2; exit 2;; \
 	esac
 	@set +e; \
-	mkdir -p "$(USB_HID_JOB_DIR)"; \
-	sha256sum "$(NORMAL_IMAGE)" > "$(USB_HID_JOB_DIR)/image.before"; \
+	$(call usb_hash_before,$(USB_HID_JOB_DIR)) \
 	python3 qemutests/usb_hid.py --case "$(USB_HID_CASE)" \
 	  --qemu "$(QEMU_BIN)" --firmware "$(OVMF_FIRMWARE)" \
 	  --disk "$(NORMAL_IMAGE)" \
@@ -1448,13 +1462,7 @@ test-qemu-usb-hid: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE)
 	  --smp "$(SMP)" \
 	  --timeout "$(USB_HID_TIMEOUT)" \
 	  --log-dir "$(USB_HID_JOB_DIR)"; \
-	status=$$?; \
-	sha256sum "$(NORMAL_IMAGE)" > "$(USB_HID_JOB_DIR)/image.after"; \
-	if ! cmp -s "$(USB_HID_JOB_DIR)/image.before" "$(USB_HID_JOB_DIR)/image.after"; then \
-	  echo "ERROR: test-qemu-usb-hid modified the source image $(NORMAL_IMAGE)" >&2; \
-	  exit 1; \
-	fi; \
-	exit $$status
+	$(call usb_hash_after,$(USB_HID_JOB_DIR),test-qemu-usb-hid)
 
 # Exercise repeated exec/exit through the normal terminal and ash path.
 .PHONY: test-syscall-repeat
