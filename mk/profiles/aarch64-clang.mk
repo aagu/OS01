@@ -138,6 +138,24 @@ endif
 # BOOT-4 stage contract matrix:
 BOOT_CONTRACT_CASE := $(if $(findstring BOOT_CONTRACT_TEST=reverse,$(KERNEL_EXTRA_CFLAGS)),reverse,$(if $(findstring BOOT_CONTRACT_TEST=missing,$(KERNEL_EXTRA_CFLAGS)),missing,$(if $(findstring BOOT_CONTRACT_TEST=cycle,$(KERNEL_EXTRA_CFLAGS)),cycle,)))
 #
+AARCH64_SERROR_TESTS_VALID := el1t el1h el0t
+ifneq ($(strip $(AARCH64_SERROR_TEST)),)
+ifeq ($(filter $(AARCH64_SERROR_TEST),$(AARCH64_SERROR_TESTS_VALID)),)
+$(error invalid AARCH64_SERROR_TEST='$(AARCH64_SERROR_TEST)'; valid: $(AARCH64_SERROR_TESTS_VALID))
+endif
+ifneq ($(KERNEL_SELFTEST),1)
+$(error AARCH64_SERROR_TEST='$(AARCH64_SERROR_TEST)' requires KERNEL_SELFTEST=1)
+endif
+ifneq ($(strip $(AARCH64_SCHED_TEST) $(AARCH64_AP_SCHED_TEST) $(AARCH64_SCHED_TICK_TEST) $(AARCH64_USER_RUNTIME_TEST) $(AARCH64_M1_TEST) $(AARCH64_EL0_TEST) $(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
+$(error AARCH64_SERROR_TEST='$(AARCH64_SERROR_TEST)' cannot be combined with other compile-affecting test variants)
+endif
+ifneq ($(strip $(AARCH64_SMP_TEST_NO_ACK_CPU)),)
+ifeq ($(filter 0,$(strip $(AARCH64_SMP_TEST_NO_ACK_CPU))),)
+$(error AARCH64_SERROR_TEST='$(AARCH64_SERROR_TEST)' cannot be combined with AARCH64_SMP_TEST_NO_ACK_CPU=$(AARCH64_SMP_TEST_NO_ACK_CPU))
+endif
+endif
+endif
+#
 ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
 ifeq ($(filter 1,$(KERNEL_SELFTEST)),)
 $(error AARCH64_SYNC_FAULT_TEST=1 requires KERNEL_SELFTEST=1)
@@ -288,6 +306,8 @@ else ifneq ($(strip $(AARCH64_SCHED_TICK_TEST)),)
 KERNEL_VARIANT := sched-tick
 else ifneq ($(strip $(AARCH64_USER_RUNTIME_TEST)),)
 KERNEL_VARIANT := user-runtime-$(AARCH64_USER_RUNTIME_TEST)
+else ifneq ($(strip $(AARCH64_SERROR_TEST)),)
+KERNEL_VARIANT := serror-$(AARCH64_SERROR_TEST)
 else ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
 KERNEL_VARIANT := sync-fault
 else ifneq ($(filter 1,$(KERNEL_TEST_FORCE_NO_RNDRRS)),)

@@ -362,6 +362,16 @@
       }
     },
     {
+      "id": "aarch64-serror",
+      "layer": "qemu_e2e",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/aarch64_serror.py"
+    },
+    {
       "kind": "suite",
       "id": "aarch64-smp",
       "layer": "qemu_e2e",
@@ -894,6 +904,16 @@
       "isolation": "none",
       "scenarios": [],
       "source": "qemutests/test_aarch64_sched_tick.py"
+    },
+    {
+      "id": "qemutests.test_aarch64_serror",
+      "layer": "harness",
+      "subsystem": "test-framework",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_aarch64_serror.py"
     },
     {
       "id": "qemutests.test_aarch64_user_runtime",

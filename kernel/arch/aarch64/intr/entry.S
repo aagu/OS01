@@ -330,3 +330,34 @@ aarch64_el0_enter:
     ret
 .size aarch64_el0_enter, . - aarch64_el0_enter
 #endif
+
+#if AARCH64_SERROR_TEST
+.globl aarch64_serror_test_enter
+.type aarch64_serror_test_enter, %function
+aarch64_serror_test_enter:
+    msr     daifset, #0xf
+    movz    x9, #0x0055
+    movk    x9, #0xbe00, lsl #16
+    msr     esr_el1, x9
+    msr     spsr_el1, x1
+    adrp    x9, aarch64_serror_test_returned
+    add     x9, x9, :lo12:aarch64_serror_test_returned
+    msr     elr_el1, x9
+    msr     sp_el0, x2
+    isb
+    cmp     x0, #0x180
+    b.ne    1f
+    msr     spsel, #0
+1:
+    mrs     x9, vbar_el1
+    add     x9, x9, x0
+    br      x9
+.globl aarch64_serror_test_returned
+.type aarch64_serror_test_returned, %function
+aarch64_serror_test_returned:
+    bl      aarch64_serror_test_on_returned
+0:  wfi
+    b       0b
+.size aarch64_serror_test_returned, . - aarch64_serror_test_returned
+.size aarch64_serror_test_enter, . - aarch64_serror_test_enter
+#endif

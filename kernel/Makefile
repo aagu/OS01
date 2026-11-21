@@ -574,6 +574,15 @@ ifeq ($(ARCH),aarch64)
 ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST)),)
 ALL_CFLAGS += -DAARCH64_SYNC_FAULT_TEST=1
 endif
+ifneq ($(strip $(AARCH64_SERROR_TEST)),)
+ifeq ($(AARCH64_SERROR_TEST),el1t)
+ALL_CFLAGS += -DAARCH64_SERROR_TEST=1 -DAARCH64_SERROR_TEST_ORIGIN_EL1T=1
+else ifeq ($(AARCH64_SERROR_TEST),el1h)
+ALL_CFLAGS += -DAARCH64_SERROR_TEST=1 -DAARCH64_SERROR_TEST_ORIGIN_EL1H=1
+else ifeq ($(AARCH64_SERROR_TEST),el0t)
+ALL_CFLAGS += -DAARCH64_SERROR_TEST=1 -DAARCH64_SERROR_TEST_ORIGIN_EL0T=1
+endif
+endif
 # The AArch64 port links the SAME fixed-number syscall table as the
 # other architectures, hiding every entry it does not serve: only the
 # four shared native entries (exit/getpid/getppid/clock_gettime) remain.

@@ -35,6 +35,9 @@ endif
 ifneq ($(strip $(AARCH64_USER_RUNTIME_TEST)),)
 $(error AARCH64_USER_RUNTIME_TEST='$(AARCH64_USER_RUNTIME_TEST)' is aarch64-only; the x86_64 profile must not select the user-runtime variant)
 endif
+ifneq ($(strip $(AARCH64_SERROR_TEST)),)
+$(error AARCH64_SERROR_TEST='$(AARCH64_SERROR_TEST)' is aarch64-only; the x86_64 profile must not select the serror variant)
+endif
 # ── Isolated destructive dispatch probe (Task 5, spec §9.3) ──────
 # The probe-selection MACRO arrives through KERNEL_EXTRA_CFLAGS — the
 # channel that already crosses the controlled sub-make boundary

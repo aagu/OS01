@@ -271,6 +271,14 @@ void arch_smp_ap_cpu_init(uint32_t cpu_id, struct percpu *cpu)
 {
     (void)cpu;
     __asm__ __volatile__("msr daifclr, #4\n\tisb" ::: "memory");
+#if AARCH64_SERROR_TEST
+    {
+        extern void aarch64_serror_test_record_daif(uint32_t cpu_id, uint64_t daif);
+        uint64_t daif = 0;
+        __asm__ __volatile__("mrs %0, daif" : "=r"(daif));
+        aarch64_serror_test_record_daif(cpu_id, daif);
+    }
+#endif
     /* Per-CPU tick ownership (per-CPU tick accounting, Task 2).
      *
      * The GLOBAL time base still belongs to the BSP alone: the timer

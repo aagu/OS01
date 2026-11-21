@@ -610,6 +610,14 @@ void arch_boot_controllers(const struct boot_context *bootctx)
     dtb_init(bootctx);
     pl011_init();
     __asm__ __volatile__("msr daifclr, #4\n\tisb" ::: "memory");
+#if AARCH64_SERROR_TEST
+    {
+        extern void aarch64_serror_test_record_daif(uint32_t cpu_id, uint64_t daif);
+        uint64_t daif = 0;
+        __asm__ __volatile__("mrs %0, daif" : "=r"(daif));
+        aarch64_serror_test_record_daif(0, daif);
+    }
+#endif
     log_info("OS01 aarch64 uefi handoff ok\n");
     log_info("OS01 aarch64 phase1 boot ok\n");
     gic_init();
@@ -698,8 +706,86 @@ void arch_boot_runtime(void)
     }
 }
 
+#if AARCH64_SERROR_TEST
+static volatile uint64_t serror_daif_sample[AARCH64_BOOT_MAX_CPUS];
+static volatile uint32_t serror_daif_valid[AARCH64_BOOT_MAX_CPUS];
+
+void aarch64_serror_test_record_daif(uint32_t cpu_id, uint64_t daif)
+{
+    if (cpu_id >= AARCH64_BOOT_MAX_CPUS) return;
+    serror_daif_sample[cpu_id] = daif;
+    __atomic_store_n(&serror_daif_valid[cpu_id], 1u, __ATOMIC_RELEASE);
+}
+
+void aarch64_serror_test_on_returned(void)
+{
+    kputs("[aarch64-serror-test] returned\n");
+}
+
+static void serror_put_hex64(uint64_t v)
+{
+    char buf[17];
+    for (int i = 0; i < 16; i++) {
+        unsigned n = (unsigned)((v >> (60 - i * 4)) & 0xfu);
+        buf[i] = (char)(n < 10 ? '0' + n : 'a' + (n - 10));
+    }
+    buf[16] = '\0';
+    kputs(buf);
+}
+
+extern _Noreturn void aarch64_serror_test_enter(uint64_t slot, uint64_t spsr,
+                                                uint64_t test_sp_el0);
+#endif
+
 void arch_post_smp_selftest(void)
 {
+#if AARCH64_SERROR_TEST
+    if (dtb_cpu_count() < 2 ||
+        __atomic_load_n(&percpu_data[1].online, __ATOMIC_ACQUIRE) == 0) {
+        kputs("[aarch64-serror-test] FAIL ap not online\n");
+        for (;;) arch_cpu_halt();
+    }
+    if (__atomic_load_n(&serror_daif_valid[0], __ATOMIC_ACQUIRE) == 0 ||
+        __atomic_load_n(&serror_daif_valid[1], __ATOMIC_ACQUIRE) == 0) {
+        kputs("[aarch64-serror-test] FAIL missing daif sample\n");
+        for (;;) arch_cpu_halt();
+    }
+    for (uint32_t c = 0; c < 2u; c++) {
+        uint64_t d = serror_daif_sample[c];
+        uint32_t a = (uint32_t)((d >> 8) & 1u);
+        uint32_t i = (uint32_t)((d >> 7) & 1u);
+        kputs("[aarch64-serror-test] daif cpu=");
+        kputu(c);
+        kputs(" a=");
+        kputu(a);
+        kputs(" i=");
+        kputu(i);
+        kputs("\n");
+    }
+    uint64_t mpidr = 0;
+    __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr));
+#if defined(AARCH64_SERROR_TEST_ORIGIN_EL1T)
+    const char *origin = "el1t";
+    uint64_t slot = 0x180u;
+    uint64_t spsr = 0x244u;
+#elif defined(AARCH64_SERROR_TEST_ORIGIN_EL1H)
+    const char *origin = "el1h";
+    uint64_t slot = 0x380u;
+    uint64_t spsr = 0x245u;
+#elif defined(AARCH64_SERROR_TEST_ORIGIN_EL0T)
+    const char *origin = "el0t";
+    uint64_t slot = 0x580u;
+    uint64_t spsr = 0x240u;
+#else
+#error "AARCH64_SERROR_TEST requires an origin define"
+#endif
+    kputs("[aarch64-serror-test] armed origin=");
+    kputs(origin);
+    kputs(" mpidr=0x");
+    serror_put_hex64(mpidr);
+    kputs("\n");
+    aarch64_serror_test_enter(slot, spsr, 0u);
+#endif
 #if AARCH64_EL0_TEST
     extern int test_aarch64_el0_irq(void);
     extern int test_aarch64_el0_preempt(void);

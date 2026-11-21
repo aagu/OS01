@@ -286,6 +286,7 @@ $(eval $(call _aarch64_mode_gate,user-runtime,AARCH64_EL0_TEST AARCH64_M1_TEST A
 $(eval $(call _aarch64_mode_gate,sched-wake,AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_SMP_TEST_NO_ACK_CPU))
 $(eval $(call _aarch64_mode_gate,sched-ap,AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_SMP_TEST_NO_ACK_CPU))
 $(eval $(call _aarch64_mode_gate,lma-layout,AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_AP_SCHED_TEST AARCH64_SCHED_TICK_TEST AARCH64_SMP_TEST_NO_ACK_CPU))
+$(eval $(call _aarch64_mode_gate,serror,AARCH64_SERROR_TEST AARCH64_M1_TEST AARCH64_SCHED_TEST AARCH64_AP_SCHED_TEST AARCH64_SCHED_TICK_TEST AARCH64_USER_RUNTIME_TEST AARCH64_EL0_TEST AARCH64_SMP_TEST_NO_ACK_CPU))
 ifneq ($(filter test-aarch64,$(MAKECMDGOALS)),)
 ifeq ($(MODE),sched)
 ifneq ($(filter 1,$(AARCH64_SYNC_FAULT_TEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(KERNEL_CANARY_SELFTEST) $(OS01_SYSTEST)),)
@@ -430,6 +431,14 @@ endef
 $(eval $(call _aarch64_prep,smp,1,))
 $(eval $(call _aarch64_prep,gic-spi,1,))
 $(eval $(call _aarch64_prep,sync-fault,1,AARCH64_SYNC_FAULT_TEST=1))
+$(eval $(call _aarch64_prep,serror-el1t,1,AARCH64_SERROR_TEST=el1t))
+$(eval $(call _aarch64_prep,serror-el1h,1,AARCH64_SERROR_TEST=el1h))
+$(eval $(call _aarch64_prep,serror-el0t,1,AARCH64_SERROR_TEST=el0t))
+.PHONY: _test-aarch64-prep-serror
+_test-aarch64-prep-serror:
+	$(MAKE) --no-print-directory _test-aarch64-prep-serror-el1t
+	$(MAKE) --no-print-directory _test-aarch64-prep-serror-el1h
+	$(MAKE) --no-print-directory _test-aarch64-prep-serror-el0t
 $(eval $(call _aarch64_prep,sched-wake,1,AARCH64_AP_SCHED_TEST=wake))
 $(eval $(call _aarch64_prep,sched-tick,1,AARCH64_SCHED_TICK_TEST=1))
 $(eval $(call _aarch64_prep,m3-probe,,))
@@ -482,6 +491,20 @@ _test-aarch64-run-sync-fault:
 	python3 qemutests/aarch64_sync_fault.py \
 	  --timeout 60 \
 	  $(call _aarch64_run_tail,$(call aarch64_variant_disk,sync-fault),$(OS01_ROOT)/test-results/aarch64-sync-fault/$$(date -u +%Y%m%dT%H%M%S)-$$$$)
+
+.PHONY: _test-aarch64-run-serror
+_test-aarch64-run-serror:
+	python3 qemutests/aarch64_serror.py \
+	  --timeout 60 \
+	  --el1t-image "$(call aarch64_variant_disk,serror-el1t)" \
+	  --el1t-elf "$(call aarch64_variant_kernel,serror-el1t)" \
+	  --el1h-image "$(call aarch64_variant_disk,serror-el1h)" \
+	  --el1h-elf "$(call aarch64_variant_kernel,serror-el1h)" \
+	  --el0t-image "$(call aarch64_variant_disk,serror-el0t)" \
+	  --el0t-elf "$(call aarch64_variant_kernel,serror-el0t)" \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" --qemu "$(AARCH64_QEMU)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
+	  --log-dir "$(OS01_ROOT)/test-results/aarch64-serror/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
 
 # MODE=sched (spec §10.2, P5 Tasks 1-3): the strict scheduler acceptance
 # runner. Prep builds the exact KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=<v>
@@ -592,8 +615,8 @@ test-aarch64:
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
 	@case "$(MODE)" in \
-	  smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|sched-tick|user-runtime|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract|lma-layout) ;; \
-	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|m3-probe|sched|sched-ap|sched-wake|sched-tick|user-runtime|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract|lma-layout, got '$(MODE)'" >&2; exit 1;; \
+	  smp|no-ack|gic-spi|sync-fault|serror|m3-probe|sched|sched-ap|sched-wake|sched-tick|user-runtime|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract|lma-layout) ;; \
+	  *) echo "MODE must be smp|no-ack|gic-spi|sync-fault|serror|m3-probe|sched|sched-ap|sched-wake|sched-tick|user-runtime|m1-ram|m1-sparse|m1-arena-exhaust|m1-table-exhaust|m1-ap-bad-root|boot-contract|lma-layout, got '$(MODE)'" >&2; exit 1;; \
 	esac
 	@echo "  [test-aarch64] MODE=$(MODE) extra=$(TEST_AARCH64_EXTRA_$(MODE))"
 	$(MAKE) --no-print-directory _test-aarch64-prep-$(MODE)
