@@ -70,20 +70,18 @@ UEFI_RUNTIME_INPUT_DG := $(BUILD_DIR)/receipts/uefi-runtime.input.digest
 # The dispatch keys on the target triple, NOT the userland capability —
 # since the 2026-11-18 aarch64 userland capability the aarch64 profile
 # also carries `userland` but must keep building the AArch64 loader.
-ifeq ($(TARGET_TRIPLE),x86_64-unknown-none)
-UEFI_ARCH_FAMILY  := x86_64
-UEFI_TARGET_EFI   := BOOTX64.EFI
-UEFI_CLANG        ?= $(CLANG)
-UEFI_DIGEST_CLANG := $(UEFI_CLANG)
-UEFI_BOOT_SRCS    := boot/uefi/main.c boot/uefi/boot_device.c boot/uefi/arch/x86_64/boot.c
-else
-UEFI_ARCH_FAMILY  := aarch64
-UEFI_TARGET_EFI   := BOOTAA64.EFI
-UEFI_DIGEST_CLANG := clang
-UEFI_BOOT_SRCS    := boot/uefi/main.c boot/uefi/boot_device.c boot/uefi/arch/aarch64/boot.c \
-                     boot/uefi/arch/aarch64/elf.c boot/uefi/arch/aarch64/fdt_early.c \
-                     boot/uefi/arch/aarch64/handoff.S
-endif
+# Resolved at parse time with $(if) (never inside a recipe — the busybox
+# adapter comment in mk/components/user.mk records what multi-line recipe
+# expansions do to backslash-newline handling).
+UEFI_ARCH_FAMILY  := $(if $(filter x86_64-unknown-none,$(TARGET_TRIPLE)),x86_64,aarch64)
+UEFI_TARGET_EFI   := $(if $(filter x86_64-unknown-none,$(TARGET_TRIPLE)),BOOTX64.EFI,BOOTAA64.EFI)
+# x86 only: expands empty on other triples, which behaves like undefined
+# for every consumer (OS01_SUBMAKE_ARGS skips empty whitelist entries, and
+# the boot/uefi inner make self-derives UEFI_CLANG from its CC there).
+UEFI_CLANG        ?= $(if $(filter x86_64-unknown-none,$(TARGET_TRIPLE)),$(CLANG))
+UEFI_DIGEST_CLANG := $(if $(filter x86_64-unknown-none,$(TARGET_TRIPLE)),$(UEFI_CLANG),clang)
+UEFI_BOOT_SRCS    := boot/uefi/main.c boot/uefi/boot_device.c boot/uefi/arch/$(UEFI_ARCH_FAMILY)/boot.c \
+                     $(if $(filter aarch64,$(UEFI_ARCH_FAMILY)),boot/uefi/arch/aarch64/elf.c boot/uefi/arch/aarch64/fdt_early.c boot/uefi/arch/aarch64/handoff.S)
 
 UEFI_EFI_ARTIFACT := $(BUILD_DIR)/artifacts/uefi/$(UEFI_TARGET_EFI)
 
@@ -91,21 +89,17 @@ UEFI_EFI_ARTIFACT := $(BUILD_DIR)/artifacts/uefi/$(UEFI_TARGET_EFI)
 # per-arch dispatch header, the shared boot_context ABI header, and
 # (for aarch64) the shared handoff layout that the AArch64 loader
 # pulls in via a relative path. Keep every x86 input present and add
-# the AArch64-only header inside the family conditional so a header-
-# only layout change still re-keys both the staged runtime receipt
-# and the EFI artifact.
+# the AArch64-only headers conditionally so a header-only layout
+# change still re-keys both the staged runtime receipt and the EFI
+# artifact.
 UEFI_BOOT_INPUTS := $(UEFI_BOOT_SRCS) boot/uefi/arch/arch.h \
                     boot/uefi/boot_device.h \
                     kernel/include/core/bootinfo.h
-ifeq ($(UEFI_ARCH_FAMILY),aarch64)
 # LMA Task 2: the AArch64 loader consumes the shared layout constants
 # through loader.h -> handoff_layout.h -> boot_layout.h, so every link
 # in that chain (plus the configured boot block value itself) re-keys
 # the runtime receipt and the EFI artifact.
-UEFI_BOOT_INPUTS += kernel/include/arch/aarch64/handoff_layout.h \
-                    kernel/include/arch/aarch64/boot_layout.h \
-                    boot/uefi/arch/aarch64/loader.h
-endif
+UEFI_BOOT_INPUTS += $(if $(filter aarch64,$(UEFI_ARCH_FAMILY)),kernel/include/arch/aarch64/handoff_layout.h kernel/include/arch/aarch64/boot_layout.h boot/uefi/arch/aarch64/loader.h)
 
 # ── Runtime adapter (FORCE: digest-gated, always checks) ──────────
 # ONE shell line: verify submodule initialized + HEAD == gitlink + worktree
