@@ -373,10 +373,10 @@ jobs:
           tolerant_suite() {
             echo "== tolerant: $* =="
             if ! "$@"; then
-              echo "::warning::tolerant suite '$*' failed once — retrying (record in flake ledger via make test-flake-report)"
+              echo "::warning::tolerant suite '$*' failed once — retrying (record in flake ledger via make test-flake-report MERGE=<downloaded fragment>)"
               sleep 10
               if ! "$@"; then
-                echo "::warning::tolerant suite '$*' failed twice — swallowed by tolerant gate (record in flake ledger via make test-flake-report)"
+                echo "::warning::tolerant suite '$*' failed twice — swallowed by tolerant gate (record in flake ledger via make test-flake-report MERGE=<downloaded fragment>)"
                 true
               fi
             fi
@@ -430,10 +430,10 @@ jobs:
         run: |
           (
             if ! make PROFILE=aarch64-clang test-aarch64 MODE=sched-ap; then
-              echo "::warning::tolerant suite 'aarch64-sched-ap' failed once — retrying (record in flake ledger via make test-flake-report)"
+              echo "::warning::tolerant suite 'aarch64-sched-ap' failed once — retrying (record in flake ledger via make test-flake-report MERGE=<downloaded fragment>)"
               sleep 10
               make PROFILE=aarch64-clang test-aarch64 MODE=sched-ap || {
-                echo "::warning::tolerant suite 'aarch64-sched-ap' failed twice — swallowed by tolerant gate (record in flake ledger via make test-flake-report)"
+                echo "::warning::tolerant suite 'aarch64-sched-ap' failed twice — swallowed by tolerant gate (record in flake ledger via make test-flake-report MERGE=<downloaded fragment>)"
                 true
               }
             fi
@@ -467,6 +467,29 @@ jobs:
           path: build/*/logs/tests/**
           if-no-files-found: ignore
           retention-days: 14
+
+      # The flake ledger reporter runs here for the first time (AAGU-36):
+      # the fragment is a DELTA (this run's suites only), so merging it
+      # into config/flake-ledger.json is idempotent.  CI never writes the
+      # repo — a maintainer downloads the artifact and merges locally.
+      - name: Flake ledger fragment (nightly)
+        if: always()
+        run: |
+          mkdir -p build/flake-ledger
+          # The reporter never gates: a failure here only emits a warning.
+          ( python3 "$GITHUB_WORKSPACE/qemutests/flake_report.py" --root "$GITHUB_WORKSPACE" \
+              --emit-fragment build/flake-ledger/flake-ledger.fragment.json \
+              --format table > build/flake-ledger/flake-report.tsv ) \
+            || echo "::warning::flake ledger report failed (non-gating)"
+
+      - name: Upload flake ledger fragment
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: flake-ledger
+          path: build/flake-ledger/**
+          if-no-files-found: ignore
+          retention-days: 30
 
   # ── Master artifact publication (push to master only) ─────────
   # Runs only after the check jobs have all passed on master.

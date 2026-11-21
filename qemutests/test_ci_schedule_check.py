@@ -179,5 +179,37 @@ class CiScheduleCheckTests(unittest.TestCase):
                 self.assertEqual(check_ci_schedule.main(tmp_root), 1)
 
 
+    def test_flake_ledger_reporter_must_run_in_nightly(self):
+        """The nightly job must invoke the reporter (roadmap P0 gap)."""
+        import check_ci_schedule
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = self._copy_minimal_repo(Path(tmp))
+            ci_path = tmp_root / ".github" / "workflows" / "ci.yml"
+            ci_text = ci_path.read_text(encoding="utf-8")
+            self.assertIn("flake_report.py", ci_text)
+            ci_path.write_text(
+                ci_text.replace("flake_report.py", "flake_report_disabled.py"),
+                encoding="utf-8",
+            )
+            errors = check_ci_schedule.check(tmp_root)
+            self.assertTrue(any("flake ledger reporter" in error for error in errors))
+
+    def test_flake_ledger_artifact_upload_must_exist(self):
+        import check_ci_schedule
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp_root = self._copy_minimal_repo(Path(tmp))
+            ci_path = tmp_root / ".github" / "workflows" / "ci.yml"
+            ci_text = ci_path.read_text(encoding="utf-8")
+            self.assertIn("name: flake-ledger", ci_text)
+            ci_path.write_text(
+                ci_text.replace("name: flake-ledger", "name: gone-ledger"),
+                encoding="utf-8",
+            )
+            errors = check_ci_schedule.check(tmp_root)
+            self.assertTrue(any("flake-ledger artifact" in error for error in errors))
+
+
 if __name__ == "__main__":
     unittest.main()

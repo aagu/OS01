@@ -336,6 +336,19 @@ def check(root: str | Path) -> list[str]:
     if not _has_full_matrix_always_log_upload(ci_text):
         errors.append("full-matrix log upload step missing 'if: always()'")
 
+    # 7. The nightly job must invoke the flake ledger reporter and publish
+    #    its fragment.  Without this wiring the reporter only ever runs by
+    #    hand — the exact gap roadmap P0 closed (AAGU-36).
+    fm_cmds = "\n".join(
+        line for step in steps if step["job"] == "full-matrix" for line in step["lines"]
+    )
+    if "flake_report.py" not in fm_cmds:
+        errors.append("full-matrix missing flake ledger reporter invocation (flake_report.py)")
+    if "--emit-fragment" not in fm_cmds:
+        errors.append("full-matrix flake ledger step missing --emit-fragment")
+    if "name: flake-ledger" not in ci_text:
+        errors.append("ci.yml missing flake-ledger artifact upload")
+
     return errors
 
 
