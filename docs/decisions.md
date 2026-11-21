@@ -47,6 +47,7 @@
 | 16 | 键盘 VT100 转义序列 | K_UP/DOWN/LEFT/RIGHT → ESC [ A/B/C/D | canonical 模式静默丢弃 |
 | 28 | inittab 格式 | `id:action:process`（3 字段，冒号分界，open+read 直接解析） | 去掉 runlevel；ACT_* 位掩码 0x01..0x80 与 run_actions() dispatch 兼容 |
 | 29 | OS01_SYSTEST 切换 | Makefile cp 模板（config/inittab.systest），非编译期 #ifdef | 同一 init 二进制同时支持测试/正常模式 |
+| 47 | flake 账本写回（AAGU-36） | 报告器新增 `--merge` / `--update-ledger` / `--emit-fragment`；账本 `config/flake-ledger.json` 入库，CI 只发 fragment artifact、维护者本地合并后提交 | 推翻 D8 的「无写回」一条（否则本地无历史账本可审计、quarantine 裁决无处落点）；保留 D8 的「不新增权限」与「ci.yml job 骨架不动」——CI 只读日志、只上传 artifact，写回是本地显式命令。设计见 [flake 账本入库设计](superpowers/specs/2026-11-21-flake-ledger-design.md) |
 
 ## I/O 多路复用（poll/select）
 

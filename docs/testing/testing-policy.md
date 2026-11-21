@@ -203,18 +203,49 @@ parse-time 校验，缺失生成片段即硬错误。
 
 ### 8.6 flake 账本
 
-`make test-flake-report`（`qemutests/flake_report.py`）汇总各 suite 的运行 / 失败 /
-连续失败轮次，连续失败 ≥3 轮（`QUARANTINE_STREAK_THRESHOLD`）标记 quarantine 候选；
-可从本地 `build/*/logs/tests/**/result.json` 归档读取，也可用 `--from-ci N` 下载 CI
-产物。**报告器恒退出 0**，不作为门禁。
+账本文件是 **`config/flake-ledger.json`**（已入库、随仓库提交）。它有两段，各有一个主人：
 
-> **缺口（如实记录）**：账本**没有入库文件**，只能从 CI artifacts 现算，
-> 本地无历史账本可审计。规划项见 [roadmap.md](../roadmap.md) P0。
+| 段 | 主人 | 内容 |
+|---|---|---|
+| `runs` | 机器 | 逐次运行历史，去重键 `(suite, run_id)`；`source` 为 `local` / `ci` / `merged` |
+| `decisions` | 人 | 每个 suite 的裁决：`open`（待裁决）/ `fix` / `downgrade` / `waive`，附备注与日期 |
+
+`runs` / `fails` / `consec_fails` / `quarantine_candidate` **不落盘**，每次读取时从 `runs` 重算，
+账本因此不可能与自身内容漂移。连续失败 ≥3 轮（`QUARANTINE_STREAK_THRESHOLD`）即 quarantine 候选；
+`decision` 仍为 `open` 的候选就是**待裁决项**，报告表尾的 `PENDING-ADJUDICATION` 段列出它们，
+闭合 D8「连续 3 次夜间 flake 必须裁决：修复/降级/豁免」。
+
+`make test-flake-report`（`qemutests/flake_report.py`）汇总各 suite 的运行 / 失败 / 连续失败轮次：
+
+```
+make test-flake-report                        # 账本基线 + 本地 build/*/logs/tests/**/result.json
+make test-flake-report FROM_CI=5              # 用 gh 查最近 5 次 schedule run 的 artifacts
+make test-flake-report MERGE="frag.json"      # 合并 CI 产出的 fragment（可多份，空格分隔）
+make test-flake-report UPDATE_LEDGER=1        # 把合并结果写回账本
+make test-flake-report EMIT_FRAGMENT=out.json # 只导出本轮新发现的增量
+make test-flake-report LEDGER=path FORMAT=json
+```
+
+**报告器恒退出 0**，不作为门禁；只有 `--update-ledger` 在账本损坏时拒绝覆盖并非零退出。
+
+**CI 流程**：夜间 `full-matrix` job 跑完套件后调用报告器，产出增量 fragment 与全量 TSV，
+以 artifact `flake-ledger` 发布（CI 不写仓库、不新增权限）。维护者下载 artifact 后本地合并并提交：
+
+```
+make test-flake-report MERGE=<downloaded fragment> UPDATE_LEDGER=1
+```
+
+`tools/tests/check_ci_schedule.py` 对此有 fail-closed 契约：夜间 job 必须调用 `flake_report.py`、
+必须带 `--emit-fragment`、必须上传 `flake-ledger` artifact——防止回退到「CI 从不调用报告器」。
+
+**种子账本不含历史运行记录**（`runs: []`）——本地没有 CI 历史 artifacts，补写即假证据。
+连续失败计数从第一次合并 fragment 起累积；已知开放 flake 家族（`terminal-present` / `gui` /
+`gui-desktop` / `aarch64-sched-ap`）以 `decision: "open"` 预置在 `decisions` 里。
 
 ### 8.7 CI 纪律
 
 - 严格 suite 失败即快速失败；宽容集合被精确圈定并指向 flake 账本
-  （CI 以 `::warning::` 提示记录到 `make test-flake-report`）。
+  （CI 以 `::warning::` 提示记录到 `make test-flake-report MERGE=<downloaded fragment>`）。
 - 计时分类默认严格，宽容白名单是**封闭**的。
 - `make test-harness` 通过先决目标 `check-ci-schedule` 验证 `ci.yml`；CI 不再单独重复执行。
 

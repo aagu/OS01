@@ -1,6 +1,6 @@
 # OS01 优化路线图
 
-> **基准**：`1e4b0d21`（2026-11-20）　**日期**：2026-11-20
+> **基准**：`1e4b0d21`（2026-11-20）　**日期**：2026-11-21
 
 本文件**只列未完成 / 进行中**的规划项。已完成工作见 [`changelog.md`](changelog.md)；**最近 3 天的闭环快速索引见文末「近期闭环索引」**；闭环细节见各专题文档：
 [`arch.md`](arch.md) · [`memory/memory.md`](memory/memory.md) · [`memory/cow-mmap.md`](memory/cow-mmap.md) ·
@@ -11,7 +11,7 @@
 
 | 优先级 | 主题 | 未完成项 | 备注 |
 |-------|------|---------|------|
-| **P0** | 工程与测试基础设施 | 1 | flake 账本入库 |
+| **P0** | 工程与测试基础设施 | 0 | flake 账本入库已于 2026-11-21 闭环（见 [`changelog.md`](changelog.md)） |
 | **P1** | 安全加固 | 3 | ASLR-A / ASLR-B / UBSan+KASan |
 | **P2** | aarch64 适配 | 11 | 内存与执行体 3 · 架构统一 2 · 真机阻断 6 |
 | **P2** | 架构治理 / 扩展性 | 0 | 新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填该节 |
@@ -25,9 +25,9 @@
 
 ## 🧰 P0 工程与测试基础设施
 
-| 项 | 内容 / 完成条件 | 依赖 | 备注 |
-|----|-----------------|------|------|
-| flake 账本入库 | `make test-flake-report` 报告器已就位（连续失败 ≥3 轮标记 quarantine 候选，`QUARANTINE_STREAK_THRESHOLD=3`，`qemutests/flake_report.py:19`），但**账本本身没有入库文件**：报告只能现算——本地走 `build/*/logs/tests/**/result.json`，CI 走 artifacts（`flake_report.py` 只读、不写回），本地无历史账本可审计。**且 CI workflow 从不调用报告器**（`.github/workflows/ci.yml` 只在 warning 文案里提及 `make test-flake-report`），`--from-ci` 路径目前只能人工触发 | 报告器 ✅ | `qemutests/flake_report.py`、`mk/components/run.mk:771-772`（帮助文本 `:1885`）；已知开放 flake 家族：terminal-present / gui / gui-desktop / sched-ap + SMP 时序类（nightly terminal/gfx timing family，non-blocking） |
+当前无剩余项。本节最近闭环：**flake 账本入库**（2026-11-21，账本文件 `config/flake-ledger.json`
+入库 + CI 夜间调用报告器，见 [`changelog.md`](changelog.md) 与
+[设计 spec](superpowers/specs/2026-11-21-flake-ledger-design.md)）。
 
 ## 🔒 P1 安全加固
 
@@ -194,12 +194,13 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 
 ---
 
-## 近期闭环索引（最近 3 天：2026-11-18 ~ 2026-11-20）
+## 近期闭环索引（最近 3 天：2026-11-19 ~ 2026-11-21）
 
 只列条目名与文档指针；完整「做了什么 / 关键结论 / 验证」见 `docs/changelog.md` 对应日期条目。更早的闭环记录同样在 changelog，不在本索引重复。
 
 | 闭环项 | 日期 | 详情 |
 |--------|------|------|
+| **flake 账本入库**（账本文件 `config/flake-ledger.json` 入库：`runs` 机器写 + `decisions` 人写；报告器支持 `--merge`/`--update-ledger`/`--emit-fragment`；CI 夜间首次调用报告器并发布 `flake-ledger` artifact；契约门禁防回退。推翻 D8「无写回」，保留「不加权限」「不动 job 骨架」） | 2026-11-21 | [changelog](changelog.md#2026-11-21) · [spec](superpowers/specs/2026-11-21-flake-ledger-design.md) · [plan](superpowers/plans/2026-11-21-flake-ledger.md) · [testing-policy](testing/testing-policy.md#86-flake-账本) |
 | **用户态进入与返回门面**（`arch/context.h`：`arch_task_prepare_user_entry`、共享返回编排 `context_run_return_work`、`arch_context_restore_frame` 同址恢复） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [arch.md](arch.md#facade--override-矩阵) · [spec](superpowers/specs/2026-11-20-user-context-facade-design.md) · [plan](superpowers/plans/2026-11-20-user-context-facade.md) |
 | **aarch64 EL3 分支标注仅 QEMU 支持**（`head.S` EL3→EL1 盲写 `SCR_EL3`/`SPSR_EL3` 边界化：仅 QEMU `-M virt,secure=on` 场景，真机 TF-A/UEFI 从 EL2/EL1 交接走 2a 分支，不受影响） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [arch.md](arch.md#aarch64-平台值解绑2026-11-18--2026-11-19) |
 | **libc 统一 libk.a 内核子集与审计基线**（x86_64 / aarch64 同一份 32 对象 / 77 符号，审计基线架构中立） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [libc.md](libc/libc.md) |

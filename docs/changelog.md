@@ -1,9 +1,33 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-20）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-21）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
+
+## 2026-11-21
+
+- test(infra): **flake 账本入库（AAGU-36，闭合 roadmap P0「flake 账本入库」）**——账本从「每次现算、算完即弃」变为仓库内可审计的持久化记录；CI 首次真正调用报告器（spec `docs/superpowers/specs/2026-11-21-flake-ledger-design.md`、plan `docs/superpowers/plans/2026-11-21-flake-ledger.md`）：
+
+  **做了什么**
+  - **账本文件入库**：`config/flake-ledger.json`，两段各有一个主人——`runs`（机器写，逐次运行历史，去重键 `(suite, run_id)`，`source` 为 `local`/`ci`/`merged`）与 `decisions`（人写，每 suite 的 `open`/`fix`/`downgrade`/`waive` 裁决 + 备注 + 日期）。派生统计量（`runs`/`fails`/`consec_fails`/`quarantine_candidate`）**不落盘**、每次读取时从 `runs` 重算，账本因此不可能与自身内容漂移；合并只追加 `runs`，**`decisions` 永不被覆盖**。
+  - **数据模型独立成模块**：新增 `qemutests/flake_ledger.py`（`LedgerRun` / `Ledger` / `load_ledger` / `save_ledger` / `merge_runs` / `write_fragment` / `load_fragment`），原子写回走 tmp + `os.replace`；`qemutests/flake_report.py` 只保留报告职责并接入账本。
+  - **报告器 CLI 扩展**：新增 `--ledger`（基线，默认 `<root>/config/flake-ledger.json`）、`--merge`（合并 fragment/账本，可重复）、`--update-ledger`（原子写回）、`--emit-fragment`（只导出本轮增量）、`--format json`。TSV 表新增 `DECISION` 列与表尾 `PENDING-ADJUDICATION` 段（待裁决候选），闭合 D8「连续 3 次夜间 flake 必须裁决：修复/降级/豁免」的落点。报告模式恒退出 0；**写回模式遇损坏账本拒绝覆盖并非零退出**。
+  - **Make 入口**：`make test-flake-report` 支持 `FROM_CI` / `LEDGER` / `MERGE` / `UPDATE_LEDGER` / `EMIT_FRAGMENT` / `FORMAT` 六个变量（帮助文本同步）。
+  - **CI 首次调用报告器**：夜间 `full-matrix` job 跑完套件后调报告器，产出增量 fragment（只含本轮 suite，合并幂等）与全量 TSV，以 artifact `flake-ledger` 发布。**CI 不写仓库、不新增权限**（`permissions` 块未动），失败只发 `::warning::` 不门禁；宽容 suite 的 `::warning::` 文案改为指向 `make test-flake-report MERGE=<downloaded fragment>`。
+  - **契约门禁**：`tools/tests/check_ci_schedule.py` 新增 fail-closed 检查——夜间 job 必须调用 `flake_report.py`、必须带 `--emit-fragment`、必须上传 `flake-ledger` artifact，防止回退到「CI 从不调用报告器」。
+  - **推翻 D8 的「无写回」一条**（记为 AAGU-36，`docs/decisions.md` #47），保留 D8 的「不新增权限」与「ci.yml job 骨架不动」。
+
+  **验收**
+  - `python3 -m unittest qemutests.test_flake_report`：24 个用例 PASS（账本往返、损坏账本拒写、未知 schema 版本拒绝、写回幂等、合并保留人工裁决、fragment 只含增量、混合时间戳排序、JSON 报告、种子账本校验、Make 变量暴露）。
+  - `python3 -m unittest qemutests.test_ci_schedule_check`：11 个用例 PASS（含两条新的「夜间必须调用报告器」「必须上传 flake-ledger artifact」反例）。
+  - `make check-ci-schedule`：`check_ci_schedule: OK (ci.yml matches config/test-ci-schedule.json)`；`ci.yml` YAML 解析通过，`permissions` 仍为 `contents: read` + `packages: read`，`full-matrix` 新增 2 个 step、job 依赖图未变。
+  - 端到端演练：CI step 命令本地实跑产出 fragment（1912 条）+ TSV；`make test-flake-report LEDGER=<copy> MERGE=<fragment> UPDATE_LEDGER=1` 合并后账本 `runs` = 1912、4 条 `decisions` 原样保留。
+
+  **已知限制（如实记录）**
+  - 种子账本 `runs` 为空——本地没有 CI 历史 artifacts，补写即假证据；**连续失败计数从第一次合并 fragment 起才开始累积**。
+  - 账本更新依赖维护者下载 CI artifact 并本地合并后提交；CI 不自动写库，`--from-ci` 仍是人工按需路径。
+  - 报告器仍不是门禁：账本为空、损坏或报告失败都不影响 CI 红绿。
 
 ## 2026-11-20
 
