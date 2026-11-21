@@ -7,6 +7,21 @@
 
 ## 2026-11-21
 
+- feat(aarch64): **产品镜像迁 ext2 根文件系统（VFS 门收尾：产品布局与 x86_64 对齐）**——aarch64 产品变体镜像从无分区表 64 MiB FAT32 superfloppy 迁到 mkdisk GPT 双分区布局（2026-11-18「VFS 门」时 ext2 内核侧已工作，本项消掉镜像层最后的架构差距；plan `docs/superpowers/plans/2026-11-21-aarch64-ext2-product-image.md`）：
+
+  **做了什么**
+
+  - **镜像规则重构**（`mk/components/image.mk`）：产品分支不再 mtools 灌整盘 FAT，改为生成 aarch64 专用小 manifest（`rootfs.product.manifest`，变体隔离目录）后走与 selftest 变体相同的 `mkdisk --esp-kernel kernel.elf` 流程：ESP FAT32 = BOOTAA64.EFI + kernel.elf → `/boot`，ext2 rootfs → `/`（192 MiB = 64 ESP + 128 ext2，几何与 x86 `disk.img` 完全一致）。不加 `rootfs` capability（doom/mbedTLS/GUI 不进 aarch64 的契约保持），不复制 x86 悬空 applet 软链缺陷。
+  - **产品用户态上 ext2**：`/bin/init`、`/bin/busybox`、`/bin/terminal`、`/bin/test_fp`、`/etc/inittab` 经 manifest 落 ext2；**`/bin/sh` 从 busybox 整文件拷贝改为真软链**——ext2 支持符号链接，FAT 无软链的妥协解除；busybox 按 argv[0] 分发语义不变，terminal.elf 的 `/bin/sh` 回退 exec 照常解析。
+  - **内核零改动**：aarch64 UEFI loader 经共享 `boot_device.c` 置 `BOOT_CONTEXT_HAS_BOOT_DEVICE`，`fs_boot_mounts` 走 GUID 匹配路径扫描 mkdisk GPT → root=hda2（ext2）挂 `/`、ESP=hda1（FAT32）挂 `/boot`，与 selftest 变体共用同一挂载代码。
+  - **测试跟随设计**（不做兼容妥协）：`qemutests/aarch64_user_runtime.py` 无布局断言，仅更新 `/bin/sh` 相关注释；`docs/build/build.md` 产物表与 bring-up 描述同步。**覆盖面变化如实记录**：整盘 FAT32 回退挂载路径失去 aarch64 产品级覆盖（该路径正是 superfloppy 的既有目的），FAT32 读覆盖经由 ESP→`/boot` 保留。
+
+  **验证**
+
+  - `make PROFILE=aarch64-clang aarch64-uefi`：192 MB 镜像 GPT 头 / 双分区 / ext2 magic 自检 OK；宿主侧核对 hda1 ESP（BOOTAA64.EFI + kernel.elf）、hda2 ext2（`/bin/*` 0755、`/kernel.elf` 0644、`/bin/sh` 120777 软链 → busybox）。
+  - `test-aarch64 MODE=user-runtime USER_RUNTIME_CASE=product`（1/2/4/8 核启动至 shell，2 核 `echo hi`/`exit`/respawn 交互）与 `USER_RUNTIME_CASE=fp`（1/2/4/8 核经 ash 实跑 `/bin/test_fp`）全 PASS；2 核日志取证 `fs: boot disk selected by GUID (hda), root=hda2 boot=hda1 (/boot ok)`。
+  - `test-aarch64 MODE=smp`（selftest 变体回归门）9/9 boot PASS（make 输出里的 `requires one START` 行是 `session.wait_for` 在部分串口文本上轮询证据的既有噪音，逐次 boot result.json 均 PASS）；`make test-host` 全绿。
+
 - test(infra): **flake 账本入库（AAGU-36，闭合 roadmap P0「flake 账本入库」）**——账本从「每次现算、算完即弃」变为仓库内可审计的持久化记录；CI 首次真正调用报告器（spec `docs/superpowers/specs/2026-11-21-flake-ledger-design.md`、plan `docs/superpowers/plans/2026-11-21-flake-ledger.md`）：
 
   **做了什么**

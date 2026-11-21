@@ -3,12 +3,14 @@
 # (spec: component boundary). The x86 disk image is built from the
 # version-controlled rootfs manifest (config/rootfs.mk) into a fresh staging
 # tree ($(ROOTFS_STAGING)); mkdisk then fills a GPT dual-partition image from
-# the generated file/symlink manifest. The aarch64 bring-up image (uefi
-# capability) is a plain 64 MiB FAT carrying BOOTAA64.EFI + kernel.elf +
-# firmware and — since the 2026-11-18 userland capability — the product
-# userspace (/bin/init, /bin/terminal, /etc/inittab) plus BusyBox (2026-11-21)
-# as real files (FAT has no symlinks). No mbedTLS/GUI apps/rootfs manifest on
-# this arch. AARCH64_UEFI_DISK
+# the generated file/symlink manifest. The aarch64 image (uefi capability) is
+# the same mkdisk GPT dual-partition layout: ESP FAT32 (BOOTAA64.EFI +
+# kernel.elf) → /boot and an ext2 rootfs → / — since 2026-11-21 the product
+# variant ships the product userspace (/bin/init, /bin/terminal, /bin/busybox
+# with a real /bin/sh symlink, /bin/test_fp, /etc/inittab) through an
+# aarch64-specific small manifest (no mbedTLS/GUI apps/rootfs.mk manifest on
+# this arch); before that date it was a whole-disk FAT32 superfloppy.
+# AARCH64_UEFI_DISK
 # is defined only by mk/targets/aarch64.mk (aarch64-clang profile), so the
 # `ifdef AARCH64_UEFI_DISK` gates below keep aarch64-only rules out of
 # x86_64-clang now that both profiles share the `uefi` capability.
@@ -246,16 +248,18 @@ $(BUILD_DIR)/image/QEMU_EFI.fd: $(AARCH64_UEFI_FIRMWARE)
 	@ln -sf ../firmware/QEMU_EFI.fd "$@"
 endif
 
-# ── aarch64 UEFI bring-up image (64 MiB FAT) ────────────────
+# ── aarch64 UEFI image (GPT dual-partition, both variants) ──
 # AAGU-5.6: target path uses $(AARCH64_UEFI_DISK) so variant builds
 # (weak-selftest, selftest) get isolated image dirs and never clobber
 # each other. Recipe body unchanged — $@ expands to the variant-aware path.
-# aarch64 selftest variant: GPT dual-partition disk (ESP FAT32 with
-# BOOTAA64.EFI + kernel.elf, ext2 rootfs with the VFS selftest marker
-# files) so the kernel exercises the GPT + ext2 mount path; the default
-# (product) variant keeps the unpartitioned 64 MiB FAT32 superfloppy that
-# exercises the whole-disk FAT32 fallback mount.  See mkdisk --esp-kernel
-# for why the ESP kernel is named kernel.elf on aarch64.
+# Both variants are the mkdisk GPT dual-partition layout (ESP FAT32 with
+# BOOTAA64.EFI + kernel.elf → /boot, ext2 rootfs → /); they differ only in
+# the ext2 manifest: the selftest variant carries the VFS selftest marker
+# files, the product variant carries the product userspace.  See mkdisk
+# --esp-kernel for why the ESP kernel is named kernel.elf on aarch64.
+# (2026-11-21: the product variant moved from the whole-disk FAT32
+# superfloppy to this layout — the whole-disk FAT32 fallback mount path
+# lost its aarch64 product coverage; see docs/changelog.md.)
 AARCH64_SELFTEST_MARKER := $(BUILD_DIR)/image$(if $(IMAGE_VARIANT),/$(IMAGE_VARIANT))/vfs-selftest.txt
 
 $(AARCH64_SELFTEST_MARKER): FORCE
@@ -280,30 +284,27 @@ ifeq ($(IMAGE_VARIANT),selftest)
 	  --temp-dir $(dir $@)tmp --rootfs-manifest $(dir $@)rootfs.selftest.manifest \
 	  --esp-kernel kernel.elf
 else
-	@mkdir -p $(dir $@)
-	@rm -f $@
-	@truncate -s 64M $@
-	@mkfs.fat -F 32 $@
-	@mmd -i $@ ::/EFI ::/EFI/BOOT ::/bin ::/etc
-	@mcopy -i $@ $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI ::/EFI/BOOT/BOOTAA64.EFI
-	@mcopy -i $@ $(BUILD_DIR)/artifacts/kernel.elf ::/kernel.elf
-	@# Product userspace (2026-11-19): /bin/init is spawned by the boot-5
-	@# chain (kernel_start_userspace); its inittab respawns /bin/terminal,
-	@# which execs /bin/busybox ash when busybox is present (or /bin/sh as
-	@# the fallback).  The x86 rootfs contract installs user programs
-	@# extension-less (/bin/<name>).
-	@mcopy -i $@ $(USER_ARTIFACT_DIR)/init.elf ::/bin/init
-	@# BusyBox (2026-11-21): FAT has no symlinks, so /bin/sh is a COPY of
-	@# the multicall binary — busybox dispatches applets on the argv[0]
-	@# basename, so the copy behaves exactly like the x86 /bin/sh→busybox
-	@# symlink.  terminal.elf prefers /bin/busybox ash (terminal.c stat).
-	@mcopy -i $@ $(USER_ARTIFACT_DIR)/busybox.elf ::/bin/busybox
-	@mcopy -i $@ $(USER_ARTIFACT_DIR)/busybox.elf ::/bin/sh
-	@mcopy -i $@ $(USER_ARTIFACT_DIR)/terminal.elf ::/bin/terminal
-	@# FP/SIMD runtime smoke (2026-11-21): run as /bin/test_fp from the
-	@# busybox ash in USER_RUNTIME_CASE=fp; extension-less like /bin/init.
-	@mcopy -i $@ $(USER_ARTIFACT_DIR)/test_fp.elf ::/bin/test_fp
-	@mcopy -i $@ $(INITTAB_FILE) ::/etc/inittab
+	@$(MAKE) -C tools check-deps HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools
+	@mkdir -p $(dir $@) $(dir $@)tmp
+	@rm -f $@.tmp
+	@# Product manifest (2026-11-21): the same product userspace the
+	@# superfloppy carried, now on the ext2 rootfs.  /kernel.elf doubles
+	@# as the mkdisk --esp-kernel source (the aarch64 loader reads
+	@# \kernel.elf from the ESP) — mirroring the x86 /kernel.bin contract.
+	@printf 'file\t/kernel.elf\t$(BUILD_DIR)/artifacts/kernel.elf\t0644\n' > $@.tmp
+	@printf 'file\t/etc/inittab\t$(INITTAB_FILE)\t0644\n' >> $@.tmp
+	@printf 'file\t/bin/init\t$(USER_ARTIFACT_DIR)/init.elf\t0755\n' >> $@.tmp
+	@printf 'file\t/bin/busybox\t$(USER_ARTIFACT_DIR)/busybox.elf\t0755\n' >> $@.tmp
+	@printf 'file\t/bin/terminal\t$(USER_ARTIFACT_DIR)/terminal.elf\t0755\n' >> $@.tmp
+	@printf 'file\t/bin/test_fp\t$(USER_ARTIFACT_DIR)/test_fp.elf\t0755\n' >> $@.tmp
+	@# ext2 enables the real /bin/sh→busybox symlink (FAT had to carry a
+	@# copy); busybox dispatches on argv[0], terminal.elf's /bin/sh
+	@# fallback exec resolves through the link.
+	@printf 'symlink\t/bin/sh\tbusybox\n' >> $@.tmp
+	@mv $@.tmp $(dir $@)rootfs.product.manifest
+	@$(HOST_MKDISK) --output $@ --efi $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
+	  --temp-dir $(dir $@)tmp --rootfs-manifest $(dir $@)rootfs.product.manifest \
+	  --esp-kernel kernel.elf
 endif
 
 endif

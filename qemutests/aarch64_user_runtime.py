@@ -541,7 +541,8 @@ def parse_product_boot_evidence(text, check_shell_io=False, test_fp_pass=False):
         errors.append("missing PID 1 creation marker (init-created pid=1)")
     if not any("init: phase SYSINIT" in line or "inittab" in line for line in lines):
         errors.append("missing inittab marker (init: phase SYSINIT)")
-    # BusyBox ash (2026-11-21: /bin/sh became the busybox multicall copy)
+    # BusyBox ash (2026-11-21: /bin/sh became a symlink to the busybox
+    # multicall binary when the product image moved to the ext2 rootfs)
     # prints its banner once per interactive process: "BusyBox v1.36.1
     # (<build timestamp>) built-in shell (ash)" — match the timestamp-free
     # suffix.  The prompt is "# " because OS01 userland runs as uid 0 and

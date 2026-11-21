@@ -213,6 +213,7 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 
 | 闭环项 | 日期 | 详情 |
 |--------|------|------|
+| **aarch64 产品镜像迁 ext2 根文件系统**（产品变体从整盘 FAT32 superfloppy 迁到与 x86 相同的 mkdisk GPT 双分区布局：ESP→/boot、ext2→/ 承载产品用户态；/bin/sh 改真软链；内核零改动，`fs_boot_mounts` GUID 路径直挂。整盘 FAT32 回退挂载在 aarch64 失去产品级覆盖，FAT32 读覆盖经 ESP→/boot 保留） | 2026-11-21 | [changelog](changelog.md#2026-11-21) · [plan](superpowers/plans/2026-11-21-aarch64-ext2-product-image.md) |
 | **flake 账本入库**（账本文件 `config/flake-ledger.json` 入库：`runs` 机器写 + `decisions` 人写；报告器支持 `--merge`/`--update-ledger`/`--emit-fragment`；CI 夜间首次调用报告器并发布 `flake-ledger` artifact；契约门禁防回退。推翻 D8「无写回」，保留「不加权限」「不动 job 骨架」） | 2026-11-21 | [changelog](changelog.md#2026-11-21) · [spec](superpowers/specs/2026-11-21-flake-ledger-design.md) · [plan](superpowers/plans/2026-11-21-flake-ledger.md) · [testing-policy](testing/testing-policy.md#86-flake-账本) |
 | **用户态进入与返回门面**（`arch/context.h`：`arch_task_prepare_user_entry`、共享返回编排 `context_run_return_work`、`arch_context_restore_frame` 同址恢复） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [arch.md](arch.md#facade--override-矩阵) · [spec](superpowers/specs/2026-11-20-user-context-facade-design.md) · [plan](superpowers/plans/2026-11-20-user-context-facade.md) |
 | **aarch64 EL3 分支标注仅 QEMU 支持**（`head.S` EL3→EL1 盲写 `SCR_EL3`/`SPSR_EL3` 边界化：仅 QEMU `-M virt,secure=on` 场景，真机 TF-A/UEFI 从 EL2/EL1 交接走 2a 分支，不受影响） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [arch.md](arch.md#aarch64-平台值解绑2026-11-18--2026-11-19) |
