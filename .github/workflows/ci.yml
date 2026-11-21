@@ -182,17 +182,11 @@ jobs:
       - name: Static audits
         run: make PROFILE=x86_64-clang test-static
 
-      - name: x86 phase-0 E2E (1 CPU)
-        run: QEMU_SMP=1 make test-qemu SUITE=phase-0
+      - name: x86 phase-0 E2E (1/2 CPUs)
+        run: make test-qemu SUITE=phase-0 QEMU_SMP_MATRIX="1 2"
 
-      - name: x86 phase-0 E2E (2 CPUs)
-        run: QEMU_SMP=2 make test-qemu SUITE=phase-0
-
-      - name: Syscall E2E (1 CPU)
-        run: QEMU_SMP=1 make OS01_SYSTEST=1 test-qemu SUITE=systest
-
-      - name: Syscall E2E (2 CPUs)
-        run: QEMU_SMP=2 make OS01_SYSTEST=1 test-qemu SUITE=systest
+      - name: Syscall E2E (1/2 CPUs)
+        run: make OS01_SYSTEST=1 test-syscall QEMU_SMP_MATRIX="1 2"
 
       - name: Kernel selftest (8 CPUs)
         run: make KERNEL_SELFTEST=1 KERNEL_SELFTEST_SMP=8 test-kernel-selftest
@@ -364,29 +358,12 @@ jobs:
           qemu-system-x86_64 --version | head -1
           qemu-system-aarch64 --version | head -1
 
-      - name: Build disk.img
-        run: make -j"$(nproc)" disk.img
-
       - name: x86 phase-0 at 1/2/4/8 CPUs
-        run: |
-          for cpus in 1 2 4 8; do
-            echo "== phase-0 @ ${cpus} CPU(s) =="
-            QEMU_SMP="${cpus}" make test-qemu SUITE=phase-0 || exit 1
-          done
+        run: make -j"$(nproc)" test-qemu SUITE=phase-0 QEMU_SMP_MATRIX="1 2 4 8"
 
       - name: Syscall E2E at 1/2/4/8 CPUs
-        run: |
-          # SYSTEST_TIMEOUT rides the same margin precedent as the other
-          # CI-vCPU budgets (af422d7a, ae35d6cc): the 8-CPU TCG sweep on a
-          # loaded shared runner once stalled twice at 160 s (default
-          # 120 + 8-CPU bonus) while the identical tree passed the same
-          # sweep three times earlier that day and always passes on the
-          # dev box. 240 s keeps the hang detector honest without
-          # gating on runner weather.
-          for cpus in 1 2 4 8; do
-            echo "== systest @ ${cpus} CPU(s) =="
-            QEMU_SMP="${cpus}" SYSTEST_TIMEOUT=240 make OS01_SYSTEST=1 test-qemu SUITE=systest || exit 1
-          done
+        # Keep the 240s base timeout for loaded CI runners at high CPU counts.
+        run: make OS01_SYSTEST=1 SYSTEST_TIMEOUT=240 test-syscall QEMU_SMP_MATRIX="1 2 4 8"
 
       - name: x86 guest nightly suites
         run: |

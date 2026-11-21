@@ -7,6 +7,7 @@ import argparse
 import json
 from pathlib import Path
 import re
+import shlex
 import sys
 from typing import Any
 
@@ -242,13 +243,37 @@ def check(root: str | Path) -> list[str]:
     if "make check-test-catalog" not in harness_cmds:
         errors.append("harness job missing explicit 'make check-test-catalog'")
 
-    # 3. PR required checks in x86-checks and aarch64-checks
+    # 3. PR and nightly CPU sweeps, plus the required PR checks
+    for job, cpus in (("x86-checks", "1 2"), ("full-matrix", "1 2 4 8")):
+        for suite in ("phase-0", "systest"):
+            expected = ["make"]
+            if suite == "systest":
+                expected.append("OS01_SYSTEST=1")
+                if job == "full-matrix":
+                    expected.append("SYSTEST_TIMEOUT=240")
+                expected.append("test-syscall")
+            else:
+                if job == "full-matrix":
+                    expected.append("-j$(nproc)")
+                expected.extend(["test-qemu", "SUITE=phase-0"])
+            expected.append(f"QEMU_SMP_MATRIX={cpus}")
+            lines = [
+                line for step in steps if step["job"] == job
+                for line in step["lines"]
+                if not line.lstrip().startswith("#")
+                and (
+                    {"test-qemu", f"SUITE={suite}"} <= set(line.split())
+                    or (suite == "systest" and "test-syscall" in line.split())
+                )
+            ]
+            try:
+                calls = [shlex.split(line, comments=True) for line in lines]
+            except ValueError:
+                calls = []
+            if calls != [expected]:
+                errors.append(f"{job} must run one {suite} CPU sweep: {shlex.join(expected)}")
+
     x86_cmds = "\n".join(line for s in steps if s["job"] == "x86-checks" for line in s["lines"])
-    for smp in ("1", "2"):
-        if not re.search(rf"QEMU_SMP={smp}\s+make\s+test-qemu\s+SUITE=phase-0\b", x86_cmds):
-            errors.append(f"x86-checks missing PR phase-0 at QEMU_SMP={smp}")
-        if not re.search(rf"QEMU_SMP={smp}\s+make\s+OS01_SYSTEST=1\s+test-qemu\s+SUITE=systest\b", x86_cmds):
-            errors.append(f"x86-checks missing PR systest at QEMU_SMP={smp}")
     if not re.search(r"make\s+KERNEL_SELFTEST=1\s+KERNEL_SELFTEST_SMP=8\s+test-kernel-selftest\b", x86_cmds):
         errors.append("x86-checks missing PR kernel-selftest at KERNEL_SELFTEST_SMP=8")
 
@@ -256,7 +281,7 @@ def check(root: str | Path) -> list[str]:
     if not re.search(r"make\s+PROFILE=aarch64-clang\s+test-aarch64\s+MODE=smp\b", aarch64_cmds):
         errors.append("aarch64-checks missing PR aarch64 MODE=smp")
 
-    # 4. Nightly suite set in full-matrix (excluding PR-tier 1/2/4/8 CPU steps & pr-tier suites)
+    # 4. Nightly suite set in full-matrix (excluding separately checked PR-tier suites)
     pr_tier_suites = {
         item["suite"] for item in sched_data.get("nightly", []) if item.get("tier") == "pr"
     }
@@ -268,8 +293,6 @@ def check(root: str | Path) -> list[str]:
     actual_tolerated: dict[str, bool] = {}
     for step in steps:
         if step["job"] != "full-matrix":
-            continue
-        if step["step"] in ("x86 phase-0 at 1/2/4/8 CPUs", "Syscall E2E at 1/2/4/8 CPUs"):
             continue
         s_ids, s_tol = _normalize_suite_calls(step["lines"])
         for sid in s_ids:

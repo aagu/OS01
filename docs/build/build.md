@@ -30,7 +30,7 @@ make: *** PROFILE='aarch64-clang' lacks capability 'rootfs'.  Stop.
 - `run` / `run-kvm` / `run-virtio` / `run-usb` / `debug` / `test-*`（x86 E2E）需要 `rootfs`。
 - `aarch64-uefi` / `aarch64-uefi-kernel` / `run-aarch64-uefi` 需要 `uefi`。
 - `lib` / `user` 需要 `userland`。
-- `validate`（x86 内核 + UEFI 产物检查）与 `make test`（宿主测试）不依赖 rootfs。
+- `validate-profile` 不要求 `rootfs`；`make test` 要求支持完整宿主回归的 `rootfs` 能力，但不构建客体镜像。
 
 **用户入口**（默认 profile 即用，其它 profile 以 `PROFILE=<name>` 前缀使用）：
 
@@ -518,16 +518,18 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 
 | 套件 | 实际 QEMU CPU 来源 | 记录字段 |
 | --- | --- | --- |
-| `test-qemu SUITE=...`（x86） | `QEMU_SMP` 环境变量（默认 `1`；`run_test.py` 读取并用于 `-smp`） | `result.json.cpu_count` |
+| `test-qemu SUITE=...`（x86） | 单次用 `QEMU_SMP`（默认 `1`）；`phase-0` 和 `systest` 可用 `QEMU_SMP_MATRIX` 逐次设置 | 每次启动各有一个 `result.json.cpu_count` |
 | `test-kernel-selftest` | `KERNEL_SELFTEST_SMP`（透传为 `--cpu`） | `cpu_count` |
 | `test-aarch64 MODE=...` | 各 MODE 自带的 `--cpus` 列表 | 每个 (case, cpu) 一份报告 |
 | 交互 `run` / `run-kvm` / `debug` | `SMP`（默认 `2`） | — |
 
-> 说明：`test-qemu` 的 CPU 数取自 `QEMU_SMP` 环境变量（如 `QEMU_SMP=2 make test-qemu SUITE=phase-0`），这正是 `run_test.py` 实际读取并归档到 `cpu_count` 的值；Make 变量 `SMP` 目前只作用于交互式 `run`/`debug` 目标。
+例如，`make test-qemu SUITE=phase-0 QEMU_SMP_MATRIX="1 2"` 和
+`make OS01_SYSTEST=1 test-syscall QEMU_SMP_MATRIX="1 2 4 8"` 都只准备一份对应镜像。
+每个 CPU 数用各自的可写镜像副本，启动结束后清理副本，失败即停止；
+归档仍按每次启动分开。矩阵只接受互不重复的 `1 2 4 8`，不能与 `QEMU_SMP` 同设。
 
-**CI。** `.github/workflows/ci.yml` 的 `harness` job 运行 `make test-harness`（纯 Python，无 QEMU、无构建前置）；`x86-checks` 在 PR 上跑 `phase-0`、`systest` 的 1/2 核与内核自测 8 核，`aarch64-checks` 跑 aarch64 SMP 冒烟，失败时上传 `build/*/logs/tests/**`；夜间 `schedule` 与手动 `workflow_dispatch` 的 `full-matrix` job 保留 1/2/4/8 核与 RAM/fault MODE。`test-contract` 保持在独立 `contract` job（它会 `make clean`）。
-
-**耗时（实测）。** 本仓库开发机：`make test-harness`（15 模块）约 **4 分钟**（2026-10-07，429 tests）。QEMU 套件（`phase-0`/`systest`/`test-kernel-selftest`/`test-aarch64`）的耗时须在具备已构建镜像与 `thirdpart/*` submodule 的环境（CI）实测后再回填；本 worktree 无构建树，未实测。
+本地、PR 和夜间的运行范围、保留的测试桩及计时样本，见
+[测试分层与实测记录](../testing/testing-policy.md#88-运行层级与计时记录)。
 
 ### 6. 配置文件
 
@@ -573,7 +575,10 @@ build/<profile>/logs/tests/<suite>/<UTC-time>-<unique-id>/
 
 测试场景与分层职责规范参见 [`docs/testing/testing-policy.md`](../testing/testing-policy.md)；场景映射清单位于 `config/test-scenarios.json`（由 `python3 qemutests/scenario_catalog.py --check` 校验）。可通过 `make print-host-test-inventory` 打印宿主测试清单（由 `mk/generated/test-registry.mk` 提供 `HOST_TEST_INVENTORY`、`TEST_BINS` 与 `TEST_EXIT_STATUS_BINS`）；新增宿主测试只需在 `hosttests/cases/test_<name>.c` 头部声明 `@os01-test` 元数据并在对应 `hosttests/mk/<subsys>.mk` 中补充链接规则后运行 `make regen-test-catalog` 并提交生成物（不再手工调用 `register_host_test` 或手写 `TEST_BINS`）。端到端与架构套件清单通过 `make print-test-catalog` 导出 TSV（`TEST_QEMU_SUITE_IDS`、`TEST_QEMU_FLAVOR_*`、`TEST_QEMU_IMG_*` 与 `TEST_SUITE_CATALOG_DATA` 均由 `mk/generated/test-dispatch.mk` 生成，并在 `test-qemu` 解析期校验 `SUITE` 合法性），包含 13 个字段（`id profile capability variant cpus memory_mib timeout_s image_policy resource tier entrypoint prepare_target run_target`），由 `python3 qemutests/test_catalog.py --check` 校验其元数据完整性与 CI 调度归属（`--tier pr|nightly --format json` 导出过滤后的配置）。
 
-**`test-harness`** 框架回归入口（上表八个 bucket 之一；`always` 能力；不启动 QEMU）：运行 `mk/components/run.mk` 中 `TEST_HARNESS_MODULES` 列表里的 Python `unittest` 模块。该列表在 Task 2 以单元素 `qemutests.test_gfx_runner` 起步，各任务以其新增的 `qemutests/test_*.py` 追加（Ruling 3）；Task 13 收口为 **15 个模块**，monitor plan（2026-10-11）Task 9 追加 `qemutests.test_monitor_runner` 至 **16 个模块**，terminal-present 追加至 **17 个模块**，GUI-1 plan（2026-10-19）Task 7 追加 `qemutests.test_gui_runner` 至 **18 个模块**，intr-dispatch plan（2026-10-23）Task 6 追加 `qemutests.test_intr_dispatch_audit`（列表共 20 个模块）；并补齐了此前**无任何 target 运行**的宿主自测（`test_driver_model_matrix`、`test_driver_model_boundary_audit`、`test_resolution_switcher`）以及针对本 workflow 的静态契约检查 `test_ci_workflow`。`test_lvgl_runner` **不**在列表内——它作为兼容入口委托到 `gui_test.py`，不是 unittest 模块。`test_arch9_build_contract` 同样**不**在列表内：它的 fixture 会对 `kernel.bin` 执行真实的 `make -n`，需要有已准备好的 sysroot，因而无法在零环境依赖的 `make test-harness` 门控中运行（CI 的 `harness` job 在调用它之前不做任何构建）。它由 `test-contract` bucket 拥有：该 target **会**构建 sysroot，且在其 `x86_64-clang` 分支的 `build_contract.sh` 模式循环之后运行该模块，因此不再是无 target 调用的孤儿。recipe 始终为一次显式的 `python3 -m unittest $(TEST_HARNESS_MODULES)`：不做自动目录发现，不隐式启动 QEMU 脚本，不通过模块名推断 build 路径。fixture 以 fake `subprocess.Popen` 替换真实 QEMU（个别模块会以 `make -n` 探测 Make 契约，但**绝不**拉起 QEMU 进程），因此 `make test-harness` 在 PR/CI 中作为"零环境依赖"门控。
+**`test-harness`** 验证 runner、归档及框架契约。先跑框架退出码与 CI 日程检查，再由
+`run_framework_tests.py` 运行生成的 `TEST_HARNESS_MODULES` 清单，不做目录自动发现。
+直接运行的 QEMU 套件不放进该清单；需要真实 sysroot 的 `test_arch9_build_contract`
+放在独立的 `test-contract` 里。
 
 **独立的测试目标**（不归入任何 bucket，因为它们使用不同的 harness 或镜像 variant）：
 

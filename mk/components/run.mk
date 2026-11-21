@@ -1282,6 +1282,20 @@ ifneq ($(filter test-qemu,$(MAKECMDGOALS)),)
 ifeq ($(filter $(SUITE),$(TEST_QEMU_SUITE_IDS)),)
 $(error ERROR: SUITE must be one of: $(TEST_QEMU_SUITE_IDS), got '$(SUITE)')
 endif
+ifneq ($(strip $(QEMU_SMP_MATRIX)),)
+ifeq ($(filter phase-0 systest,$(SUITE)),)
+$(error ERROR: QEMU_SMP_MATRIX is only supported for SUITE=phase-0 or systest)
+endif
+ifneq ($(filter-out 1 2 4 8,$(QEMU_SMP_MATRIX)),)
+$(error ERROR: QEMU_SMP_MATRIX must contain only CPU counts 1 2 4 8)
+endif
+ifneq ($(words $(QEMU_SMP_MATRIX)),$(words $(sort $(QEMU_SMP_MATRIX))))
+$(error ERROR: QEMU_SMP_MATRIX must not repeat CPU counts)
+endif
+ifneq ($(strip $(QEMU_SMP)),)
+$(error ERROR: QEMU_SMP_MATRIX cannot be combined with QEMU_SMP)
+endif
+endif
 endif
 # Firmware remains a prerequisite for every suite. No image-path prereq:
 # the variant image is built by the recursive make below.
@@ -1358,17 +1372,36 @@ test-qemu: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(OVMF_FIRMWARE))
 	# launch it again here; intr-x86 runs its own per-case harness
 	# inside ``test-qemu-intr-x86`` for the same reason.
 	@if [ "$(SUITE)" != "driver-model" ] && [ "$(SUITE)" != "intr-x86" ] && [ "$(SUITE)" != "boot-lifecycle" ] && [ "$(SUITE)" != "boot-irq-time" ] && [ "$(SUITE)" != "boot-failure" ] && [ "$(SUITE)" != "boot-contract" ] && [ "$(SUITE)" != "boot-services" ] && [ "$(SUITE)" != "usb-boot" ] && [ "$(SUITE)" != "usb-hid" ]; then \
-	  DISK_IMG="$(TEST_QEMU_IMG_$(SUITE))" \
-	  $(if $(filter arch6-fsstress,$(SUITE)),QEMU_SMP="$(SMP)",) \
-	  OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \
-	  NETWORK_NIC="$(NETWORK_NIC)" \
-	  FB_RESOLUTION_TEST="$(FB_RESOLUTION_TEST)" \
-	  TERMINAL_PRESENT_BASELINE_LOG="$(TERMINAL_PRESENT_BASELINE_LOG)" \
-	  OS01_BUILD_DIR="$(abspath $(BUILD_DIR))" \
-	  OS01_RESOLUTION_RESULT_DIR="$(abspath $(BUILD_DIR)/test-results/resolution)" \
-	  SYSTEST_CASE="$(CASE)" \
-	  SYSTEST_TIMEOUT="$(SYSTEST_TIMEOUT)" \
-	  python3 qemutests/run_test.py $(SUITE); \
+	  set -e; \
+	  image="$(TEST_QEMU_IMG_$(SUITE))"; \
+	  matrix="$(strip $(QEMU_SMP_MATRIX))"; \
+	  if [ -n "$$matrix" ]; then \
+	    run_dir=$$(mktemp -d "$$(dirname -- "$$image")/.qemu-smp.XXXXXX"); \
+	    trap 'rm -f -- "$$run_dir"/smp-*.img; rmdir -- "$$run_dir"' EXIT; \
+	    trap 'exit 130' INT; \
+	    trap 'exit 143' TERM; \
+	  fi; \
+	  for cpus in $${matrix:-default}; do \
+	    disk="$$image"; \
+	    if [ -n "$$matrix" ]; then \
+	      disk="$$run_dir/smp-$$cpus.img"; \
+	      cp --reflink=auto --sparse=always -- "$$image" "$$disk"; \
+	      export QEMU_SMP="$$cpus"; \
+	      echo "  [test-qemu] $(SUITE) @ $$cpus CPU(s)"; \
+	    fi; \
+	    DISK_IMG="$$disk" \
+	    $(if $(filter arch6-fsstress,$(SUITE)),QEMU_SMP="$(SMP)") \
+	    OVMF_FIRMWARE="$(OVMF_FIRMWARE)" \
+	    NETWORK_NIC="$(NETWORK_NIC)" \
+	    FB_RESOLUTION_TEST="$(FB_RESOLUTION_TEST)" \
+	    TERMINAL_PRESENT_BASELINE_LOG="$(TERMINAL_PRESENT_BASELINE_LOG)" \
+	    OS01_BUILD_DIR="$(abspath $(BUILD_DIR))" \
+	    OS01_RESOLUTION_RESULT_DIR="$(abspath $(BUILD_DIR)/test-results/resolution)" \
+	    SYSTEST_CASE="$(CASE)" \
+	    SYSTEST_TIMEOUT="$(SYSTEST_TIMEOUT)" \
+	    python3 qemutests/run_test.py $(SUITE) || exit $$?; \
+	    if [ -n "$$matrix" ]; then rm -f -- "$$disk"; fi; \
+	  done; \
 	fi
 
 # ── USB boot M0 firmware gate (dedicated target) ──────────────
@@ -1917,6 +1950,7 @@ help:
 	@echo ''
 	@echo 'Test (6 canonical buckets; varied capability):'
 	@printf '  %-22s %-13s %s\n' $(HELP_SEC_TEST)
+	@echo '  Phase-0 and syscall E2E can reuse one prepared image with QEMU_SMP_MATRIX="1 2".'
 	@echo ''
 	@echo 'Framework regression (no QEMU; always):'
 	@printf '  %-22s %-13s %s\n' $(HELP_SEC_FRAMEWORK)

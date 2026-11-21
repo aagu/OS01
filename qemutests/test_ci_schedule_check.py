@@ -60,6 +60,32 @@ class CiScheduleCheckTests(unittest.TestCase):
         )
         self.assertEqual(result.stdout.count("python3 tools/tests/check_ci_schedule.py "), 1)
 
+    def test_cpu_sweeps_cannot_lose_cases_timeout_or_run_twice(self):
+        import check_ci_schedule
+
+        for original, changed, job, suite in (
+            ('SUITE=phase-0 QEMU_SMP_MATRIX="1 2"', 'SUITE=phase-0 QEMU_SMP_MATRIX="1"',
+             "x86-checks", "phase-0"),
+            ('test-syscall QEMU_SMP_MATRIX="1 2 4 8"', 'test-syscall QEMU_SMP_MATRIX="1 2 4"',
+             "full-matrix", "systest"),
+            ("OS01_SYSTEST=1 SYSTEST_TIMEOUT=240 test-syscall", "OS01_SYSTEST=1 test-syscall",
+             "full-matrix", "systest"),
+            ('run: make test-qemu SUITE=phase-0 QEMU_SMP_MATRIX="1 2"',
+             'run: |\n          QEMU_SMP=1 make test-qemu SUITE=phase-0\n'
+             '          make test-qemu SUITE=phase-0 QEMU_SMP_MATRIX="1 2"',
+             "x86-checks", "phase-0"),
+        ):
+            with self.subTest(original=original, changed=changed), tempfile.TemporaryDirectory() as tmp:
+                tmp_root = self._copy_minimal_repo(Path(tmp))
+                ci_path = tmp_root / ".github" / "workflows" / "ci.yml"
+                ci_text = ci_path.read_text(encoding="utf-8")
+                self.assertIn(original, ci_text)
+                ci_path.write_text(ci_text.replace(original, changed), encoding="utf-8")
+                self.assertTrue(any(
+                    f"{job} must run one {suite} CPU sweep" in error
+                    for error in check_ci_schedule.check(tmp_root)
+                ))
+
     def test_missing_nightly_suite_fails(self):
         import check_ci_schedule
 

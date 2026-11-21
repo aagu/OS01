@@ -379,6 +379,95 @@ class MakeFailureDryRunTests(unittest.TestCase):
         )
 
 
+class QemuSmpMatrixTests(unittest.TestCase):
+    def setUp(self):
+        workspace = tempfile.TemporaryDirectory(prefix="os01-qemu-smp-")
+        self.addCleanup(workspace.cleanup)
+        self.workspace = Path(workspace.name)
+        self.normal_image = self.workspace / "build" / "image" / "disk.img"
+        self.systest_image = self.normal_image.parent / "systest" / "disk.img"
+        for image in (self.normal_image, self.systest_image):
+            image.parent.mkdir(parents=True, exist_ok=True)
+            image.write_text("prepared\n")
+        self.firmware = self.workspace / "OVMF.fd"
+        self.firmware.touch()
+        self.make_probe = self.workspace / "make-probe"
+        self.make_probe.write_text("#!/bin/sh\nprintf 'build:%s\\n' \"$*\"\n")
+        self.make_probe.chmod(0o755)
+        runner = self.workspace / "python3"
+        runner.write_text(
+            "#!/bin/sh\n"
+            "printf 'run:%s:%s:%s\\n' \"$QEMU_SMP\" \"$SYSTEST_TIMEOUT\" \"$*\"\n"
+            "printf 'disk:%s\\n' \"$DISK_IMG\"\n"
+            "test \"$(cat \"$DISK_IMG\")\" = prepared || exit 1\n"
+            "printf 'guest write\\n' >\"$DISK_IMG\"\n"
+            "test -z \"$FAIL_SMP\" || test \"$QEMU_SMP\" != \"$FAIL_SMP\"\n"
+        )
+        runner.chmod(0o755)
+
+    def _run(self, *args, fail_smp="", single_smp=""):
+        env = {key: os.environ[key] for key in ("HOME", "TMPDIR") if key in os.environ}
+        env.update(PATH=f"{self.workspace}:{os.environ['PATH']}", FAIL_SMP=fail_smp)
+        if single_smp:
+            env["QEMU_SMP"] = single_smp
+        result = subprocess.run(
+            ["make", "--no-print-directory", "PROFILE=x86_64-clang", "test-qemu",
+             f"BUILD_DIR={self.workspace / 'build'}", f"OVMF_FIRMWARE={self.firmware}",
+             f"MAKE={self.make_probe}", *args],
+            cwd=ROOT, env=env, capture_output=True, text=True, timeout=30,
+        )
+        events = [line for line in result.stdout.splitlines() if line.startswith(("build:", "run:"))]
+        return result, events
+
+    def test_matrix_prepares_once_and_gives_each_cpu_a_private_disk(self):
+        result, events = self._run(
+            "SUITE=systest", "OS01_SYSTEST=1", "SYSTEST_TIMEOUT=240",
+            "QEMU_SMP_MATRIX=1 2 4 8",
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(events, [
+            "build:OS01_SYSTEST=1 image",
+            *(f"run:{cpus}:240:qemutests/run_test.py systest"
+              for cpus in (1, 2, 4, 8)),
+        ])
+        disks = [
+            Path(line.removeprefix("disk:")) for line in result.stdout.splitlines()
+            if line.startswith("disk:")
+        ]
+        self.assertEqual([disk.name for disk in disks], ["smp-1.img", "smp-2.img", "smp-4.img", "smp-8.img"])
+        self.assertTrue(all(not disk.parent.exists() for disk in disks))
+        self.assertEqual(self.systest_image.read_text(), "prepared\n")
+
+    def test_matrix_stops_on_the_first_failed_cpu(self):
+        result, events = self._run("SUITE=phase-0", "QEMU_SMP_MATRIX=1 2 4", fail_smp="2")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(events, [
+            "build:image",
+            "run:1:120:qemutests/run_test.py phase-0",
+            "run:2:120:qemutests/run_test.py phase-0",
+        ])
+        self.assertEqual(self.normal_image.read_text(), "prepared\n")
+        self.assertEqual(list(self.normal_image.parent.glob(".qemu-smp.*")), [])
+
+    def test_single_cpu_override_keeps_the_existing_dispatch(self):
+        result, events = self._run("SUITE=phase-0", single_smp="2")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(events, ["build:image", "run:2:120:qemutests/run_test.py phase-0"])
+        self.assertIn(f"disk:{self.normal_image}", result.stdout)
+
+    def test_invalid_matrix_cannot_build_or_launch(self):
+        for suite, counts, single_smp in (
+            ("resolution", "1 2", ""), ("phase-0", "1 3", ""),
+            ("phase-0", "1 1", ""), ("phase-0", "1 2", "2"),
+        ):
+            with self.subTest(suite=suite, counts=counts, single_smp=single_smp):
+                result, events = self._run(f"SUITE={suite}", f"QEMU_SMP_MATRIX={counts}",
+                                           single_smp=single_smp)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("QEMU_SMP_MATRIX", result.stderr)
+                self.assertEqual(events, [])
+
+
 class DryRunTimeoutNoEvidenceTests(unittest.TestCase):
     """Pin the dry-run fixture's "no evidence" path.
 
