@@ -2311,3 +2311,23 @@ test-libc-api-audit: $(LIBC_API_AUDIT_PREREQ)
 	    $(if $(wildcard $(LIBC_BUILD_DIR)/lib/libc.a),--libc-archive $(LIBC_BUILD_DIR)/lib/libc.a) \
 	    $(if $(wildcard $(LIBC_BUILD_DIR)/lib/libm.a),--libm-archive $(LIBC_BUILD_DIR)/lib/libm.a) \
 	    --libk-archive $(LIBC_BUILD_DIR)/lib/libk.a
+
+# ── libm instruction audit ──────────────────────────────────────────────
+# The base-algebra math set must compute with integer bit operations
+# only: no floating-point arithmetic, no FMA, no floating-point
+# rounding, and no soft-float helper.  The host test proves the
+# RESULTS against the host glibc and the guest case proves them inside
+# the running system; this audit proves the METHOD, by reading the
+# disassembly of the PUBLISHED archive.
+#
+# The profile decides the architecture: an archive of another
+# architecture is a failure, not a warning.  The audit also refuses a
+# missing symbol, an unparseable instruction and any forbidden
+# floating-point instruction.
+.PHONY: test-libm-asm
+test-libm-asm: lib
+	@echo "  [test-libm-asm] profile=$(PROFILE)"
+	python3 $(OS01_ROOT)/scripts/audit_libm_asm.py \
+	    --archive $(SYSROOT)/usr/lib/libm.a \
+	    --profile "$(PROFILE)" \
+	    --objdump "$(LLVM_OBJDUMP)"

@@ -152,7 +152,7 @@ make
 
 等价于 `make PROFILE=x86_64-clang disk.img`。此命令会执行：
 
-1. **发布 sysroot generation**：按 staging manifests 安装内核头文件、libc/libk、mbedTLS、compat-libs（libm.a/librt.a 桩），组装不可变 generation 并原子发布 `build/x86_64-clang/sysroot` 符号链接
+1. **发布 sysroot generation**：按 staging manifests 安装内核头文件、libc/libk（含真实 `usr/lib/libm.a`）、mbedTLS、compat-libs（仅 `librt.a` 桩），组装不可变 generation 并原子发布 `build/x86_64-clang/sysroot` 符号链接
 2. **编译引导程序**：posix-uefi runtime adapter（受控拷贝 + patch）→ BOOTX64.EFI
 3. **编译内核**：`artifacts/kernel.bin`（中间文件在 `build/x86_64-clang/kernel/`）
 4. **编译用户程序**：`artifacts/user/*.elf`（init/spin/sigtest/.../nettest/tetris）
@@ -677,6 +677,20 @@ make PROFILE=aarch64-clang test-libc-api-audit  # 仅 libk（aarch64 不产出 l
 
 libk 基线按 profile 区分（x86_64 与 aarch64 的 `libk.a` 导出集合不同），脚本接受 `--profile`，默认从归档路径推断。
 
+#### libm 的归属与指令审计
+
+基础代数数学集由独立的 `usr/lib/libm.a` 承载，来源是 libc stage（`libc/math/*.c`，vendored musl 1.2.5）：
+
+- **归属**：`test-libc-api-audit` 断言这 16 个符号（`fabs/fabsf`、`copysign/copysignf`、`floor/floorf`、`ceil/ceilf`、`trunc/truncf`、`round/roundf`、`fmod/fmodf`、`sqrt/sqrtf`）**只**由 `libm.a` 导出，`libc.a` 与 `libk.a` 都不得定义它们——内核因此保持 FP-free。调用方需要显式链接 `-lm`（例如 `user/doom/app.mk`）。
+- **指令**：`test-libm-asm` 审计**已发布**归档（`$(SYSROOT)/usr/lib/libm.a`）的反汇编，证明每个函数只用整数位运算：不得出现浮点加减乘除、FMA、平方根、比较、取整或整数↔浮点转换指令；浮点寄存器只允许被数据搬运指令触及（x86_64 的 `movsd/movss/xorps`，aarch64 的 `fmov/fcsel/movi/ldr/str`），这样 NaN 载荷与负零符号才能原样保留。profile 决定架构，外来架构的归档会被拒绝。
+
+```
+make PROFILE=x86_64-clang test-libm-asm   # x86_64 指令审计
+make PROFILE=aarch64-clang test-libm-asm  # aarch64 指令审计
+```
+
+审计脚本自身的负向能力可用 `--selftest` 复现：它现场组装临时夹具，确认干净夹具通过，而 `addsd`、`cvttss2si`、`vfmadd213sd`（x86_64）与 `fadd`、`scvtf`、`frintn`（aarch64）逐一被点名拒绝，无法解析的指令行与错误架构同样被拒绝。
+
 所有测试**只**从仓库根的 make 入口运行：`make PROFILE=x86_64-clang test-libc-host LIBC_CASE=...`。**不要**用 `make -C hosttests`。
 
 #### GUI 头文件的发布规则（single-writer sysroot）
@@ -821,6 +835,7 @@ make test-qemu SUITE=gui             # GUI-1 LVGL 平台后端 + GUI-2 输入与
 make PROFILE=x86_64-clang test-gui-host CASE=input-decode  # GUI 宿主聚焦 CASE（host_case_group 映射）
 make PROFILE=x86_64-clang test-libc-host LIBC_CASE=api     # libc 补全宿主聚焦 CASE（LIBC_HOST_CASES / LIBC_HOST_DELIVERED_CASES）
 make PROFILE=x86_64-clang test-libc-api-audit              # libc 归档导出审计（用户 libc + libk）
+make PROFILE=x86_64-clang test-libm-asm                   # libm 归档反汇编审计（禁止浮点算术指令）
 make FB_RESOLUTION_TEST=1 test-qemu SUITE=resolution  # 隔离故障子集
 make CAPACITY_TEST=1 test-qemu SUITE=arch10-capacity # ARCH-10 隔离容量与工程完整性验收
 make test-static                    # 16 项静态审计

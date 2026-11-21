@@ -24,7 +24,10 @@
 #       musl's shunget bookkeeping balanced and the POSIX endptr exact.
 #     - the four math calls are vendored in the same file as static
 #       helpers (see below), because OS01's freestanding libc has no
-#       libm to answer scalbn/scalbnl/copysignl/fmodl.
+#       libm to answer scalbn/scalbnl/copysignl/fmodl.  The shipped
+#       usr/lib/libm.a (2026-11-21) carries the double and float base
+#       algebra only, so the long double variants still have to be
+#       answered locally.
 #     - errno=EINVAL on no-conversion is SUPPRESSED by the wrappers in
 #       libc/stdlib/strtod.c (they save/restore errno around a
 #       zero-consumption scan): musl sets EINVAL there, glibc/POSIX
@@ -44,9 +47,10 @@
 #       bits with the sign bit honoured ("nan(123)" / "-nan" match
 #       glibc bit-for-bit).  musl returns a payload-less positive NaN
 #       here; __builtin_nanf(payload) was rejected because a runtime
-#       string turns the builtin into a libm nanf() call and OS01 has
-#       no libm.  Non-digit n-chars end the payload (simplification;
-#       the test table only exercises digit payloads).
+#       string turns the builtin into a libm nanf() call and OS01's
+#       libm.a does not provide nanf.  Non-digit n-chars end the
+#       payload (simplification; the test table only exercises digit
+#       payloads).
 #     - the strtod/strtof wrappers narrow NaNs BIT-EXACTLY (sign +
 #       payload rebuilt from the 80-bit mantissa): the x87 narrowing
 #       instruction would otherwise drop the payload of "nan(123)"
@@ -60,6 +64,14 @@
 #     with libm.h's union ldshape (little-endian 80-bit x87 layout)
 #     trimmed in, isnan(x) written as x != x, fabsl/copysign delegated
 #     to compiler builtins (no libcall on x86_64).
+#
+# The OS01 libc/include/libc_arch/<arch>/float_abi.h fs_fabs helper is
+# NOT vendored from musl: it is an OS01 file, and it performs the sign
+# bit clear with integer bit operations on the arch's scanner working
+# type (x86_64 long double, aarch64 double).  It used to call
+# __builtin_fabs/__builtin_fabsl; the integer form was adopted on
+# 2026-11-21 so the scanner core never asks the FPU for arithmetic and
+# the sign of a zero and the payload of a NaN survive unchanged.
 #
 # Patches to the module after vendoring
 # -------------------------------------
@@ -158,9 +170,8 @@
 #  13. __rsqrt_tab -> __os01_libm_rsqrt_tab (the table is a non-static
 #      global in the shipped archive; musl's name could collide).
 #
-# The OS01 libc/include/libc_arch/<arch>/float_abi.h fs_fabs helper is
-# the same bit operation as musl's fabs, with the arch's scanner working
-# type (x86_64 long double, aarch64 double).
+# The fs_fabs helper of the two scanners is described above: it is an
+# OS01 file that clears the sign bit with integer bit operations.
 #
 # Verification recorded with this vendoring (2026-11-21):
 #   - all 16 symbols were differentially tested against the host glibc:
@@ -171,3 +182,19 @@
 #     case (24 cases, all matching);
 #   - the compiled objects contain no FP arithmetic instruction and no
 #     soft-float helper symbol.
+#
+# Shipped-state verification (2026-11-21, after the archive was wired
+# into the sysroot):
+#   - the host test (hosttests/cases/test_libc_math.c) compares the
+#     shipped objects with a standalone glibc oracle over 272 cases
+#     (136 binary64 + 136 binary32): 234 compared bit for bit, 8 as
+#     NaN, 30 against the fixed quiet NaN; 258 require errno unchanged
+#     and 14 require EDOM;
+#   - the guest case 64_libm (user/systest/test_libm.c) runs the same
+#     contract inside the running system, over 68 bit-pattern
+#     assertions;
+#   - the instruction audit (scripts/audit_libm_asm.py, reached through
+#     `make test-libm-asm`) reads the disassembly of the PUBLISHED
+#     archive on both profiles: no floating-point arithmetic, FMA,
+#     rounding or conversion instruction, and the floating-point
+#     registers are touched only by data moves.
