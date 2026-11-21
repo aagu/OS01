@@ -20,6 +20,8 @@ struct gic_dev {
     volatile uint32_t *gicd;                 /* Device-nGnRnE mapping */
     volatile uint32_t *gicc;
     uint32_t nr_intids;                      /* (TYPER.ITLinesNumber+1)*32, cap 1020 */
+    bool security_extn;                      /* TYPER.SecurityExtn (bit 10) */
+    uint8_t nr_cpu_interfaces;               /* TYPER.CPUNumber[7:5] + 1 */
     volatile uint32_t dbg_last_iar;          /* 单槽 trace（hosttest 默认路径）;
                                               内核配 set_cpu_index 后另写 per-CPU 槽 */
 };
@@ -28,7 +30,7 @@ struct gic_dev {
 int  gic_dev_init(struct gic_dev *dev, volatile uint32_t *gicd, volatile uint32_t *gicc);
 void gic_dev_dist_enable(struct gic_dev *dev);    /* GICD_CTLR = 1 */
 void gic_dev_dist_disable(struct gic_dev *dev);
-void gic_dev_cpu_enable(struct gic_dev *dev);     /* PMR=0xff + GICC_CTLR=1（屏障在 wrapper）*/
+int  gic_dev_cpu_enable(struct gic_dev *dev);     /* PMR=0xff + 读回校验 + GICC_CTLR=1 */
 enum gic_irq_type gic_irq_type(uint32_t intid);
 int  gic_irq_config(struct gic_dev *dev, uint32_t intid, bool enable,
                     uint8_t prio, uint8_t targets); /* IGROUPR0+ISENABLER/ICENABLER

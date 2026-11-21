@@ -35,12 +35,96 @@ static uint32_t gicd_mock[0x400];
 static uint32_t gicc_mock[0x20];
 static struct gic_dev dev;
 
-static void mock_reset(uint32_t typer_itlines)
+#define MMIO_LOG_MAX 128
+struct mmio_op {
+    bool is_write;
+    const volatile uint32_t *addr;
+    uint32_t value;
+};
+static struct mmio_op mmio_log[MMIO_LOG_MAX];
+static unsigned mmio_log_count;
+static bool drop_pmr_write;
+static uint32_t pmr_read_mask = 0xffu;
+static unsigned eoir_write_count;
+
+static void mmio_trace_reset(void)
+{
+    mmio_log_count = 0;
+    drop_pmr_write = false;
+    pmr_read_mask = 0xffu;
+    eoir_write_count = 0;
+}
+
+static void mmio_log_push(bool is_write, volatile uint32_t *address, uint32_t value)
+{
+    if (mmio_log_count < MMIO_LOG_MAX) {
+        mmio_log[mmio_log_count].is_write = is_write;
+        mmio_log[mmio_log_count].addr = address;
+        mmio_log[mmio_log_count].value = value;
+        mmio_log_count++;
+    }
+}
+
+void gic_host_mmio_write(volatile uint32_t *address, uint32_t value)
+{
+    mmio_log_push(true, address, value);
+    if (address == &gicc_mock[M_GICC_EOIR / 4]) {
+        eoir_write_count++;
+    }
+    if (drop_pmr_write && address == &gicc_mock[M_GICC_PMR / 4]) {
+        return;
+    }
+    if (address == &gicc_mock[M_GICC_PMR / 4]) {
+        *address = value & pmr_read_mask;
+        return;
+    }
+    *address = value;
+}
+
+uint32_t gic_host_mmio_read(volatile uint32_t *address)
+{
+    uint32_t val = *address;
+    mmio_log_push(false, address, val);
+    return val;
+}
+
+static unsigned count_mmio_range(bool is_write, const uint32_t *base,
+                                 uint32_t off_start, uint32_t off_end)
+{
+    unsigned count = 0;
+    for (unsigned i = 0; i < mmio_log_count; i++) {
+        if (mmio_log[i].is_write != is_write) continue;
+        if (mmio_log[i].addr >= base + off_start / 4u &&
+            mmio_log[i].addr < base + off_end / 4u) {
+            count++;
+        }
+    }
+    return count;
+}
+
+static int find_write_index(const volatile uint32_t *addr, uint32_t value)
+{
+    for (unsigned i = 0; i < mmio_log_count; i++) {
+        if (mmio_log[i].is_write && mmio_log[i].addr == addr &&
+            mmio_log[i].value == value) {
+            return (int)i;
+        }
+    }
+    return -1;
+}
+
+static void mock_reset_typer(uint32_t typer)
 {
     for (unsigned i = 0; i < 0x400; ++i) gicd_mock[i] = 0;
     for (unsigned i = 0; i < 0x20; ++i) gicc_mock[i] = 0;
-    gicd_mock[M_GICD_TYPER / 4] = typer_itlines & 0x1f;
+    gicd_mock[M_GICD_TYPER / 4] = typer;
     gicd_mock[M_GICD_IIDR / 4] = 0x0200143b;   /* QEMU virt GICv2 IIDR 非零 */
+    mmio_trace_reset();
+}
+
+static void mock_reset(uint32_t typer_itlines)
+{
+    mock_reset_typer(typer_itlines & 0x1f);
 }
 static uint32_t rd(const uint32_t *m, uint32_t off) { return m[off / 4]; }
 
@@ -212,15 +296,171 @@ static void suite_cpu_iface(void)
 {
     TEST_SUITE("cpu interface enable");
     mock_reset(2); gic_dev_init(&dev, gicd_mock, gicc_mock);
-    gic_dev_cpu_enable(&dev);
+    assert_eq(0, gic_dev_cpu_enable(&dev));
     assert_eq(0xffu, rd(gicc_mock, M_GICC_PMR));
     assert_eq(1u, rd(gicc_mock, M_GICC_CTLR));
+}
+
+static void suite_security_views_and_pmr(void)
+{
+    TEST_SUITE("security views, IGROUPR, PMR readback & write order");
+
+    /* 1. Group 0 view: TYPER = 0x001f (SecurityExtn=0, CPUNumber=0 => 1 iface, 1020 intids) */
+    mock_reset_typer(0x001fu);
+    for (unsigned i = 0; i < 32; i++) {
+        gicd_mock[M_GICD_IGROUPR / 4 + i] = 0xffffffffu;
+    }
+    assert_eq(0, gic_dev_init(&dev, gicd_mock, gicc_mock));
+    assert_false(dev.security_extn);
+    assert_eq(1, (int)dev.nr_cpu_interfaces);
+    assert_eq(1020, (int)dev.nr_intids);
+
+    mmio_trace_reset();
+    gic_dev_dist_enable(&dev);
+    assert_eq(0, gic_irq_config(&dev, 33, true, 0x00, 0x01));
+    assert_true(count_mmio_range(false, gicd_mock, M_GICD_IGROUPR, M_GICD_IGROUPR + 0x80) >= 1);
+    assert_true(count_mmio_range(true, gicd_mock, M_GICD_IGROUPR, M_GICD_IGROUPR + 0x80) >= 1);
+    assert_eq(0u, rd(gicd_mock, M_GICD_IGROUPR + 4) & (1u << 1));
+    assert_eq(0, gic_dev_cpu_enable(&dev));
+    assert_eq(1u, rd(gicd_mock, M_GICD_CTLR));
+    assert_eq(1u, rd(gicc_mock, M_GICC_CTLR));
+    int pmr_w = find_write_index(&gicc_mock[M_GICC_PMR / 4], 0xffu);
+    int ctlr_w = find_write_index(&gicc_mock[M_GICC_CTLR / 4], 1u);
+    assert_true(pmr_w >= 0 && ctlr_w >= 0 && pmr_w < ctlr_w);
+
+    /* 2. Group 1 view: TYPER = 0x041f (SecurityExtn=1, CPUNumber=0 => 1 iface, 1020 intids) */
+    mock_reset_typer(0x041fu);
+    for (unsigned i = 0; i < 32; i++) {
+        gicd_mock[M_GICD_IGROUPR / 4 + i] = 0xffffffffu;
+    }
+    assert_eq(0, gic_dev_init(&dev, gicd_mock, gicc_mock));
+    assert_true(dev.security_extn);
+    assert_eq(1, (int)dev.nr_cpu_interfaces);
+    assert_eq(1020, (int)dev.nr_intids);
+
+    mmio_trace_reset();
+    gic_dev_dist_enable(&dev);
+    assert_eq(0, gic_irq_config(&dev, 33, true, 0x00, 0x01));
+    assert_eq(0u, count_mmio_range(false, gicd_mock, M_GICD_IGROUPR, M_GICD_IGROUPR + 0x80));
+    assert_eq(0u, count_mmio_range(true, gicd_mock, M_GICD_IGROUPR, M_GICD_IGROUPR + 0x80));
+    assert_eq(0xffffffffu, rd(gicd_mock, M_GICD_IGROUPR + 4));
+    assert_eq(0, gic_dev_cpu_enable(&dev));
+    assert_eq(1u, rd(gicd_mock, M_GICD_CTLR));
+    assert_eq(1u, rd(gicc_mock, M_GICC_CTLR));
+    pmr_w = find_write_index(&gicc_mock[M_GICC_PMR / 4], 0xffu);
+    ctlr_w = find_write_index(&gicc_mock[M_GICC_CTLR / 4], 1u);
+    assert_true(pmr_w >= 0 && ctlr_w >= 0 && pmr_w < ctlr_w);
+
+    /* SGIR NSATT bit (bit 15) must always be 0 */
+    gic_send_sgi(&dev, 5, 0x03, GICD_SGIR_FILTER_LIST);
+    assert_eq(0u, rd(gicd_mock, M_GICD_SGIR) & (1u << 15));
+
+    /* 3. Partial NS-visible PMR readback (e.g. 0xf8) succeeds */
+    mock_reset_typer(0x047fu); /* SecurityExtn=1, CPUNumber=3 => 4 ifaces */
+    assert_eq(0, gic_dev_init(&dev, gicd_mock, gicc_mock));
+    assert_eq(4, (int)dev.nr_cpu_interfaces);
+    pmr_read_mask = 0xf8u;
+    assert_eq(0, gic_dev_cpu_enable(&dev));
+    assert_eq(0xf8u, rd(gicc_mock, M_GICC_PMR));
+    assert_eq(1u, rd(gicc_mock, M_GICC_CTLR));
+
+    /* 4. Dropped PMR write / all-zero PMR readback fails (-1) and leaves GICC_CTLR disabled */
+    mock_reset_typer(0x041fu);
+    assert_eq(0, gic_dev_init(&dev, gicd_mock, gicc_mock));
+    drop_pmr_write = true;
+    assert_eq(-1, gic_dev_cpu_enable(&dev));
+    assert_eq(0u, rd(gicc_mock, M_GICC_CTLR));
+
+    mock_reset_typer(0x041fu);
+    assert_eq(0, gic_dev_init(&dev, gicd_mock, gicc_mock));
+    pmr_read_mask = 0x00u;
+    assert_eq(-1, gic_dev_cpu_enable(&dev));
+    assert_eq(0u, rd(gicc_mock, M_GICC_CTLR));
+}
+
+static void suite_boundaries_and_special_intids(void)
+{
+    TEST_SUITE("handler boundaries, unused slots, and 1020-1023");
+    mock_reset_typer(0x001fu); /* 1020 intids */
+    assert_eq(0, gic_dev_init(&dev, gicd_mock, gicc_mock));
+
+    /* Test unused slots across SGI/PPI/SPI up to 1019 */
+    const uint32_t test_ids[] = { 5u, 15u, 16u, 29u, 31u, 1019u };
+    for (unsigned i = 0; i < sizeof(test_ids) / sizeof(test_ids[0]); i++) {
+        uint32_t id = test_ids[i];
+        uint64_t expected_param = 0xabc00u + id;
+        hit_calls = 0;
+        hit_intid = 0xffffffffu;
+        hit_param = 0;
+        assert_eq(0, gic_register_handler(id, probe_handler, expected_param, "slot"));
+        assert_eq(-2, gic_register_handler(id, probe_handler, 0, "dup"));
+        gicc_mock[M_GICC_IAR / 4] = id;
+        gic_dev_dispatch(&dev, NULL);
+        assert_eq(1, (int)hit_calls);
+        assert_eq((int)id, (int)hit_intid);
+        assert_true(hit_param == expected_param);
+        assert_eq((int)id, (int)rd(gicc_mock, M_GICC_EOIR));
+        assert_eq(0, gic_unregister_handler(id));
+        assert_eq(-3, gic_unregister_handler(id));
+        /* Reuse slot */
+        assert_eq(0, gic_register_handler(id, probe_handler, expected_param + 1u, "reuse"));
+        assert_eq(0, gic_unregister_handler(id));
+    }
+
+    /* Raw SGI IAR 0xc05 (CPUID=3, intid=5) */
+    assert_eq(0, gic_register_handler(5u, probe_handler, 0x55u, "sgi5"));
+    hit_calls = 0;
+    gicc_mock[M_GICC_IAR / 4] = 0xc05u;
+    gic_dev_dispatch(&dev, NULL);
+    assert_eq(1, (int)hit_calls);
+    assert_eq(5, (int)hit_intid);
+    assert_eq(0xc05, (int)rd(gicc_mock, M_GICC_EOIR));
+    assert_eq(0, gic_unregister_handler(5u));
+
+    /* 1019 unregistered: unexpected callback + EOIR write */
+    unexpected_hits = 0;
+    unexpected_last = 0;
+    gic_driver_set_unexpected(probe_unexpected);
+    mmio_trace_reset();
+    gicc_mock[M_GICC_IAR / 4] = 1019u;
+    gic_dev_dispatch(&dev, NULL);
+    assert_eq(1, (int)unexpected_hits);
+    assert_eq(1019, (int)unexpected_last);
+    assert_eq(1u, eoir_write_count);
+    assert_eq(1019, (int)rd(gicc_mock, M_GICC_EOIR));
+
+    /* Special INTIDs 1020-1023: no handler lookup/call, no unexpected, no EOIR */
+    for (uint32_t sp = 1020u; sp <= 1023u; sp++) {
+        hit_calls = 0;
+        unexpected_hits = 0;
+        mmio_trace_reset();
+        gicc_mock[M_GICC_EOIR / 4] = 0;
+        gicc_mock[M_GICC_IAR / 4] = sp;
+        gic_dev_dispatch(&dev, NULL);
+        assert_eq(0, (int)hit_calls);
+        assert_eq(0, (int)unexpected_hits);
+        assert_eq(0u, eoir_write_count);
+        assert_eq(0u, rd(gicc_mock, M_GICC_EOIR));
+    }
+    gic_driver_set_unexpected(NULL);
+
+    /* TYPER=0 => nr_intids=32: 31 allowed, 32 rejected */
+    mock_reset_typer(0x0000u);
+    assert_eq(0, gic_dev_init(&dev, gicd_mock, gicc_mock));
+    assert_eq(32, (int)dev.nr_intids);
+    assert_eq(0, gic_register_handler(31u, probe_handler, 0, "ok31"));
+    assert_eq(-1, gic_register_handler(32u, probe_handler, 0, "bad32"));
+    assert_eq(0, gic_irq_enable(&dev, 31u));
+    assert_eq(-1, gic_irq_enable(&dev, 32u));
+    assert_eq(0, gic_unregister_handler(31u));
 }
 
 int main(void)
 {
     suite_init(); suite_classify(); suite_enable(); suite_registry();
     suite_ack_eoi(); suite_dispatch(); suite_sgi(); suite_cpu_iface();
+    suite_security_views_and_pmr();
+    suite_boundaries_and_special_intids();
     printf("\n%s: %d total, %d passed, %d failed\n", "test_gic_driver",
              __test_stats.total, __test_stats.passed, __test_stats.failed);
     return __test_stats.failed ? 1 : 0;

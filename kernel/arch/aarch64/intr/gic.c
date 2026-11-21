@@ -26,7 +26,15 @@ static uint32_t k_cpu_index(void)                      /* Runtime per-CPU state 
 
 void gic_cpu_init(void)                                /* 每核各跑一次（banked） */
 {
-    gic_dev_cpu_enable(&g_gic);
+    if (gic_dev_cpu_enable(&g_gic) != 0) {
+        uint64_t mpidr = 0;
+        __asm__ __volatile__("msr daifset, #0xf\n\tisb\n\tmrs %0, mpidr_el1"
+                             : "=r"(mpidr) :: "memory");
+        log_err("[gic] FATAL: PMR handoff blocked by firmware mpidr=0x");
+        kputx(mpidr);
+        kputs("\n");
+        for (;;) __asm__ __volatile__("wfi" ::: "memory");
+    }
     /* banked SGI/PPI 白名单：SGI 0（IPI 主载荷）+ SGI 1（R1-9 回发确认）
      * + SGI 2（clobber 探针, R2-4）+ SGI 3（IPI_VECTOR_TLB shootdown，
      * M3 Task 10：handler 已在 gic_init 注册，per-CPU enable 就绪）

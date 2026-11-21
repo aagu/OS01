@@ -52,7 +52,14 @@ static inline void w32(volatile uint32_t *m, uint32_t off, uint32_t v)
 #endif
 }
 static inline uint32_t r32(volatile uint32_t *m, uint32_t off)
-{ return m[off / 4u]; }
+{
+#ifdef OS01_HOST_GIC_MMIO_READ_TRACE
+    extern uint32_t gic_host_mmio_read(volatile uint32_t *);
+    return gic_host_mmio_read(m + off / 4u);
+#else
+    return m[off / 4u];
+#endif
+}
 
 /* 模块级边界（最近一次 gic_dev_init 写入；handler 表 API 无 dev 指针，
  * 用此全局裁断 intid 范围——suite_registry 期望 intid >= nr_intids 拒绝）。 */
@@ -63,9 +70,12 @@ int gic_dev_init(struct gic_dev *dev, volatile uint32_t *gicd, volatile uint32_t
     if (!dev || !gicd || !gicc) return -1;
     dev->gicd = gicd; dev->gicc = gicc; dev->dbg_last_iar = 0;
     if (r32(gicd, GICD_IIDR) == 0) return -1;         /* 镜像 gic.c:30-33 的门 */
-    uint32_t lines = (r32(gicd, GICD_TYPER) & 0x1fu) + 1u;
+    uint32_t typer = r32(gicd, GICD_TYPER);
+    uint32_t lines = (typer & 0x1fu) + 1u;
     dev->nr_intids = lines * 32u;
     if (dev->nr_intids > GIC_HANDLER_MAX) dev->nr_intids = GIC_HANDLER_MAX;
+    dev->security_extn = ((typer >> 10) & 1u) != 0u;
+    dev->nr_cpu_interfaces = (uint8_t)(((typer >> 5) & 7u) + 1u);
     g_nr_intids = dev->nr_intids;                     /* 同步给 handler 表 */
     return 0;
 }
@@ -100,9 +110,12 @@ int gic_irq_config(struct gic_dev *dev, uint32_t intid, bool enable,
 {
     if (!dev || !intid_ok(dev, intid)) return -1;
     volatile uint32_t *g = dev->gicd;
-    /* 组 0（secure；QEMU 无 EL3, 沿用 gic.c:16 的清位做法） */
-    uint32_t grp_off = GICD_IGROUPR + (intid / 32u) * 4u;
-    w32(g, grp_off, r32(g, grp_off) & ~(1u << (intid % 32u)));
+    /* 无 Security Extensions 时配置 Group 0；有 Security Extensions 时
+     * Non-secure EL1 由固件提供 Group 1，跳过 IGROUPR 访问。 */
+    if (!dev->security_extn) {
+        uint32_t grp_off = GICD_IGROUPR + (intid / 32u) * 4u;
+        w32(g, grp_off, r32(g, grp_off) & ~(1u << (intid % 32u)));
+    }
     /* 优先级字节（SGI/PPI 的 banked 域同样可写） */
     uint32_t pr_off = GICD_IPRIORITYR + (intid / 4u) * 4u;
     uint32_t shift = (intid % 4u) * 8u;
@@ -129,10 +142,15 @@ int gic_irq_disable(struct gic_dev *dev, uint32_t intid)
     return 0;
 }
 
-void gic_dev_cpu_enable(struct gic_dev *dev)
+int gic_dev_cpu_enable(struct gic_dev *dev)
 {
+    if (!dev || !dev->gicc) return -1;
     w32(dev->gicc, GICC_PMR, 0xffu);
+    if ((r32(dev->gicc, GICC_PMR) & 0xffu) == 0u) {
+        return -1;
+    }
     w32(dev->gicc, GICC_CTLR, 1u);
+    return 0;
 }
 
 /* per-CPU IAR trace (R2-6)：跨核 ack 只写本 CPU 槽——BSP 在 handler 上下文
@@ -217,7 +235,7 @@ void gic_dev_dispatch(struct gic_dev *dev, struct pt_regs *regs)
 {
     uint32_t iar = gic_ack(dev);
     uint32_t intid = iar & 0x3ffu;
-    if (intid == GIC_INTID_SPURIOUS) return;          /* 绝不写 EOIR */
+    if (intid >= 1020u) return;                       /* 1020-1023 绝不查表、绝不写 EOIR */
 #ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
     aarch64_user_mig_note_irq(intid);
 #endif

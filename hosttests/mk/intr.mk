@@ -184,12 +184,17 @@ $(TEST_BLD)/gic_driver_production.o: $(TESTS_DIR)/kernel/arch/aarch64/intr/gic_d
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(GIC_HOST_CFLAGS) -c $< -o $@
 
+$(TEST_BLD)/gic_driver_mmio_trace.o: $(TESTS_DIR)/kernel/arch/aarch64/intr/gic_driver.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(GIC_HOST_CFLAGS) -DOS01_HOST_GIC_MMIO_TRACE=1 -DOS01_HOST_GIC_MMIO_READ_TRACE=1 -c $< -o $@
+
 $(TEST_BLD)/test_gic_driver.o: $(TEST_CASES)/test_gic_driver.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(GIC_HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $@
 
-$(TEST_BLD)/test_gic_driver.elf: $(TEST_BLD)/test_gic_driver.o $(TEST_BLD)/gic_driver_production.o
+$(TEST_BLD)/test_gic_driver.elf: $(TEST_BLD)/test_gic_driver.o $(TEST_BLD)/gic_driver_mmio_trace.o
 	$(HOST_CC) -o $@ $^
 
 .PHONY: test_gic_driver
