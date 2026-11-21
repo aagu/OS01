@@ -110,7 +110,10 @@ def summarize_suites(
 
     rows: list[dict[str, Any]] = []
     for suite in sorted(by_suite):
-        items = sorted(by_suite[suite], key=lambda run: (run.utc_started_at, run.run_id))
+        items = sorted(
+            by_suite[suite],
+            key=lambda run: (flake_ledger.timestamp_key(run.utc_started_at), run.run_id),
+        )
         consec_fails = 0
         for run in reversed(items):
             if run.passed:

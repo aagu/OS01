@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "updated_at": "2026-11-21T09:56:00Z",
+  "runs": [],
+  "decisions": {
+    "aarch64-sched-ap": {
+      "decision": "open",
+      "note": "aarch64 AP 协作调度时序类（D8 宽容白名单成员）；尚未裁决。",
+      "decided_at": "2026-11-21",
+      "decided_by": ""
+    },
+    "gui": {
+      "decision": "open",
+      "note": "nightly terminal/gfx timing family，non-blocking（D8 宽容白名单成员）；尚未裁决。",
+      "decided_at": "2026-11-21",
+      "decided_by": ""
+    },
+    "gui-desktop": {
+      "decision": "open",
+      "note": "nightly terminal/gfx timing family，non-blocking（D8 宽容白名单成员）；尚未裁决。",
+      "decided_at": "2026-11-21",
+      "decided_by": ""
+    },
+    "terminal-present": {
+      "decision": "open",
+      "note": "nightly terminal/gfx timing family，non-blocking（D8 宽容白名单成员）；尚未裁决。",
+      "decided_at": "2026-11-21",
+      "decided_by": ""
+    }
+  }
+}

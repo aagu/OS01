@@ -766,10 +766,17 @@ check-test-catalog:
 	python3 tools/tests/scan_tests.py --root $(OS01_ROOT) --bridge $(OS01_ROOT)/config/test-bridge.json --check-drift
 check-ci-schedule:
 	python3 tools/tests/check_ci_schedule.py --root $(OS01_ROOT)
-# Flake ledger report (read-only, always exits 0; see qemutests/flake_report.py).
-# Pass FROM_CI=N to inspect the last N scheduled CI runs via `gh`.
+# Flake ledger report (report mode always exits 0; see qemutests/flake_report.py).
+# The ledger baseline is config/flake-ledger.json; derived statistics are
+# recomputed from its run history on every read.
+#   FROM_CI=N       inspect the last N scheduled CI runs via `gh`
+#   LEDGER=<path>   ledger file (default config/flake-ledger.json)
+#   MERGE="a b"     merge fragment/ledger JSON files (space separated, repeatable)
+#   UPDATE_LEDGER=1 write the merged ledger back to LEDGER
+#   EMIT_FRAGMENT=<path> write the newly discovered runs as a fragment JSON
+#   FORMAT=json     report format (table|json)
 test-flake-report:
-	python3 qemutests/flake_report.py --root $(OS01_ROOT) $(if $(FROM_CI),--from-ci $(FROM_CI))
+	python3 qemutests/flake_report.py --root $(OS01_ROOT) $(if $(FROM_CI),--from-ci $(FROM_CI)) $(if $(LEDGER),--ledger $(LEDGER)) $(if $(MERGE),$(foreach f,$(MERGE),--merge $(f))) $(if $(UPDATE_LEDGER),--update-ledger) $(if $(EMIT_FRAGMENT),--emit-fragment $(EMIT_FRAGMENT)) $(if $(FORMAT),--format $(FORMAT))
 # Environment doctor: compare local toolchain versions against ci/Dockerfile pins.
 test-doctor:
 	python3 tools/tests/test_doctor.py --root $(OS01_ROOT)
@@ -1915,7 +1922,7 @@ HELP_SEC_TEST := \
 HELP_SEC_FRAMEWORK := \
 	'test-harness' '(always)' 'Python unittest framework regression (TEST_HARNESS_MODULES list — append-only across tasks; never discovers QEMU scripts); also runs test-framework-contract as a prereq' \
 	'test-framework-contract' '(always)' 'Hostside negative contract: builds test_framework_contract.elf and asserts exit code 1 (assertion exit-code propagation / single-evaluation / TEST_RESULTS snapshot)' \
-	'test-flake-report' '(always)' 'Flake ledger report from local build/*/logs/tests/**/result.json (or FROM_CI=N via gh); always exits 0' \
+	'test-flake-report' '(always)' 'Flake ledger report from the in-repo ledger (config/flake-ledger.json) + local build/*/logs/tests/**/result.json (or FROM_CI=N via gh); MERGE=<fragment> merges a CI fragment, UPDATE_LEDGER=1 writes the ledger back; always exits 0' \
 	'test-doctor' '(always)' 'Compare local clang/ld.lld/qemu versions against ci/Dockerfile pins (exits 2 only if a tool cannot execute)' \
 	'ci-local' '(always)' 'Run test suite inside ghcr.io/aagu/os01-ci:latest via docker/podman (SUITE=<name> or MAKE_ARGS=...)'
 HELP_SEC_STANDALONE := \

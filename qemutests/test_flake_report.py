@@ -214,6 +214,14 @@ class FlakeLedgerModelTests(unittest.TestCase):
         ledger = flake_ledger.Ledger(decisions={"gui": {"decision": "bogus"}})
         self.assertEqual(ledger.decision_for("gui"), "open")
 
+    def test_mixed_timestamp_formats_sort_chronologically(self) -> None:
+        """Real archives use an ISO offset; fixtures use the "Z" spelling."""
+        offset = self._run("gui", "a", "2026-11-21T03:00:00.500000+00:00", "PASS")
+        zulu = self._run("gui", "b", "2026-11-21T03:00:00Z", "FAIL")
+        older = self._run("gui", "c", "2026-11-20T03:00:00+00:00", "PASS")
+        merged = flake_ledger.merge_runs([zulu, offset], [older])
+        self.assertEqual([run.run_id for run in merged], ["c", "b", "a"])
+
 
 class FlakeLedgerReportTests(unittest.TestCase):
     """Report/merge/write-back behaviour against the in-repo ledger."""
@@ -409,6 +417,33 @@ class FlakeLedgerReportTests(unittest.TestCase):
             flake_report.main([root], out=buf, root=str(root), fmt="json")
             data = json.loads(buf.getvalue())
             self.assertEqual(data["pending_adjudication"], [])
+
+
+class FlakeLedgerSeedTests(unittest.TestCase):
+    """The committed ledger seed and the make target wiring."""
+
+    def test_committed_ledger_seed_is_valid_and_records_known_families(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        ledger, error = flake_ledger.load_ledger(root / flake_ledger.LEDGER_RELATIVE_PATH)
+        self.assertIsNone(error)
+        self.assertTrue(ledger.present)
+        for suite in ("gui", "gui-desktop", "terminal-present", "aarch64-sched-ap"):
+            self.assertIn(suite, ledger.decisions)
+            self.assertEqual(ledger.decision_for(suite), "open")
+
+    def test_committed_ledger_seed_carries_no_fabricated_history(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        ledger, error = flake_ledger.load_ledger(root / flake_ledger.LEDGER_RELATIVE_PATH)
+        self.assertIsNone(error)
+        self.assertEqual(ledger.runs, [])
+
+    def test_make_target_exposes_the_ledger_variables(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        run_mk = (root / "mk" / "components" / "run.mk").read_text(encoding="utf-8")
+        self.assertIn("--update-ledger", run_mk)
+        self.assertIn("--emit-fragment", run_mk)
+        self.assertIn("--ledger", run_mk)
+        self.assertIn("--format", run_mk)
 
 
 if __name__ == "__main__":

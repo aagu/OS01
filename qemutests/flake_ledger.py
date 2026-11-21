@@ -130,9 +130,31 @@ class Ledger:
         }
 
 
+def timestamp_key(ts: str) -> tuple[int, float, str]:
+    """Sort key for a run timestamp.
+
+    Real archives carry ISO-8601 with an offset (``2026-11-06T17:15:17+00:00``)
+    while hand-written fixtures use the ``Z`` spelling, so the string form
+    alone does not order them consistently.  Parsed timestamps sort first, in
+    true chronological order; unparsable ones sort last, by raw text.
+    """
+    text = str(ts or "").strip()
+    if not text:
+        return (0, 0.0, "")
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return (1, 0.0, text)
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return (0, parsed.timestamp(), text)
+
+
 def sorted_runs(runs: Iterable[LedgerRun]) -> list[LedgerRun]:
     """Chronological order: (utc_started_at, suite, run_id)."""
-    return sorted(runs, key=lambda run: (run.utc_started_at, run.suite, run.run_id))
+    return sorted(
+        runs, key=lambda run: (timestamp_key(run.utc_started_at), run.suite, run.run_id)
+    )
 
 
 def merge_runs(
