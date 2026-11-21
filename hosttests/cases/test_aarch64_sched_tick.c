@@ -473,6 +473,93 @@ static void global_tick_cpu0_only(void)
     assert_eq(wd1 + 1, percpu_data[1].watchdog_counter);
 }
 
+static void deliver_cntp_ticks(uint32_t cpu, task_t *running, int count)
+{
+    mock_sched_this_cpu = &percpu_data[cpu];
+    mock_sched_current = running;
+    for (int i = 0; i < count; i++)
+        aarch64_timer_mock_handler(30, aarch64_timer_mock_handler_param, NULL);
+}
+
+static void idle_balance_cadence_and_gates(void)
+{
+    task2_prepare();
+    percpu_data[0].online = 1;
+    percpu_data[0].ipi_ready = 1;
+    percpu_data[0].scheduler_ok = 1;
+    percpu_data[1].online = 1;
+    percpu_data[1].ipi_ready = 1;
+    percpu_data[1].scheduler_ok = 1;
+
+    /* Before start: no opportunity. */
+    mock_sched_this_cpu = &percpu_data[1];
+    assert_false(aarch64_sched_tick_take_idle_balance());
+
+    task2_start_ticks();
+    assert_not_null(aarch64_timer_mock_handler);
+
+    /* Any readiness bit off on self -> 8 idle ticks produce no opportunity. */
+    percpu_data[1].online = 0;
+    deliver_cntp_ticks(1, &g_idle[1], 8);
+    assert_false(aarch64_sched_tick_take_idle_balance());
+    percpu_data[1].online = 1;
+
+    percpu_data[1].ipi_ready = 0;
+    deliver_cntp_ticks(1, &g_idle[1], 8);
+    assert_false(aarch64_sched_tick_take_idle_balance());
+    percpu_data[1].ipi_ready = 1;
+
+    percpu_data[1].scheduler_ok = 0;
+    deliver_cntp_ticks(1, &g_idle[1], 8);
+    assert_false(aarch64_sched_tick_take_idle_balance());
+    percpu_data[1].scheduler_ok = 1;
+
+    /* No second ready CPU (CPU0 missing each gate) -> no opportunity. */
+    percpu_data[0].online = 0;
+    deliver_cntp_ticks(1, &g_idle[1], 8);
+    assert_false(aarch64_sched_tick_take_idle_balance());
+    percpu_data[0].online = 1;
+
+    percpu_data[0].ipi_ready = 0;
+    deliver_cntp_ticks(1, &g_idle[1], 8);
+    assert_false(aarch64_sched_tick_take_idle_balance());
+    percpu_data[0].ipi_ready = 1;
+
+    percpu_data[0].scheduler_ok = 0;
+    deliver_cntp_ticks(1, &g_idle[1], 8);
+    assert_false(aarch64_sched_tick_take_idle_balance());
+    percpu_data[0].scheduler_ok = 1;
+
+    /* Busy ticks do not accumulate idle balance cadence. */
+    memset(&g_busy, 0, sizeof(g_busy));
+    g_busy.pid = 4250;
+    g_busy.deadline = 1000;
+    deliver_cntp_ticks(1, &g_busy, 10);
+    assert_false(aarch64_sched_tick_take_idle_balance());
+
+    /* 7 consecutive idle ticks -> false; AP need_resched stays 0. */
+    percpu_data[1].need_resched = 0;
+    deliver_cntp_ticks(1, &g_idle[1], 7);
+    assert_false(aarch64_sched_tick_take_idle_balance());
+    assert_eq(0, (int)percpu_data[1].need_resched);
+
+    /* 8th idle tick -> take returns true once, then false; need_resched still 0. */
+    deliver_cntp_ticks(1, &g_idle[1], 1);
+    assert_eq(0, (int)percpu_data[1].need_resched);
+    assert_true(aarch64_sched_tick_take_idle_balance());
+    assert_false(aarch64_sched_tick_take_idle_balance());
+
+    /* Two unconsumed batches (16 idle ticks) coalesce into a single take. */
+    deliver_cntp_ticks(1, &g_idle[1], 16);
+    assert_true(aarch64_sched_tick_take_idle_balance());
+    assert_false(aarch64_sched_tick_take_idle_balance());
+
+    /* Subsequent 8 idle ticks produce another opportunity. */
+    deliver_cntp_ticks(1, &g_idle[1], 8);
+    assert_true(aarch64_sched_tick_take_idle_balance());
+    assert_false(aarch64_sched_tick_take_idle_balance());
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(timer_local_arm),
     TEST_ENTRY(timer_bad_config),
@@ -485,6 +572,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(bsp_idle_requests_scan_ap_idle_does_not),
     TEST_ENTRY(lifecycle_idempotent),
     TEST_ENTRY(global_tick_cpu0_only),
+    TEST_ENTRY(idle_balance_cadence_and_gates),
 TEST_LIST_END
 
 int main(void)

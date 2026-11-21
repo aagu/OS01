@@ -52,9 +52,11 @@ void arch_aarch64_idle_step(void)
 
     /* 2. masked check under the rq lock. */
     arch_irq_state_t flags = arch_local_irq_save();
+    bool idle_balance = aarch64_sched_tick_take_idle_balance();
     uint64_t rq_flags = spin_lock_irqsave(&cpu->rq_lock);
     bool need = __atomic_load_n(&cpu->need_resched, __ATOMIC_ACQUIRE) ||
-                !rbtree_empty(&cpu->run_queue);
+                !rbtree_empty(&cpu->run_queue) ||
+                idle_balance;
     uint32_t slot_state =
         __atomic_load_n(&ap_work[cpu_id()].state, __ATOMIC_ACQUIRE);
     spin_unlock_irqrestore(&cpu->rq_lock, rq_flags);

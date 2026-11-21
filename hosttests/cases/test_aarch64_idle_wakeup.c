@@ -46,6 +46,14 @@ void idle_event_record(int ev, uint64_t arg)
 
 /* IRQ state machine: 1 = masked. */
 static int mock_irq_state;
+static bool g_idle_balance_pending;
+
+bool aarch64_sched_tick_take_idle_balance(void)
+{
+    bool pending = g_idle_balance_pending;
+    g_idle_balance_pending = false;
+    return pending;
+}
 arch_irq_state_t arch_local_irq_save(void)
 {
     idle_event_record(EV_IRQ_SAVE, mock_irq_state);
@@ -232,6 +240,26 @@ static void suite_spurious(void)
     assert_frozen_order();
 }
 
+static void suite_idle_balance_opportunity(void)
+{
+    TEST_SUITE("idle balance pending enters schedule without sleeping; SGI wake stays inert");
+    /* 1. SGI-only wake without pending opportunity does not schedule. */
+    mock_reset();
+    g_idle_balance_pending = false;
+    arch_aarch64_idle_step();
+    assert_eq(1, wait_calls);
+    assert_eq(0, mock_schedule_calls);
+    assert_false(g_idle_balance_pending);
+
+    /* 2. Pending idle-balance opportunity is consumed and enters schedule(). */
+    mock_reset();
+    g_idle_balance_pending = true;
+    arch_aarch64_idle_step();
+    assert_false(g_idle_balance_pending);
+    assert_eq(0, wait_calls);
+    assert_eq(1, mock_schedule_calls);
+}
+
 int main(void)
 {
     suite_arrival_before_check();
@@ -239,6 +267,7 @@ int main(void)
     suite_ready_no_sleep();
     suite_arrival_during_wait();
     suite_spurious();
+    suite_idle_balance_opportunity();
     printf("\n%s: %d total, %d passed, %d failed\n",
            "test_aarch64_idle_wakeup",
            __test_stats.total, __test_stats.passed, __test_stats.failed);

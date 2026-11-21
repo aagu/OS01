@@ -52,6 +52,10 @@ void aarch64_sched_tick(void);
  * unknown CPU and for a CPU whose start was refused. */
 bool aarch64_sched_tick_started(unsigned cpu);
 
+/* Consume and clear the calling CPU's pending 8-tick idle-balance
+ * opportunity.  Caller must hold local IRQs masked. */
+bool aarch64_sched_tick_take_idle_balance(void);
+
 #if defined(OS01_SELFTEST) && defined(AARCH64_SCHED_TICK_TEST)
 /* The idle sleep boundary of CPU @cpu (selftest build only): the idle
  * step and the tick variant's sleep probe report their sleep boundary

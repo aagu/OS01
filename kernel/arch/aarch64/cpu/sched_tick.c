@@ -50,6 +50,8 @@
  * owning CPU publishes its entry with a release store while IRQs are
  * masked; a cross-CPU reader uses an acquire load. */
 static uint32_t g_started[NR_CPUS];
+static uint32_t g_idle_balance_ticks[NR_CPUS];
+static bool g_idle_balance_pending[NR_CPUS];
 
 /* Global ready gate.  Set once by aarch64_sched_tick_init() after the
  * accounting locks exist (the .bss image is all zeros, which is the
@@ -62,8 +64,11 @@ void aarch64_sched_tick_init(void)
     if (__atomic_load_n(&g_ready, __ATOMIC_ACQUIRE))
         return;   /* one-shot; never re-init under live ticks */
 
-    for (unsigned i = 0; i < NR_CPUS; i++)
+    for (unsigned i = 0; i < NR_CPUS; i++) {
         __atomic_store_n(&g_started[i], 0, __ATOMIC_RELAXED);
+        g_idle_balance_ticks[i] = 0;
+        g_idle_balance_pending[i] = false;
+    }
 
     /* The accounting locks must exist before any cpu_start(): this
      * also release-publishes accounting_ready inside accounting.c. */
@@ -121,9 +126,21 @@ bool aarch64_sched_tick_start(void)
 
     /* The accounting lifecycle is published only after the counter is
      * really running. */
+    g_idle_balance_ticks[cpu] = 0;
+    g_idle_balance_pending[cpu] = false;
     sched_accounting_cpu_start(cpu, AARCH64_SCHED_TICK_HZ, true);
     __atomic_store_n(&g_started[cpu], 1, __ATOMIC_RELEASE);
     return true;
+}
+
+bool aarch64_sched_tick_take_idle_balance(void)
+{
+    uint32_t cpu = cpu_id();
+    if (cpu >= NR_CPUS)
+        return false;
+    bool pending = g_idle_balance_pending[cpu];
+    g_idle_balance_pending[cpu] = false;
+    return pending;
 }
 
 bool aarch64_sched_tick_started(unsigned cpu)
@@ -199,4 +216,32 @@ void aarch64_sched_tick(void)
      * a schedule unconditionally. */
     if (cpu == 0)
         __atomic_store_n(&rq->need_resched, 1, __ATOMIC_RELEASE);
+
+    /* Idle-balance cadence: only when current == idle, this CPU has
+     * published online/ipi_ready/scheduler_ok, and at least one other
+     * CPU is similarly ready.  Every 8 idle samples latches a pending
+     * opportunity (coalesced if unconsumed); never sets AP need_resched. */
+    if (current == idle &&
+        __atomic_load_n(&rq->online, __ATOMIC_ACQUIRE) &&
+        __atomic_load_n(&rq->ipi_ready, __ATOMIC_ACQUIRE) &&
+        __atomic_load_n(&rq->scheduler_ok, __ATOMIC_ACQUIRE)) {
+        bool other_ready = false;
+        for (uint32_t i = 0; i < NR_CPUS; i++) {
+            if (i == cpu)
+                continue;
+            if (__atomic_load_n(&percpu_data[i].online, __ATOMIC_ACQUIRE) &&
+                __atomic_load_n(&percpu_data[i].ipi_ready, __ATOMIC_ACQUIRE) &&
+                __atomic_load_n(&percpu_data[i].scheduler_ok, __ATOMIC_ACQUIRE)) {
+                other_ready = true;
+                break;
+            }
+        }
+        if (other_ready) {
+            g_idle_balance_ticks[cpu]++;
+            if (g_idle_balance_ticks[cpu] >= 8U) {
+                g_idle_balance_ticks[cpu] = 0;
+                g_idle_balance_pending[cpu] = true;
+            }
+        }
+    }
 }

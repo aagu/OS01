@@ -141,7 +141,7 @@ static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t flags)
 /* ── Reduced percpu_t ───────────────────────────────────────────── */
 typedef struct mock_percpu {
     uint64_t self, need_resched;
-    uint32_t cpu_id, arch_processor_id, online, scheduler_ok;
+    uint32_t cpu_id, arch_processor_id, online, ipi_ready, scheduler_ok;
     void *tss;
     rbtree_root_t run_queue;
     task_t *idle;
