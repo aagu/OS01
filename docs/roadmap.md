@@ -1,6 +1,6 @@
 # OS01 优化路线图
 
-> **基准**：`1e4b0d21`（2026-11-20）　**日期**：2026-11-21
+> **基准**：`e7e6a032`（2026-11-21）　**日期**：2026-11-21
 
 本文件**只列未完成 / 进行中**的规划项。已完成工作见 [`changelog.md`](changelog.md)；**最近 3 天的闭环快速索引见文末「近期闭环索引」**；闭环细节见各专题文档：
 [`arch.md`](arch.md) · [`memory/memory.md`](memory/memory.md) · [`memory/cow-mmap.md`](memory/cow-mmap.md) ·
@@ -13,7 +13,7 @@
 |-------|------|---------|------|
 | **P0** | 工程与测试基础设施 | 0 | flake 账本入库已于 2026-11-21 闭环（见 [`changelog.md`](changelog.md)） |
 | **P1** | 安全加固 | 3 | ASLR-A / ASLR-B / UBSan+KASan |
-| **P2** | aarch64 适配 | 11 | 内存与执行体 3 · 架构统一 2 · 真机阻断 6 |
+| **P2** | aarch64 适配 | 18 | 内存与执行体 3 · 能力齐平 7 · 架构统一 2 · 真机阻断 6 |
 | **P2** | 架构治理 / 扩展性 | 0 | 新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填该节 |
 | **P3** | GUI | 7 | GUI-4/5/6 + 优化与验证 4 |
 | **P4** | 硬件适配 | 6 | USB 3 · NVMe · HPET · ACPI S3 |
@@ -54,6 +54,20 @@ aarch64 已有 EL0 用户态，但 ASLR 本项先不扩大到 aarch64。
 | 运行期跨核任务迁移 | 解除当前任务终身固定单核亲和限制，补全跨核负载均衡与 `TTBR0`/ASID/per-task VM 状态同步 | 固定单核亲和 SMP 用户调度 ✅（2026-11-20） |
 | EL0 FP/SIMD 上下文（剩余项） | **已落地部分**：CPACR_EL1.FPEN 放行 EL0/EL1（`kernel/arch/aarch64/cpu/user_task.c:290-298`、AP 侧 `kernel/arch/aarch64/cpu/ap_sched.c:192-196`）、per-task FP 保存区与 `switch_to()` 保存恢复（`kernel/arch/aarch64/cpu/fp_state.S`、`kernel/arch/aarch64/cpu/task_arch.c:388-390`）、userland 不再 `-mgeneral-regs-only`（`734f67bc`）。**剩余**：① EL0 任务 PSTATE 的 F 位仍掩码（`AARCH64_USER_TASK_PSTATE = 0x340`，bit4=0，`kernel/include/arch/aarch64/user_image.h:60`），且无 EC 0x2C/0x2D 陷入处理路径 → EL0 浮点指令仍会陷入；② signal 帧无 FP 区（`struct aarch64_sigframe` 仅 280 B 通用寄存器 + blocked 掩码，`kernel/include/arch/aarch64/syscall.h:28-34`）；③ `user/test_fp.c` 未接入构建与测试目录，无运行时证据 | SMP 用户调度 ✅ |
 | 跨进程 inode 级 `MAP_SHARED` | 引入 shmem/页缓存注册表，使非 fork 后代的独立进程间共享文件/匿名映射可见一致（目前共享仅靠 fork 的 COW 引用计数，`kernel/arch/aarch64/memory/user_vm_policy.c:338-366,715-722`） | 文件映射与 `MAP_SHARED` v1 ✅（2026-11-19） |
+
+### 能力齐平：对标 x86_64 的剩余缺口（2026-11-21 扫描）
+
+范围：能力门（`kernel/include/arch/features.h`）+ 共享 syscall 表（`kernel/syscall/dispatch.c`）+ 驱动/设备注册面 + userland 应用与 E2E 套件的全量对比。差距呈「外设与生态 > syscall > 执行体细节」梯度：执行体核心（fork/exec/信号/SMP 用户调度）已由上文三任务收口，本节只记**此前未立任务的缺口**。头部事实：`OS01_HAS_NET` / `OS01_HAS_PCI` / `OS01_HAS_USB` 在 aarch64 全为 0；共享 syscall 表 x86_64 服务 **77** 项、aarch64 产品态 **51** 项（15 共享原生 + 32 fs 组 + 4 misc，与 changelog 2026-11-18「47 项」口径衔接），缺 26 项 = 网络 13 · 时间 4（`time`/`gettimeofday`/`nanosleep`/`times`）· 会话 5（`umask`/`setpgid`/`getpgid`/`setsid`/`getsid`）· rlimit 2 · `futex` 1 · `putchar` 1。
+
+| 任务 | 内容与完成条件 | 前置 |
+|------|----------------|------|
+| 时间 syscall 组 | 解除 `OS01_SYSCALL_A64_SUBSET` 隐藏的 `sys_time_dispatch` 四项（`kernel/syscall/dispatch.c:114-117`）。handler 架构中立（`kernel/syscall/sys_time.c`：`arch_clocksource` facade + `blocker_wait`/`wakeup_ns` 条件回调），libc 包装已备（`libc/unistd/nanosleep.c`、`sleep.c`）。验收 = aarch64 guest 内 busybox `sleep` 真睡、时钟读数随 QEMU 虚拟时间前进；x86 侧 `SYS_time` 自身仍是写 0（1970）的 MVP 桩，真墙上时钟不在本项 | 独立（aarch64 clocksource ✅，`kernel/arch/aarch64/platform/clocksource.c`） |
+| 会话/资源 syscall 组 | 两档：`getrlimit`/`setrlimit` 的 `sys_resource_dispatch` 架构中立（`kernel/syscall/sys_resource.c`），解除隐藏即得；`umask` 与进程组四项的 `sys_proc_dispatch` 现为 x86 专属实现（`kernel/arch/x86_64/syscall/sys_proc.c:36`），须先下沉到 `kernel/syscall/` 再解除 aarch64 隐藏；`putchar` 顺手在 aarch64 自有 misc handler（`kernel/arch/aarch64/syscall/sys_misc.c:25`）补桩。验收 = aarch64 guest 内 `setsid`/进程组行为与 x86 一致 | 独立（SIGTSTP/SIGCONT 停止状态机是 P5「作业控制」既有缺口，两架构共用，不在本项） |
+| futex(2) 移植 | `kernel/arch/aarch64/sync/futex.c` 已建 64 桶等待队列但无 syscall 到达（头注释自述任务说明）；把 x86 `do_futex_wait`/`wake` 的用户地址物理页解析（x86 走 4KB/2MB 叶 helper）迁到 aarch64 leaf walker（`kernel/include/arch/aarch64/user_vm_leaf.h`），解除 `SYS_futex` 隐藏。P5 clone/pthread 链在 aarch64 侧的硬前置 | EL0 用户页表叶游走 ✅（user_vm_leaf） |
+| 网络栈接入（`OS01_HAS_NET` 0→1） | 三段：① lwIP 纳入 aarch64 profile 构建（现 aarch64 不编译 lwIP，`kernel/include/arch/features.h:39-42` 注释）；② virtio-net 传输层——现驱动是 x86 PCI legacy IO-port 传输（`kernel/driver/virtio-net.c:1-4`，内联 `inl/outl`），aarch64 需参照 virtio-blk-mmio（`kernel/arch/aarch64/driver/virtio_blk.c`）实现 MMIO transport，或先抽公共 virtio 设备核心再两架构分接；③ 翻门解锁 `kernel/fs/file.c`/`kernel/fs/poll.c` 的 FD_SOCKET 编译块并解除 13 项 socket syscall 隐藏（`kernel/syscall/dispatch.c:123-135`）。验收 = aarch64 上 `SUITE=network` 等价 E2E 跑通 | 独立；E2E 依赖本节「E2E 套件 aarch64 化」 |
+| 输入设备（键盘/鼠标） | aarch64 唯一输入是 PL011 RX → console TTY（`kernel/arch/aarch64/platform/console.c:39-40`），无 i8042/PS2、无 xHCI HID（`OS01_HAS_PCI`/`OS01_HAS_USB`=0）→ 无键盘/鼠标。QEMU virt 路线：新增 virtio-input MMIO 驱动（全树无 virtio_input 代码）作生产者，接入 `input_route` 路由与 /dev/keyboard、/dev/mouse 消费面（现字节消费链挂在 i8042 demux 上，`kernel/driver/keyboard.c:246-251`，需先分层解耦）。真机 USB HID 路线远期（aarch64 无 PCI/USB 计划）。P3 GUI「aarch64 GUI 等待显示设备基础就绪」中输入是缺口的一半 | 独立 |
+| 图形/GUI 栈 sysroot 与应用解禁 | aarch64 userland 排除 14 应用（`mk/profiles/aarch64-clang.mk:314`：desktop/doom/tetris/LVGL 与 GUI 测试组/test_gfx/usb_hid_probe/netmodeltest/systest/monitor 组），根因 sysroot 无 libgfx/libgui/lvgl/mbedTLS（`user/apps.mk:19-25`）。内核侧基础已在：fb/gfx0 devfs 节点已注册（`kernel/arch/aarch64/boot/main.c:765-770`）。任务 = sysroot 图形库移植 + 逐应用解禁；ramfb 现非字形控制台（`kernel/arch/aarch64/platform/console.c:5`），fb 文本控制台按需另列 | 交互类应用依赖「输入设备」；doom 等纯显示应用仅依赖 sysroot |
+| E2E 套件 aarch64 化 | `test-qemu` 的约 20 个 E2E 套件（systest/network/gfx/terminal/gui/usb-boot 等）全部 x86-only；aarch64 只有 `test-aarch64 MODE=` 验收族（PSCI/GIC/sched/boot-contract）与 `test-contract`。优先把 systest（fork/exec/waitpid 进程语义 E2E）与 terminal 冒烟扩到 aarch64 profile，其后随 syscall 组解禁逐套件跟进 | 无硬前置；个别用例依赖上面 syscall 组先行解禁 |
 
 ### 架构统一推进链（迈向单一 kernel_main）
 
