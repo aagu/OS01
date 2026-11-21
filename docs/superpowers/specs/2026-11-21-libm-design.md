@@ -1,6 +1,6 @@
 # libc 最小真实 libm
 
-日期：2026-11-21。状态：设计评审修订版（v3）；仅设计，不表示已实施。
+日期：2026-11-21。状态：设计评审修订版（v4）；仅设计，不表示已实施。
 
 ## 目标、依赖与交付边界
 
@@ -25,13 +25,13 @@ musl 1.2.5 官方归档 `musl-1.2.5.tar.gz`，SHA256 `a9a118bbe84d8764da0ea0d28b
 libc/math/fabs.c        fabsf.c       copysign.c    copysignf.c
 libc/math/trunc.c       truncf.c      floorf.c      ceilf.c
 libc/math/fmod.c        fmodf.c       sqrt.c        sqrtf.c
-libc/math/sqrt_data.c                            （__rsqrt_tab[128] 表）
-libc/math/sqrt_data.h                            （__rsqrt_tab 的声明）
+libc/math/sqrt_data.c                            （__os01_libm_rsqrt_tab[128] 表）
+libc/math/sqrt_data.h                            （表的声明）
 libc/math/floor.c       ceil.c        round.c       roundf.c   （移植，见适配）
 libc/math/musl_libm.h                               （私有头）
 ```
 
-`sqrt_data.h` 必须与 `sqrt_data.c` 同目录：`sqrt.c` 用 `#include "sqrt_data.h"` 取 `__rsqrt_tab` 的声明，漏掉它会变成隐式声明并丢掉表的外部链接属性。
+`sqrt_data.h` 必须与 `sqrt_data.c` 同目录：`sqrt.c` 用 `#include "sqrt_data.h"` 取表的声明，漏掉它会变成隐式声明并丢掉表的外部链接属性。
 
 私有头 `libc/math/musl_libm.h` **放在源目录，不进 `libc/include/`**，因此不会被 `install-headers` 发布进 sysroot —— musl 的 `asuint64/asdouble/FORCE_EVAL/predict_false` 不应出现在用户态头文件里。`#include "musl_libm.h"` 按同目录相对包含解析，宿主测试编译同一批源时不需要额外 `-I`。
 
@@ -51,8 +51,9 @@ musl 原版依赖 musl 运行时环境，OS01 不具备的部分逐条适配并�
 10. `sqrt/sqrtf` 的次正规数归一化 → **整数重建**（公式见下节，这是 v2 的错误修正）。
 11. NaN 返回值统一为**固定** quiet NaN：double `0x7ff8000000000000`、float `0x7fc00000`。不依赖各架构的硬件默认 NaN（x86 的无效运算默认 NaN 带负号，ARM 的不带），保证跨架构结果一致。
 12. 去掉 `hidden` 可见性标注。
+13. **内部表符号改名**：`__rsqrt_tab` → `__os01_libm_rsqrt_tab`。它是 `sqrt_data.o` 里的非 static 全局符号，会随 `libm.a` 进入用户态链接；沿用 musl 的名字有与其它库同名冲突的风险。
 
-适配后，全部 16 个函数的函数体**不产生浮点算术指令**（只有位操作与内存搬运；`sqrt` 是定点 Goldschmidt 迭代 + 位重建，`fmod` 是整数长除）。这条性质是「内核侧理论上可链」的前提，见「内核边界」。
+适配后，全部 16 个函数的函数体**不产生浮点算术指令**（只有位操作与内存搬运；`sqrt` 是定点 Goldschmidt 迭代 + 位重建，`fmod` 是整数长除）。这条性质是「内核侧另建一份位级实现」的前提，见「内核边界」。
 
 ### 次正规数归一化（v2 公式的修正）
 
@@ -67,7 +68,7 @@ musl 用一次浮点乘法做次正规数归一化：`ix = asuint64(x * 0x1p52);
 
 归一化后 musl 的 `top` 仍按原逻辑处理（`top = ix >> 52; top -= 52;`），因为归一化后的位模式与浮点乘法的结果逐位相同。
 
-该公式已实测：最小次正规数（`m=1`）、次小（`m=2`）、最大次正规数（`m=2^52-1`）、`m=2^51` 边界与 20 万次随机次正规数抽样，全部与 `x * 0x1p52` 的浮点结果**逐位一致**；v2 公式在上述每个用例上都失配。
+该公式已实测：binary64 与 binary32 各自用最小次正规数、次小、最大次正规数、尾数最高位置边界（binary64 `m = 2^51`、binary32 `m = 2^22`）以及每种精度 20,000 次随机次正规数抽样，全部与 musl 的浮点缩放**逐位一致**；v2 公式在上述每个用例上都失配。
 
 ### 移植理由（事实更正）
 
@@ -75,7 +76,7 @@ musl 用一次浮点乘法做次正规数归一化：`ix = asuint64(x * 0x1p52);
 
 本次仍做整数移植，理由改为：
 
-1. **消除浮点算术**——第 2/6/8/9/10 条适配的前提，也是「内核侧理论上可链」这条性质的来源。
+1. **消除浮点算术**——第 2/6/8/9/10 条适配的前提。
 2. **不依赖 excess precision 语义**——toint 技巧的正确性依赖「中间和的 ulp 恰为 1」这一浮点表示事实；位运算实现不依赖编译器对表达式的求值精度约定，行为跨架构确定。
 3. **不引入 long double**——整数实现避免 `double_t`/`float_t` 与 `LDBL_EPSILON` 出现在 vendored 源码里。
 
@@ -83,11 +84,31 @@ musl 用一次浮点乘法做次正规数归一化：`ix = asuint64(x * 0x1p52);
 
 现文件只有 `math_fp_signbit`/`math_fp_isfinite` 两个静态内联与 `fabs` 内联。改写后：
 
+- **C linkage 保护**：公开的函数声明必须放在 `extern "C"` 内。freestanding C++ 探针确认裸声明会引用被修饰的符号（`U _Z4fabsd`），C++ 消费者会链接失败。因此整个声明区包在
+  ```c
+  #ifdef __cplusplus
+  extern "C" {
+  #endif
+  ...
+  #ifdef __cplusplus
+  }
+  #endif
+  ```
+  里（musl 的 `math.h` 同样如此）。
 - 16 个函数声明（musl 书写风格：`double      fabs(double);`）。
 - `INFINITY`/`NAN`/`HUGE_VAL`/`HUGE_VALF`。`INFINITY`/`NAN` 的替换列表必须与 `libc/include/float.h:54-55` 里的**字面一致**，避免宏重定义告警。
 - `MATH_ERRNO`/`MATH_ERREXCEPT`/`math_errhandling`。**只声明 `MATH_ERRNO`**（OS01 没有 fenv，不实现 `MATH_ERREXCEPT`），并按 C99 §7.12.1 让这个承诺成立——见下节。
 - `FP_NAN/FP_INFINITE/FP_ZERO/FP_SUBNORMAL/FP_NORMAL`。
-- 分类宏 `isnan/isinf/isfinite/isnormal/signbit/fpclassify`：用 clang builtin 实现（`__builtin_isnan` 等），**不用** musl 的 `__fpclassify*` 辅助函数——那会引入新的链接符号，且 musl 的 `sizeof(x)` 分派写法在传入 int 时会落到 `__fpclassifyl`。
+- 分类宏 `isnan/isinf/isfinite/isnormal/signbit/fpclassify`：**必须继续接受整数实参**。现头的 `isfinite(int)`/`signbit(int)` 是靠隐式转换到 `double` 成立的（`math_fp_isfinite(double)`），换成裸 builtin 会直接编译失败：
+  ```
+  error: floating point classification requires argument of floating point type (passed in 'int')
+  ```
+  因此采用「sizeof 分派 + 兜底转 double」的形式，与现头的隐式转换语义一致，且不需要 musl 的 `__fpclassify*` 辅助函数（那会引入新的链接符号）：
+  ```c
+  #define isfinite(x) (sizeof(x) == sizeof(float)  ? __builtin_isfinite((float)(x))  \
+                                                   : __builtin_isfinite((double)(x)))
+  ```
+  `isnan/isinf/isnormal/signbit/fpclassify` 同形。整数实参走 double 分支 → 语义与现头一致。
 
 ### errno 契约
 
@@ -125,7 +146,7 @@ musl 用一次浮点乘法做次正规数归一化：`ix = asuint64(x * 0x1p52);
   - **BusyBox**：`fabs` 的真实调用点在 `networking/ntpd.c`，而 `config/busybox.config.in:949` 是 `# CONFIG_NTPD is not set` → 该调用不参与编译；BusyBox 仍带 `-lm`（`Makefile.flags:149` 的 `LDLIBS += m`），链接顺序上 `-lm` 在对象之后，解析到新归档。
   - **LVGL**：`config/lv_conf.h:1078` 是 `#define LV_USE_SVG 0` → `lv_svg_parser.c` 的 `sinf/cosf` 不参与编译。
   - **libc 自身**：`libc/stdlib/floatscan.c` 用的是自己的 `fs_fabs`，不是 `math.h` 的。
-- **`hosttests/cases/test_libc_float_parse.c` 的 Layer 4 契约变更**：该测试断言「`fabs` 的实现在头里」，且已用 `-Dfabs=os01_fabs` 前缀改名防止宿主 libm 插桩。改写后实现来自 `libm.a`，该 TU 需链接 vendored 的 fabs 对象。断言意图（**宿主 glibc 的 `fabs` 绝不能顶替**）完全保留，实现来源从「头内内联」变为「归档真实符号」。同一文件对 `signbit()/isfinite()` 的使用不变——改写后的 `math.h` 仍提供这两个宏。
+- **`hosttests/cases/test_libc_float_parse.c` 的 Layer 4 契约变更**：该测试断言「`fabs` 的实现在头里」，且已用 `-Dfabs=os01_fabs` 前缀改名防止宿主 libm 插桩。改写后实现来自 `libm.a`，该 TU 需链接 vendored 的 fabs 对象。断言意图（**宿主 glibc 的 `fabs` 绝不能顶替**）完全保留，实现来源从「头内内联」变为「归档真实符号」。同一文件对 `signbit()/isfinite()` 的使用不变——改写后的 `math.h` 仍提供这两个宏，且仍接受整数实参。
 
 ## `fs_fabs` 收敛为纯整数位运算
 
@@ -145,7 +166,12 @@ musl 用一次浮点乘法做次正规数归一化：`ix = asuint64(x * 0x1p52);
 
 ## 构建集成
 
-- `libc/Makefile`：新增 `LIBM_C_SOURCES := $(wildcard math/*.c)`，`LIBM_ARCHIVE := $(LIBC_BUILD_DIR)/lib/libm.a`，对象落在 `$(BUILD_DIR)/math/%.o`；`install-libs` 增加 `cp $(LIBM_ARCHIVE) $(INSTALL_ROOT)/usr/lib/libm.a`。libm **不进 libk**（libk 是内核子集，`aarch64` 还受 `-mgeneral-regs-only` 约束）。`libc/math/*.c` 不得被加进 `LIBC_C_SOURCES`——那是 `libc.a` 的源清单。
+- `libc/Makefile`：
+  - 新增 `LIBM_C_SOURCES := $(wildcard math/*.c)`，`LIBM_ARCHIVE := $(LIBC_BUILD_DIR)/lib/libm.a`，对象落在 `$(BUILD_DIR)/math/%.o`。
+  - **`all` 必须包含 `$(LIBM_ARCHIVE)`**：`all: $(LIBC_ARCHIVE) $(LIBK_ARCHIVE) $(LIBM_ARCHIVE)`。
+  - **`install-libs` 必须显式依赖 `$(LIBM_ARCHIVE)`**：`install-libs: $(LIBC_ARCHIVE) $(LIBK_ARCHIVE) $(LIBM_ARCHIVE) $(CRT0_OBJECT)`，并在配方里 `cp $(LIBM_ARCHIVE) $(INSTALL_ROOT)/usr/lib/libm.a`。
+    - sysroot staging 调用的是 `libc install`，后者直接执行 `install-headers install-libs`（`libc/Makefile:174`）；若只加归档规则和 `cp` 而不加前置依赖，**干净构建**会因归档尚未生成而失败，**增量构建**可能复制到旧归档。
+  - libm **不进 libk**（libk 是内核子集，`aarch64` 还受 `-mgeneral-regs-only` 约束）。`libc/math/*.c` 不得被加进 `LIBC_C_SOURCES`——那是 `libc.a` 的源清单。
 - `mk/components/sysroot.mk`：compat-libs **停止产出 `libm.a`**，只保留 `librt.a` 空桩。
   - **必须同时清除 staging 里的旧桩**：compat-libs 的 manifest 是用 `find` 扫描整个 staging 目录生成的，已有构建目录里的旧 `usr/lib/libm.a` 会被重新写进 manifest，与 libc stage 的新归档撞成重复目标，发布器报 `ERROR: duplicate destination in generation` 硬失败。做法：在生成 manifest **之前** `rm -f $(STAGING_DIR)/compat-libs/usr/lib/libm.a`。
   - 验收必须覆盖这一点：**从已含旧空桩的构建目录跑一次增量发布**（当前 `build/x86_64-clang/staging/compat-libs/usr/lib/libm.a` 就是旧桩），必须成功发布新 generation，`sysroot/usr/lib/libm.a` 是新归档（不是空桩），且不报重复目标。
@@ -164,22 +190,32 @@ musl 用一次浮点乘法做次正规数归一化：`ix = asuint64(x * 0x1p52);
 
 | 形态 | x86_64（`-mno-sse`） | aarch64（`-mgeneral-regs-only`） |
 |---|---|---|
-| `double f(double)` 按值 | 可编译（double 退化为内存传递） | 编译失败：`requires 'double' type support, but ABI 'aapcs' does not support it` |
-| `void f(const double*, double*)` | 可编译 | 可编译 |
+| `double f(double)` 按值 | 编译通过，但 **ABI 不同**（见下） | 编译失败：`requires 'double' type support, but ABI 'aapcs' does not support it` |
+| `void f(const double*, double*)` | 编译通过 | 编译通过 |
+
+**x86_64 的「编译通过」不等于「ABI 兼容」**。探针实测：`double f(double)` 在 `-mno-sse` 下用整数寄存器传参（`movq %rdi, %rax`），而用户态 SSE 路径用 `%xmm0`。两份对象即使函数体完全相同，调用约定也不同——内核调用者无法直接调用按用户态 ABI 编译的归档，反之亦然。
 
 因此：
 
-- **aarch64 内核永远不能链按值 double 签名的 libm**，这是编译期硬约束。
-- x86_64 内核技术上可以链纯整数实现的 libm（double 走内存、不碰 xmm，不破坏用户态 FP 状态；内核的 FP 状态只在上下文切换时 FXSAVE/FRSTOR，系统调用入口不保存）。
-- 但那会让两架构的内核侧 API 分裂（aarch64 必须是指针/位级），而内核当前**没有任何数学调用点**。
+- 内核**不能**复用用户态这份 `libm.a`。按值 double 的接口在两套 ABI 下不通用。
+- aarch64 连按值 double 的编译都过不去。
+- 内核当前**没有任何数学调用点**。
 
-结论：**内核不链 libm，保持 FP-free 策略**。若将来内核确有数学需求，走「指针/位级 API」的单独立项，不在本次范围内。
+结论：**内核不链 libm，保持 FP-free 策略，libm 是纯用户态交付**。若将来内核确有数学需求，正确形态是**单独编译的一份内核侧实现**，对外只暴露指针／位级接口（`uint64_t` 位模式进出或 `const double*`/`double*`），这样才不依赖任何浮点 ABI 约定；那是一次独立立项，不在本次范围内。
 
 ## 测试与验收
 
 ### 宿主层（对照 glibc）
 
-- 新增 `hosttests/cases/test_libc_math.c`（`@os01-test` 元数据 + `link: libc-math`）。
+**参考值来自单独的宿主 oracle 二进制**，测试二进制本身不链接 glibc 的 `-lm`：
+
+- 新增 `hosttests/oracle/libm_oracle.c`：纯宿主程序，**不带任何 OS01 include 路径**，链接宿主 glibc 的 `-lm`，对共享用例表求值并按固定行格式打印结果（含位模式与 `errno`）。它的链接规则写在 `hosttests/mk/libc.mk` 里，顺序可控：`-lm` 放在源文件**之后**。
+- 新增 `hosttests/cases/test_libc_math.c`（`@os01-test` 元数据 + `link: libc-math`）：只链接改名的 OS01 对象，对同一张用例表求值，与 oracle 的输出逐行逐字节比较。
+- **为什么不能用「测试二进制直接链 `-lm`」**：测试链接规则由 `tools/tests/scan_tests.py` 生成，形如 `$(HOST_CC) $(LINK_LDFLAGS_<link>) -o $@ $^`，`LINK_LDFLAGS_*` 在**对象之前**。`-lm` 放在对象之前时，若链接器启用 `--as-needed`，该库会因「当时还没有未定义符号」而被丢弃：
+  ```
+  ld: lo.o: in function 'h': undefined reference to `sqrt' / `fmod' / `floor'
+  ```
+  实测：`-Wl,--as-needed -lm lo.o` 失败；`-Wl,--as-needed lo.o -lm` 成功。oracle 方案从根上绕开这个顺序依赖（这也是仓库既有 floatscan/time oracle 的做法）。
 - `hosttests/mk/libc.mk` 新增规则：用 `HOST_CC` 编译**同一批** `libc/math/*.c`，加前缀改名防止宿主 glibc 的 libm 插桩；注册 `LINK_GROUP_libc-math`。
   - **16 个数学符号全量改名**：`-Dfabs=os01_fabs -Dcopysign=os01_copysign …`（含 `f` 变体），沿用仓库既有的 `OS01_LIBC_PREFIX` 约定。
   - **`errno` 必须符号隔离**：libm 对象按 OS01 的 `<errno.h>` 编译，引用的是**普通全局** `errno`；宿主的 glibc `<errno.h>` 里 `errno` 是 TLS 变量。两者混用会得到确切错误（已实测复现）：
@@ -188,17 +224,17 @@ musl 用一次浮点乘法做次正规数归一化：`ix = asuint64(x * 0x1p52);
     ld: /usr/lib/libc.so.6: error adding symbols: bad value
     ```
     处理：libm 对象加 `-Derrno=os01_errno`，测试二进制提供**自己的普通全局** `int os01_errno = 0;`，断言只读写 `os01_errno`。宿主 glibc 的 TLS `errno` 与之无关（两者可共存且互不干扰，已实测：宿主 `errno=42` 与 `os01_errno=7` 同时成立）。仓库既有先例：`hosttests/mk/libc.mk` 的 time 组注释「the test provides the plain `int errno` the libc declares (the host's errno is a TLS symbol)」。
-- 比对基准是宿主 glibc 的同名函数（测试 TU 用宿主 `<math.h>`）。**比较策略分三类**，不能一刀切逐位相等：
+- **比较策略分三类**，不能一刀切逐位相等：
 
   | 类别 | 断言 |
   |---|---|
-  | 有限值、±inf、±0 | 与 glibc **逐位一致** |
-  | NaN 产生路径（`sqrt` 负数、`fmod` 除零、`fmod` 无穷被除数、NaN 输入） | 断言返回值**等于 OS01 的固定 quiet NaN 位模式**（double `0x7ff8000000000000`、float `0x7fc00000`）+ `errno` 期望；**不与 glibc 逐位比较** |
-  | `fabs`/`copysign` | 额外断言符号位与载荷：`fabs` 清符号位且保留 NaN 载荷，`copysign` 只改符号位、保留载荷 |
+  | 有限值、±inf、±0 | 与 glibc oracle **逐位一致** |
+  | `sqrt`/`sqrtf`/`fmod`/`fmodf` 的 NaN 产生路径（`sqrt` 负数、`fmod` 除零、`fmod` 无穷被除数、NaN 输入） | 断言返回值**等于 OS01 的固定 quiet NaN 位模式**（double `0x7ff8000000000000`、float `0x7fc00000`）+ `errno` 期望；**不与 glibc 逐位比较** |
+  | `fabs`/`copysign` | 断言**载荷保留**：符号位按规则变化，NaN 载荷不变；不套用固定 NaN 位模式 |
 
-  NaN 不能与 glibc 逐位比较的原因（已实测）：glibc 的 `fmod(1.0, 0.0)` 返回 `0xfff8000000000000`（**负** quiet NaN），而 `fmod(1.0, NaN)` 会把输入 NaN 的载荷带进结果；musl 两条路径都返回自己的默认 NaN；本次统一返回固定的正号 quiet NaN（适配第 11 条）。因此宿主断言要**直接对照 OS01 的常量位模式**，不能只靠 `isnan()` 做分类判断——分类判断无法发现「返回了 NaN 但位模式不对」。
+  NaN 不能与 glibc 逐位比较的原因（已实测）：glibc 的 `fmod(1.0, 0.0)` 返回 `0xfff8000000000000`（**负** quiet NaN），而 `fmod(1.0, NaN)` 会把输入 NaN 的载荷带进结果；musl 两条路径都返回自己的默认 NaN；本次统一返回固定的正号 quiet NaN（适配第 11 条）。宿主断言要**直接对照 OS01 的常量位模式**，不能只靠 `isnan()` 做分类判断——分类判断无法发现「返回了 NaN 但位模式不对」。注意 `fabs`/`copysign` 不在这条规则内：它们必须保留输入载荷。
 - errno 断言：调用前把 `os01_errno` 置为哨兵值，域错误路径后应为 `EDOM`，其他路径后应保持不变。
-- 次正规数用例：`sqrt`/`sqrtf` 必须覆盖最小次正规数、次小、最大次正规数与 `m=2^51` 边界（两个精度各一组），逐位比较期望值。
+- 次正规数用例：`sqrt`/`sqrtf` 必须覆盖最小次正规数、次小、最大次正规数与尾数最高位置边界（**binary64 用 `m = 2^51`，binary32 用 `m = 2^22`**），逐位比较期望值。
 - `make regen-test-catalog` 重新生成测试目录。
 
 ### guest 层（实跑）
@@ -209,9 +245,9 @@ musl 用一次浮点乘法做次正规数归一化：`ix = asuint64(x * 0x1p52);
 - **用例必须实际调用全部 16 个函数并断言结果**（不接受「只注册不计算」的用例）：
   - 有限值：与硬编码的**期望位模式**逐位比较（不用浮点比较，避免容差掩盖错误）；
   - ±inf、±0：位模式比较；
-  - 域错误路径（`sqrt` 负数、`fmod` 除零、`fmod` 无穷被除数）：断言返回固定 quiet NaN 位模式 **且** `errno == EDOM`；
-  - NaN 输入路径：断言返回固定 quiet NaN 位模式 **且** `errno` 未被改动；
-  - `fabs`/`copysign`：断言符号位与 NaN 载荷。
+  - `sqrt`/`sqrtf`/`fmod`/`fmodf` 的域错误路径（`sqrt` 负数、`fmod` 除零、`fmod` 无穷被除数）：断言返回固定 quiet NaN 位模式 **且** `errno == EDOM`；
+  - `sqrt`/`sqrtf`/`fmod`/`fmodf` 的 NaN 输入路径：断言返回固定 quiet NaN 位模式 **且** `errno` 未被改动；
+  - `fabs`/`copysign`：断言符号位与 **NaN 载荷保留**——这两条**不适用**固定 quiet NaN 位模式（`fabs(NaN)` 必须返回带原载荷、清了符号位的 NaN），按载荷规则验收；
   - 16 个符号逐个点名，任何一个没被调用都算用例不完整。
 - 验收证据：
   1. 单用例：`make OS01_SYSTEST=1 test-qemu SUITE=systest CASE=64_libm` → `mk/components/run.mk` 写 `config/inittab.systest.case`（`tty1:once:/bin/systest --case 64_libm`），guest 跑单个用例，host 侧 `parse_v1` 校验协议后打印 `PASS: case 64_libm passed`。
@@ -222,12 +258,14 @@ musl 用一次浮点乘法做次正规数归一化：`ix = asuint64(x * 0x1p52);
 
 aarch64 没有 systest E2E 路径，guest 层验收只在 x86_64 进行。aarch64 的验收是**构建与安装产物**：
 
-- `build/aarch64-clang/sysroot/usr/lib/libm.a` 存在，且 `llvm-nm` 导出全部 16 个符号（不导出 `fabs` 之外的名字，不与 `libc.a` 重复定义）。
+- `build/aarch64-clang/sysroot/usr/lib/libm.a` 存在。
+- **16 个公开函数全部导出**：`llvm-nm --defined-only` 能看到 `fabs/fabsf/copysign/copysignf/floor/floorf/ceil/ceilf/trunc/truncf/round/roundf/fmod/fmodf/sqrt/sqrtf`。
+- **除这 16 个公开函数与已知内部符号 `__os01_libm_rsqrt_tab`（`sqrt_data.o` 提供）外没有其它导出符号**——内部表是归档里必然存在的非 static 全局，因此检查按「公开函数齐全 + 无意外的多余符号」来定，而不是「只能有 16 个符号」。
 - aarch64 的 `libc.a`/`libk.a` 构建不回归。
 
 ### 静态审计
 
-- 对两个 profile 的 `libm` 对象做反汇编检查，确认没有浮点算术指令：x86_64 无 `addsd/subsd/mulsd/divsd/sqrtsd` 等 SSE 算术（`movsd` 之类的内存搬运允许），aarch64 无 `fadd/fsub/fmul/fdiv/fsqrt/fcvt`。这是「无浮点算术」性质的机器可验证证据，也是内核边界结论的前提。
+- 对两个 profile 的 `libm` 对象做反汇编检查，确认没有浮点算术指令：x86_64 无 `addsd/subsd/mulsd/divsd/sqrtsd` 等 SSE 算术（`movsd` 之类的内存搬运允许），aarch64 无 `fadd/fsub/fmul/fdiv/fsqrt/fcvt`。这是「无浮点算术」性质的机器可验证证据。
 
 ### 回归
 
@@ -238,10 +276,10 @@ aarch64 没有 systest E2E 路径，guest 层验收只在 x86_64 进行。aarch6
 
 ## 文档更新
 
-- `thirdpart/musl-libc-algorithms.manifest`：新增一节，记录 vendored 文件清单、12 条适配 diff、SHA256，以及 `fs_fabs` 与 musl `fabs` 同源的说明。
+- `thirdpart/musl-libc-algorithms.manifest`：新增一节，记录 vendored 文件清单、13 条适配 diff、SHA256，以及 `fs_fabs` 与 musl `fabs` 同源的说明。
 - `docs/roadmap.md`：「libm 归档」开放项从「无 libm archive」收窄为「已有基础代数集归档（16 符号），超越函数仍未实现」。
 - `docs/build/build.md`：sysroot 发布阶段的 compat-libs 描述同步（只含 `librt.a` 桩）。
 
 ## 完成条件
 
-`libm.a` 进入 sysroot 且内容真实；宿主测试全绿（含 errno 隔离、NaN 固定位模式、次正规数用例）；systest 在 guest 内实跑并留下 `64_libm` 的 PASS 记录，且该用例确实调用了全部 16 个函数；**从已含旧空桩的构建目录增量发布成功**；Doom 与 BusyBox 链接无回归；x86_64 与 aarch64 两个 profile 的 libc/libk 构建通过，且 aarch64 的 sysroot 里有符号完整的 `libm.a`。
+`libm.a` 进入 sysroot 且内容真实；宿主测试全绿（含 oracle 对照、errno 隔离、NaN 固定位模式、次正规数用例）；systest 在 guest 内实跑并留下 `64_libm` 的 PASS 记录，且该用例确实调用了全部 16 个函数；**从已含旧空桩的构建目录增量发布成功**；Doom 与 BusyBox 链接无回归；x86_64 与 aarch64 两个 profile 的 libc/libk 构建通过，且 aarch64 的 sysroot 里有符号完整的 `libm.a`。
