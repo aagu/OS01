@@ -1096,7 +1096,10 @@ void aarch64_do_signal_delivery(pt_regs_t *regs)
 
         /* The staged frame is heap-allocated: 816 bytes would blow the
          * kernel's -Wframe-larger-than=512 stack budget (the same rule
-         * the ELF loader's program-header array follows). */
+         * the ELF loader's program-header array follows).  Zero it
+         * first: the reserved[8] pad and the fp[520..527] tail are
+         * never written by aarch64_fp_save, and the whole frame is
+         * copied to user memory — stale heap bytes must not leak. */
         struct aarch64_sigframe *frame = kmalloc(sizeof(*frame));
         if (!frame) {
             /* Transient shortage: restore the pending bit and retry on
@@ -1104,6 +1107,7 @@ void aarch64_do_signal_delivery(pt_regs_t *regs)
             __atomic_fetch_or(&cur->signal, (1ULL << sig), __ATOMIC_SEQ_CST);
             return;
         }
+        memset(frame, 0, sizeof(*frame));
         frame->regs    = *regs;
         frame->blocked = (uint64_t)cur->blocked;
         /* The interrupted task's FP state is live in the hardware at

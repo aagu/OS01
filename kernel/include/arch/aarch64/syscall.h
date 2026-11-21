@@ -31,8 +31,15 @@ void aarch64_user_syscall(pt_regs_t *regs);
  * follows the fp.h save-area layout (q0..q31, fpsr, fpcr); delivery
  * stashes the interrupted task's live FP state in it and sigreturn
  * restores it, so an FP-using handler cannot corrupt the interrupted
- * context.  regs@0 and blocked@272 keep their historical offsets. */
-struct aarch64_sigframe {
+ * context.  regs@0 and blocked@272 keep their historical offsets.
+ *
+ * The struct is 16-byte aligned on purpose: aarch64_fp_save() aligns
+ * its pointer UP to 16, which is only a no-op (and therefore keeps the
+ * user-visible fp area at offset 288) when the frame base itself is
+ * 16-aligned.  The slab buckets are >= 32 bytes today, but the C-level
+ * alignment keeps that invariant local instead of depending on
+ * allocator arithmetic. */
+struct __attribute__((aligned(16))) aarch64_sigframe {
     pt_regs_t regs;
     uint64_t  blocked;
     uint8_t   reserved[8];               /* keeps fp 16-byte aligned */

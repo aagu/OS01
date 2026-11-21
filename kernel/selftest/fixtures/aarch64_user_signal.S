@@ -19,7 +19,9 @@
  *        g_sig_count==1, and x19==0x13572468.
  *        2b. FP round-trip: main sets d8=pi/d15=e + fpsr(QC)/fpcr(RZ);
  *            handler poisons them; sigreturn must restore every bit
- *            (exit codes 0x0f/0x10/0x11/0x12 on mismatch).
+ *            (exit codes 0x0f/0x10/0x11/0x12 on mismatch).  The handler
+ *            also checks the frame's never-written padding (reserved@280,
+ *            fp tail@808) is zero — exit codes 0x13/0x14.
  *     3. SYS_fork() -> child calls SYS_exec("/bin/user_signal", argv, NULL)
  *        with argc==2 -> child killed by SIGUSR1 -> parent waitpid() sees
  *        status == 10.
@@ -300,6 +302,17 @@ sigusr1_handler:
     b.eq    2f
     US_EXIT 0xd2
 2:
+    /* The delivered frame's never-written padding must be zero (the
+     * kernel zeroes the staging frame before the copy — stale heap
+     * bytes must not reach user memory). */
+    ldr     x9, [sp, #280]
+    cbz     x9, 3f
+    US_EXIT 0x13
+3:
+    ldr     x9, [sp, #808]
+    cbz     x9, 4f
+    US_EXIT 0x14
+4:
     adrp    x9, g_sig_count
     add     x9, x9, :lo12:g_sig_count
     ldr     x10, [x9]
