@@ -51,7 +51,12 @@ aarch64 已有 EL0 用户态，但 ASLR 本项先不扩大到 aarch64。
 
 | 任务 | 内容与完成条件 | 前置 |
 |------|----------------|------|
+<<<<<<< HEAD
 | EL0 FP/SIMD 上下文（剩余项） | **已落地部分**：CPACR_EL1.FPEN 放行 EL0/EL1（`kernel/arch/aarch64/cpu/user_task.c:290-298`、AP 侧 `kernel/arch/aarch64/cpu/ap_sched.c:192-196`）、per-task FP 保存区与 `switch_to()` 保存恢复（`kernel/arch/aarch64/cpu/fp_state.S`、`kernel/arch/aarch64/cpu/task_arch.c:388-390`）、userland 不再 `-mgeneral-regs-only`（`734f67bc`）。**剩余**：① EL0 任务 PSTATE 的 F 位仍掩码（`AARCH64_USER_TASK_PSTATE = 0x340`，bit4=0，`kernel/include/arch/aarch64/user_image.h:60`），且无 EC 0x2C/0x2D 陷入处理路径 → EL0 浮点指令仍会陷入；② signal 帧无 FP 区（`struct aarch64_sigframe` 仅 280 B 通用寄存器 + blocked 掩码，`kernel/include/arch/aarch64/syscall.h:28-34`）；③ `user/test_fp.c` 未接入构建与测试目录，无运行时证据 | SMP 用户调度 ✅ |
+=======
+| 运行期跨核任务迁移 | 解除当前任务终身固定单核亲和限制，补全跨核负载均衡与 `TTBR0`/ASID/per-task VM 状态同步 | 固定单核亲和 SMP 用户调度 ✅（2026-11-20） |
+| EL0 FP/SIMD 上下文（剩余项） | **已落地部分**：CPACR_EL1.FPEN 放行 EL0/EL1（`kernel/arch/aarch64/cpu/user_task.c:290-298`、AP 侧 `kernel/arch/aarch64/cpu/ap_sched.c:192-196`）、per-task FP 保存区与 `switch_to()` 保存恢复（`kernel/arch/aarch64/cpu/fp_state.S`、`kernel/arch/aarch64/cpu/task_arch.c:388-390`）、userland 不再 `-mgeneral-regs-only`（`734f67bc`）。**剩余三项已于 2026-11-21 闭环**（spec `docs/superpowers/specs/2026-11-21-el0-fpsimd-design.md`）：① 前提勘误——FPEN=0b11 下 EL0 FP 指令不陷入（`AARCH64_USER_TASK_PSTATE` 的 F 位是 FIQ 掩码，与 FP 访问无关；FP 访问陷入类是 EC 0x07，原记的 0x2C=FP_EXC64/0x2D=GCS 均非此类），EL0 来源 EC 0x07 以 fatal 停机兜底（`kernel/arch/aarch64/cpu/user_task.c` `aarch64_user_task_sync`），`intr_decode.c` 补 `AARCH64_EC_FP_ACCESS` → `INTR_REASON_PROTECTION` 分类，`user_image.h` 过期注释改写；② signal 帧 FP 区——`struct aarch64_sigframe` v2 = 816 B（regs@0 / blocked@272 / reserved[8]@280 / fp[528]@288，`kernel/include/arch/aarch64/syscall.h`），交付时 `aarch64_fp_save` 存活寄存器、sigreturn 两段复制（280 B 过 PSTATE 守卫 → FP 段）后 `aarch64_fp_restore`，无部分恢复，fixture `aarch64_user_signal` 新增 d8/d15/fpsr/fpcr 往返断言（RED→GREEN 实证）；③ 运行时证据——产品盘加装 `/bin/test_fp`，`make test-aarch64 MODE=user-runtime USER_RUNTIME_CASE=fp` 在 1/2/4/8 核经 busybox ash 实跑并断言 `test_fp: PASS`。**后续任务（x86）**：x86_64 `struct sigframe` 同样无 FPU 区（`kernel/include/uapi/time.h`），signal handler 的 FP 使用会毁掉被打断上下文的 x87/SSE 状态，另列任务对齐 | SMP 用户调度 ✅ |
+>>>>>>> 3f5ddb2 (docs: close the EL0 FP/SIMD remaining-items ledger item)
 | 跨进程 inode 级 `MAP_SHARED` | 引入 shmem/页缓存注册表，使非 fork 后代的独立进程间共享文件/匿名映射可见一致（目前共享仅靠 fork 的 COW 引用计数，`kernel/arch/aarch64/memory/user_vm_policy.c:338-366,715-722`） | 文件映射与 `MAP_SHARED` v1 ✅（2026-11-19） |
 
 ### 能力齐平：对标 x86_64 的剩余缺口（2026-11-21 扫描）

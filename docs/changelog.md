@@ -29,6 +29,19 @@
   - 账本更新依赖维护者下载 CI artifact 并本地合并后提交；CI 不自动写库，`--from-ci` 仍是人工按需路径。
   - 报告器仍不是门禁：账本为空、损坏或报告失败都不影响 CI 红绿。
 
+- feat(arch): **EL0 FP/SIMD 剩余项闭环（闭合 roadmap P2「EL0 FP/SIMD 上下文（剩余项）」）**——signal 帧补 FP 保存恢复、EC 0x07 fatal 兜底、`test_fp` 产品盘运行时证据（spec `docs/superpowers/specs/2026-11-21-el0-fpsimd-design.md`、plan `docs/superpowers/plans/2026-11-21-el0-fpsimd-plan.md`）：
+
+  **做了什么**
+  - **前提勘误（`8626c3ad`）**：FPEN=0b11 下 EL0 FP 指令不陷入——原 ledger 的「PSTATE F 位掩码导致陷入」系误记（F 位是 FIQ 掩码），FP 访问陷入类是 EC 0x07（原记 0x2C=FP_EXC64、0x2D=GCS 均非此类）。`sync_fault.h` 增 `AARCH64_EC_FP_ACCESS`，EL0 来源该陷入在 `aarch64_user_task_sync` 以 fatal 停机兜底（FPEN 只在各 CPU init 写一次，出现即内核不变量破坏），`intr_decode.c` 补 `INTR_REASON_PROTECTION` 分类，`user_image.h` 过期注释（"kernel explicitly disables FPEN"）改写。
+  - **signal 帧 v2（`0ff4d42b`）**：`struct aarch64_sigframe` 280→816 B（regs@0 / blocked@272 偏移不变，reserved[8]@280，fp[528]@288 沿用 fp.h 布局）；交付时 `aarch64_fp_save` 暂存存活 FP 状态（内核 `-mgeneral-regs-only` 不碰寄存器），sigreturn 两段复制——280 B GPR 段先过既有 PSTATE 伪造帧守卫（保住 fixture 负例 `-EINVAL` 语义）→ 再复制 FP 段，全部成功才统一恢复、无部分恢复。暂存帧按 `-Wframe-larger-than=512` 预算改 kmalloc（对齐 user_elf.c 程序头数组先例）：交付分配失败还原 pending 位下次重试，sigreturn 分配失败返回 `-ENOMEM`。
+  - **FP 往返断言（`5be85113`）**：`aarch64_user_signal` fixture 主流程设 d8=π/d15=e + fpsr(QC)/fpcr(RZ)，handler 毒化后经 sigreturn 校验逐位恢复（失败退出码 0x0f–0x12）；fixture 汇编规则对齐 `aarch64_user_runtime.o` 解除 `-mgeneral-regs-only`。RED→GREEN 实证：临时禁用 `aarch64_fp_restore` → 用例 FAIL，恢复后 28/28 PASS。
+  - **运行时证据（`24a3fa79`）**：aarch64 产品盘加装 `/bin/test_fp`；`MODE=user-runtime` 新增 `fp` case——1/2/4/8 核各经 busybox ash 实跑 `/bin/test_fp` 断言独立 `test_fp: PASS` 行，runner 单元测试扩到 14 例；`user/test_fp.c` 标注 aarch64 无 nanosleep（时间组未解禁）容忍 `-ENOSYS`。
+
+  **验收**
+  - m4-1 内核自测：`total=28 passed=28 failed=0 skipped=0`（含 `aarch64_user_signal` FP 往返）。
+  - `make test-aarch64 MODE=user-runtime USER_RUNTIME_CASE=fp`：PASS cpus=1,2,4,8，每核串口见 `test_fp: PASS`（EL0 浮点执行、libc FP printf、fork 穿透 FP 继承与上下文切换 FP 存活的运行时证据）。
+  - `make test-aarch64 MODE=user-runtime USER_RUNTIME_CASE=product`：PASS（盘上新增 `/bin/test_fp` 无启动回归）；`make test-host`、`make test-static` 全绿。
+
 ## 2026-11-20
 
 - refactor(sched,arch): **用户态进入与返回门面（`arch/context.h`）**——双架构统一用户态首入准备、共享返回工作顺序与原生帧恢复入口（spec `docs/superpowers/specs/2026-11-20-user-context-facade-design.md`、plan `docs/superpowers/plans/2026-11-20-user-context-facade.md`；`8a49bc26` / `803f6c03` / `57216054`）：
