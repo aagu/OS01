@@ -134,6 +134,15 @@ int kernel_main(const struct boot_context *bootctx)
     arch10_capacity_fixture_init();
 #endif
 
+#if defined(KERNEL_SANITIZER_TEST_UBSAN) || defined(KERNEL_SANITIZER_TEST_KASAN)
+    // Sanitizer probe fixture (KERNEL_SANITIZER_TEST=ubsan|kasan): trigger
+    // one genuine compiler-instrumented violation, report + panic.  The
+    // fixture source is only linked in sanitizer-probe builds; the normal
+    // build carries neither the call nor the symbol.
+    void sanitizer_probe_run(void);
+    sanitizer_probe_run();
+#endif
+
     int pty_rc = pty_init();
     if (pty_rc != 0)
         boot_failure_stop("pty", "ptmx", pty_rc, -1, -1);

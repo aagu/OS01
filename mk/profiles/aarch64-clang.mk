@@ -104,6 +104,14 @@ ifneq ($(filter 1,$(CAPACITY_TEST)),)
 $(error CAPACITY_TEST=1 is x86-only; aarch64 profile must keep CAPACITY_TEST=0)
 endif
 
+# KERNEL_UBSAN / KERNEL_KASAN are x86-only this phase: KASan's shadow
+# mapping (head.S static zero-shadow + PML4 slot 472) and the linux-triple
+# requirement are x86-specific, and the UBSan runtime is not wired into
+# the aarch64 profile yet (roadmap P1 follow-up).
+ifneq ($(filter 1,$(KERNEL_UBSAN) $(KERNEL_KASAN)),)
+$(error KERNEL_UBSAN/KERNEL_KASAN are x86-only; the aarch64 profile must keep both 0)
+endif
+
 # X86_INTR_FAULT_TEST is x86-only as well: the destructive #BP / NMI
 # probes target the x86 exception entries (int3 and the NMI gate).  The
 # probe-selection macro travels through KERNEL_EXTRA_CFLAGS, so reject a

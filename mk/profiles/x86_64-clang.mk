@@ -104,6 +104,18 @@ endif
 ifneq ($(strip $(BOOT_SERVICES_CASE)),)
 KERNEL_VARIANT := boot-services-$(BOOT_SERVICES_CASE)
 endif
+# Sanitizer instrumentation variants (roadmap P1): KERNEL_UBSAN/KERNEL_KASAN
+# re-key the kernel build dir so an instrumented build never shares objects
+# or artifacts with the normal build (compile flags differ). project.mk
+# refuses every other variant combination at parse time; this profile is
+# also included directly by the kernel sub-make, which never sees
+# mk/project.mk, so the derivation lives here.
+ifneq ($(filter 1,$(KERNEL_UBSAN)),)
+KERNEL_VARIANT := san-ubsan
+endif
+ifneq ($(filter 1,$(KERNEL_KASAN)),)
+KERNEL_VARIANT := san-kasan
+endif
 KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel$(if $(KERNEL_VARIANT),/$(KERNEL_VARIANT))
 LIBC_BUILD_DIR := $(BUILD_DIR)/libc
 LIBGFX_BUILD_DIR := $(BUILD_DIR)/libgfx

@@ -1,4 +1,5 @@
 #include <memory/memory.h>
+#include <kasan/kasan.h>
 #include <memory/vmm.h>        // tlb_shootdown (shared broadcast)
 #include <arch/x86_64/vmm.h>   // raw x86 page-table API + kernel_map
 #include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
@@ -85,6 +86,11 @@ void x86_vmm_map_2m(uint64_t *pgdir, uintptr_t physical_address, uintptr_t virtu
     pud = get_next_level(pgd, pgd_idx, pgd_flags);
     pmd = get_next_level(pud, pud_idx, pud_flags);
     pmd[pmd_idx] = x86_pte_2m_make(physical_address, flags);
+
+    // KERNEL_KASAN: keep the shadow of the newly mapped range present so
+    // instrumented code can check accesses to runtime-mapped MMIO.  No-op
+    // (static inline) in the normal build.
+    kasan_shadow_note_mapping(virtual_address, 0x200000UL);
 
     // If modifying the shared kernel page table after APs are online,
     // broadcast TLB invalidation so other cores drop stale PMD/TLB entries.
@@ -296,6 +302,8 @@ int x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys,
         return -ENOMEM;
 
     *pte = x86_pte_4k_make(phys, flags);
+    // KERNEL_KASAN: shadow for 4K-mapped kernel ranges (no-op normal build).
+    kasan_shadow_note_mapping(virt, 0x1000UL);
     return 0;
 }
 

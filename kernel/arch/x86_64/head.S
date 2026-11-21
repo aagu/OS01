@@ -121,7 +121,17 @@ setup_TSS64:
     lretq
 
 go_to_kernel:
+#if defined(OS01_KASAN) || defined(OS01_UBSAN)
+	/* Sanitizer builds enter through the uninstrumented kasan_boot_entry:
+	 * under OS01_KASAN it copies the low-identity-map UEFI handoff struct
+	 * into the kernel image before ANY instrumented C runs (shadow of
+	 * low-half VAs is non-canonical), and under both knobs it pre-seeds
+	 * the BSP GS base so per-CPU reads see a canonical high address
+	 * instead of the raw identity map (see kernel/kasan/kasan_boot.c). */
+	.quad	kasan_boot_entry
+#else
 	.quad	kernel_main
+#endif
 
 //=======	ignore_int
 
@@ -182,12 +192,27 @@ __PML4E:
 	.quad	0x102003
 	.fill	255,8,0
 	.quad	0x102003
+#if defined(OS01_KASAN)
+	/* KASan phase-1 shadow window: PML4 slot 472 -> static PDPT at
+	 * 0x104000 (see the __KASAN_* tables below).  Slot 472 covers the
+	 * shadow VAs [0xffffec0000000000, +512G) computed as
+	 * (VA >> 3) + 0xdffffc0000000000 for the kernel direct-map band.
+	 * The two static PDs map 1 GiB of shadow VAs to ONE reserved 2 MiB
+	 * zero frame (PA 0x200000, inside the kernel image), read-only:
+	 * every shadow check reads 0 = "valid" until the kernel swaps in
+	 * real shadow (kasan_shadow_install).  Normal builds keep the
+	 * original layout byte-for-byte. */
+	.fill	215,8,0
+	.quad	0x104003
+	.fill	39,8,0
+#else
 	.fill	255,8,0
+#endif
 
 .org	0x2000
 
 __PDPTE:
-	
+
 	.quad	0x103003	/* 0x103003 */
 	.fill	511,8,0
 
@@ -195,7 +220,7 @@ __PDPTE:
 
 __PDE:
 
-	.quad	0x000083	
+	.quad	0x000083
 	.quad	0x200083
 	.quad	0x400083
 	.quad	0x600083
@@ -213,6 +238,37 @@ __PDE:
 	.quad	0x1e00083
 
 	.fill	496,8,0
+
+#if defined(OS01_KASAN)
+/* ── KASan phase-1 shadow tables (instrumented builds only) ──
+ * .text.head is linked at PA 0x100000 (2 MiB aligned), so these .org
+ * offsets resolve to the PAs shown in the comments.  The zero frame is
+ * PROGBITS zeros (2 MiB of the raw kernel binary) and sits inside the
+ * kernel image range [ _text, _end ] that pmm_init reserves, so the PMM
+ * never hands it out. */
+.org	0x4000
+
+__KASAN_PDPT:
+	.quad	0x105003			/* PA 0x105000: shadow PD 0 */
+	.quad	0x106003			/* PA 0x106000: shadow PD 1 */
+	.fill	510,8,0
+
+.org	0x5000
+
+__KASAN_PD0:
+	/* 512 × 2 MiB pages, all → the shared zero frame; P|RO|huge. */
+	.fill	512,8,0x200081
+
+.org	0x6000
+
+__KASAN_PD1:
+	.fill	512,8,0x200081
+
+/* Zero frame: PA 0x200000..0x3fffff (2 MiB aligned). */
+.org	0x100000
+__KASAN_ZERO_FRAME:
+	.fill	0x200000,1,0
+#endif
 
 //=======	GDT_Table
 

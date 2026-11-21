@@ -28,6 +28,7 @@
 #include <memory/pmm.h>             /* struct Physical_Memory_Manager     */
 #include <arch/boot_memory.h>
 #include <arch/cpu.h>
+#include <kasan/kasan.h>            /* kasan_shadow_install (no-op off)   */
 #include <log/log.h>
 #include <sched/task.h>             /* _text / _etext / _edata / _erodata
 #include <arch/x86_64/vmm.h>
@@ -58,6 +59,11 @@ void x86_64_boot_memory(const struct boot_context *bootctx)
         log_err("boot direct map failed: %d", rc);
         for (;;) arch_cpu_halt();
     }
+
+    // KERNEL_KASAN=1: swap the head.S static zero-shadow window for real
+    // per-frame shadow before any heap poisoning can start.  Compiled to a
+    // static-inline no-op (zero bytes) in the normal build.
+    kasan_shadow_install(bootctx);
 
     frame_buffer_init();                 // remap FB at VIRT_FRAMEBUFFER_OFFSET
     log_info("frame buffer remap succeed\n");

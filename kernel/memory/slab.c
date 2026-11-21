@@ -1,5 +1,6 @@
 #include <memory/slab.h>
 #include <memory/memory.h>
+#include <kasan/kasan.h>
 #include <core/debug.h>
 #include <core/printk.h>
 #include <log/log.h>
@@ -226,7 +227,9 @@ void * kmalloc(size_t size)
             kmalloc_cache_size[i].total_using++;
 
             slab_lock_release(_slab_flags);
-            return (void *)((char *)slab->address + kmalloc_cache_size[i].size * j);
+            void *result = (void *)((char *)slab->address + kmalloc_cache_size[i].size * j);
+            kasan_kmalloc(result, size, kmalloc_cache_size[i].size);
+            return result;
         }
     }
 
@@ -294,9 +297,16 @@ size_t kfree(void * address)
                 kmalloc_cache_size[i].total_free++;
                 kmalloc_cache_size[i].total_using--;
 
+                kasan_kfree(address, kmalloc_cache_size[i].size);
+
                 // free current slab when it was expanded and here have enough space in slab pool (1.5 of current slab size)
                 if ((slab->using_count==0) && (kmalloc_cache_size[i].total_free >= slab->color_count * 3 / 2) && kmalloc_cache_size[i].cache_pool != slab)
                 {
+                    // The 2 MiB frame returns to the PMM: sweep the shadow
+                    // clean so the frame's next owner never trips on stale
+                    // use-after-free poison (only meaningful under
+                    // OS01_KASAN; the no-op collapses otherwise).
+                    kasan_kunpoison_page(slab->address);
                     switch (kmalloc_cache_size[i].size)
                     {
                     case 32:
@@ -310,7 +320,7 @@ size_t kfree(void * address)
                         page_clean(slab->page);
                         free_pages(slab->page, 1);
                         break;
-                    
+
                     default:
                         list_del(&slab->list);
                         kmalloc_cache_size[i].total_free -= slab->color_count;

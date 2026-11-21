@@ -28,6 +28,20 @@ include $(ARCHDIR)/make.config
 EFFECTIVE_CC ?= $(CC)
 OBJ_CPY ?= llvm-objcopy
 
+# ── KERNEL_KASAN triple retarget ───────────────────────────
+# -fsanitize=kernel-address is rejected by the clang driver for the
+# freestanding x86_64-unknown-none triple (probe: docs/superpowers/plans/
+# 2026-11-22-ubsan-kasan.md) — it needs a linux triple.  The retarget lives
+# HERE, kernel-only: the profile is included directly by every component
+# sub-make, so a root-level override would leak the linux triple into the
+# user/UEFI builds, and TARGET_TRIPLE never crosses the controlled sub-make
+# boundary.  The substitution is a no-op string replace for aarch64 (its
+# EFFECTIVE_CC carries no x86_64-unknown-none --target).  The .cflags stamp
+# records EFFECTIVE_CC, so the flags-cache contract sees the retarget.
+ifeq ($(KERNEL_KASAN),1)
+EFFECTIVE_CC := $(subst --target=x86_64-unknown-none,--target=x86_64-unknown-linux-gnu,$(EFFECTIVE_CC))
+endif
+
 # Kernel headers path (relative to kernel/ CWD)
 KERNEL_HEADERS := include
 
@@ -65,6 +79,50 @@ FB_RESOLUTION_TEST_FLAGS := -DFB_RESOLUTION_TEST=1
 else
 KERNEL_FB_TEST_C_SOURCES :=
 FB_RESOLUTION_TEST_FLAGS :=
+endif
+
+# ── KERNEL_UBSAN / KERNEL_KASAN — sanitizer runtime + probe fixture ──
+# Sources selected ONLY when the knobs are on: the normal build links no
+# sanitizer runtime and no probe fixture at all (mirrors the fault_probe
+# pattern).  The runtime objects are compiled through object-specific rules
+# below (they override the %.c pattern rule) with
+# -fno-sanitize=address,undefined so the handlers never re-enter their own
+# instrumentation.  arch/x86_64/memory/kasan_shadow.c is filtered out of the
+# ARCH_C_SOURCES wildcard further down and re-added only here.
+SANITIZER_RUNTIME_C_SOURCES :=
+KERNEL_SANITIZER_FIXTURE_C_SOURCES :=
+KERNEL_SANITIZER_TEST_FLAGS :=
+ifeq ($(KERNEL_UBSAN),1)
+SANITIZER_RUNTIME_C_SOURCES += ubsan/ubsan.c
+endif
+ifeq ($(KERNEL_KASAN),1)
+SANITIZER_RUNTIME_C_SOURCES += kasan/kasan.c
+endif
+# Sanitizer boot entry: linked for EITHER knob (GS pre-seed serves both;
+# the low-VA handoff copy only matters under KASan).  x86-only.
+ifneq ($(KERNEL_UBSAN)$(KERNEL_KASAN),00)
+ifeq ($(ARCH),x86_64)
+SANITIZER_RUNTIME_C_SOURCES += arch/x86_64/memory/kasan_shadow.c
+SANITIZER_RUNTIME_C_SOURCES += kasan/kasan_boot.c
+endif
+endif
+ifeq ($(KERNEL_SANITIZER_TEST),ubsan)
+KERNEL_SANITIZER_FIXTURE_C_SOURCES := selftest/test_kernel_sanitizers.c
+KERNEL_SANITIZER_TEST_FLAGS := -DKERNEL_SANITIZER_TEST_UBSAN=1
+else ifeq ($(KERNEL_SANITIZER_TEST),kasan)
+KERNEL_SANITIZER_FIXTURE_C_SOURCES := selftest/test_kernel_sanitizers.c
+KERNEL_SANITIZER_TEST_FLAGS := -DKERNEL_SANITIZER_TEST_KASAN=1
+endif
+# De-instrumentation flag for the sanitizer runtime objects.  NB: kernel
+# -address is its own sanitizer kind — -fno-sanitize=address does NOT turn
+# off -fsanitize=kernel-address (probe-verified: the object keeps
+# __asan_report refs).  Spell each knob's kind explicitly.
+SAN_RUNTIME_FNO_SANITIZE :=
+ifeq ($(KERNEL_UBSAN),1)
+SAN_RUNTIME_FNO_SANITIZE += -fno-sanitize=undefined
+endif
+ifeq ($(KERNEL_KASAN),1)
+SAN_RUNTIME_FNO_SANITIZE += -fno-sanitize=kernel-address
 endif
 
 ifeq ($(ARCH),aarch64)
@@ -203,6 +261,7 @@ KERNEL_C_SOURCES := \
                  selftest/boot_failure_fixture.c \
                  selftest/boot_services_fixture.c \
                  selftest/boot_irq_time_fixture.c \
+                 selftest/test_kernel_sanitizers.c \
                  selftest/test_aarch64_user_migration.c,$(wildcard selftest/*.c)) \
     $(wildcard subsys/*.c) \
     $(filter-out device/test_fault.c,$(wildcard device/*.c)) \
@@ -280,7 +339,7 @@ ARCH_C_SOURCES := $(wildcard $(ARCHDIR)/*.c) \
     $(foreach dir,$(ARCH_SOURCE_DIRS),$(wildcard $(ARCHDIR)/$(dir)/*.c))
 # The probe is filtered out of the wildcard discovery and re-added
 # above ONLY for the dedicated fault variant.
-ARCH_C_SOURCES := $(filter-out $(ARCHDIR)/intr/fault_probe.c $(ARCHDIR)/intr/trace_probe.c, $(ARCH_C_SOURCES))
+ARCH_C_SOURCES := $(filter-out $(ARCHDIR)/intr/fault_probe.c $(ARCHDIR)/intr/trace_probe.c $(ARCHDIR)/memory/kasan_shadow.c, $(ARCH_C_SOURCES))
 ARCH_C_SOURCES += $(KERNEL_X86_INTR_FAULT_C_SOURCES)
 ifeq ($(ARCH),aarch64)
 ifneq ($(strip $(AARCH64_EXCEPTION_TRACE_TEST)),)
@@ -349,7 +408,7 @@ KERNEL_BOOT5_FIXTURE_C_SOURCES :=
 KERNEL_BOOT5_FLAGS :=
 endif
 
-ALL_C_SOURCES_EXTRA := $(KERNEL_BOOT2_FIXTURE_C_SOURCES) $(KERNEL_BOOT3_FIXTURE_C_SOURCES) $(KERNEL_BOOT4_FIXTURE_C_SOURCES) $(KERNEL_BOOT5_FIXTURE_C_SOURCES)
+ALL_C_SOURCES_EXTRA := $(KERNEL_BOOT2_FIXTURE_C_SOURCES) $(KERNEL_BOOT3_FIXTURE_C_SOURCES) $(KERNEL_BOOT4_FIXTURE_C_SOURCES) $(KERNEL_BOOT5_FIXTURE_C_SOURCES) $(SANITIZER_RUNTIME_C_SOURCES) $(KERNEL_SANITIZER_FIXTURE_C_SOURCES)
 ARCH_ASM_SOURCES := $(wildcard $(ARCHDIR)/*.S) \
     $(foreach dir,$(ARCH_SOURCE_DIRS),$(wildcard $(ARCHDIR)/$(dir)/*.S))
 # Exclude trampoline.S from normal compilation (special handling below)
@@ -505,6 +564,38 @@ ALL_CFLAGS += $(DRIVER_MODEL_FAULT_FLAGS)
 # the probe block above).  This is also the flags-cache contract's
 # invalidation handle.
 ALL_CFLAGS += $(KERNEL_EXTRA_CFLAGS)
+# ── KERNEL_UBSAN / KERNEL_KASAN sanitizer flags ────────────
+# Folded into ALL_CFLAGS so the .cflags fingerprint stamp and every .d
+# see them (flags-cache contract: toggling a knob invalidates the whole
+# kernel object dir, which the san-* KERNEL_VARIANT also re-keys).  The
+# -DOS01_* defines gate the head.S shadow tables, the slab poison hooks
+# and the boot-time shadow install.  KASan additionally disables globals
+# instrumentation: the kernel has no .init_array iteration, so registered
+# global redzones would never be poisoned — plain dead weight (roadmap
+# follow-up wires the .init_array.1 scan).
+KERNEL_SANITIZER_CFLAGS :=
+ifeq ($(KERNEL_UBSAN),1)
+# object-size + alignment are excluded: the kernel's freestanding
+# type-punned register writes (e.g. gate.h set_tss64 casting unsigned int*
+# -> unsigned long*) trip conservative __builtin_object_size reports at
+# boot (probe-verified at gate.h:236), and the object-size check rides in
+# the alignment-flavored type-mismatch group, so both need -fno-sanitize
+# (same policy as Linux's UBSAN_ALIGNMENT=n on x86).  null / overflow /
+# shift / bounds / pointer-overflow checks stay on.
+KERNEL_SANITIZER_CFLAGS += -fsanitize=undefined -fno-sanitize=object-size -fno-sanitize=alignment -DOS01_UBSAN=1
+endif
+ifeq ($(KERNEL_KASAN),1)
+# -asan-stack=0: stack redzone poisoning is emitted as INLINE shadow stores
+# that run from the first instrumented instruction — before the phase-2
+# real shadow exists the phase-1 shadow window is a read-only zero frame,
+# so every function entry would take a write-protection #PF (observed:
+# CR2 in [0xffffec0000000000, ...) with error code 3).  Heap-only coverage
+# for v1; stack instrumentation needs a Linux-style early-boot exclusion
+# list (roadmap follow-up).  Globals stay off too (no .init_array scan).
+KERNEL_SANITIZER_CFLAGS += -fsanitize=kernel-address -mllvm -asan-globals=0 -mllvm -asan-stack=0 -DOS01_KASAN=1
+endif
+ALL_CFLAGS += $(KERNEL_SANITIZER_CFLAGS)
+ALL_CFLAGS += $(KERNEL_SANITIZER_TEST_FLAGS)
 # BOOT-2 fixture/case flags: folded AFTER ALL_CFLAGS is defined (same
 # pattern as the fault-fixture flags above).
 ALL_CFLAGS += $(KERNEL_BOOT2_IRQ_TIME_FLAGS)
@@ -795,6 +886,47 @@ all: $(BUILD_DIR)/kernel.bin
 $(BUILD_DIR)/%.o: %.c $(FLAGS_STAMP)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) -MD -MP -c $< -o $@
+
+# ── Sanitizer runtime objects (de-instrumented) ────────────
+# The __ubsan_/__asan_ handlers are called BY the instrumentation; if they
+# were instrumented themselves, a handler touching memory could re-enter a
+# report (KASan) or hide the very UB it is reporting.  These specific target
+# rules override the %.c pattern rule and append -fno-sanitize= last on the
+# command line (clang: last flag wins per check group), so the runtime
+# compiles raw even when ALL_CFLAGS carries the instrumentation flags.
+# Recipe mirrors the pattern rule exactly (same FLAGS_STAMP prereq, same
+# -MD -MP dependency generation).
+$(BUILD_DIR)/ubsan/ubsan.o: ubsan/ubsan.c $(FLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) $(SAN_RUNTIME_FNO_SANITIZE) -MD -MP -c $< -o $@
+$(BUILD_DIR)/kasan/kasan.o: kasan/kasan.c $(FLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) $(SAN_RUNTIME_FNO_SANITIZE) -MD -MP -c $< -o $@
+$(BUILD_DIR)/arch/x86_64/memory/kasan_shadow.o: arch/x86_64/memory/kasan_shadow.c $(FLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) $(SAN_RUNTIME_FNO_SANITIZE) -MD -MP -c $< -o $@
+$(BUILD_DIR)/kasan/kasan_boot.o: kasan/kasan_boot.c $(FLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) $(SAN_RUNTIME_FNO_SANITIZE) -MD -MP -c $< -o $@
+# ── KASan low-VA exclusion: userland copy path ─────────────
+# copy_to_user_ft / copy_from_user_ft / strnlen_user memcpy DIRECTLY
+# through user-half VAs; the kernel-address shadow of any low-half address
+# is non-canonical (see kernel/kasan/kasan_boot.c), so an instrumented
+# check there would #GP on every syscall copy.  The whole TU compiles
+# de-instrumented under KERNEL_KASAN=1 (specific rule overrides the
+# pattern rule only in that configuration; the normal build is untouched).
+ifeq ($(KERNEL_KASAN),1)
+$(BUILD_DIR)/arch/x86_64/memory/uaccess.o: arch/x86_64/memory/uaccess.c $(FLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) $(SAN_RUNTIME_FNO_SANITIZE) -MD -MP -c $< -o $@
+# UEFI memory-map reader: pmm_arch_normalize walks BOOT_MEMORY_MAP.entries
+# through RAW identity-map low VAs (the boot handoff stores a physical
+# address, not a Phy_To_Virt pointer).  Same non-canonical-shadow
+# constraint as uaccess.c — de-instrument the whole TU under KERNEL_KASAN=1.
+$(BUILD_DIR)/arch/x86_64/memory/pmm_arch.o: arch/x86_64/memory/pmm_arch.c $(FLAGS_STAMP)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(ALL_CFLAGS) $(ALL_C_ONLY_FLAGS) $(SAN_RUNTIME_FNO_SANITIZE) -MD -MP -c $< -o $@
+endif
 
 # .S → .o + .d
 $(BUILD_DIR)/%.o: %.S $(FLAGS_STAMP)
