@@ -380,10 +380,7 @@ _test-aarch64-run-user-runtime:
 	  --image "$(if $(filter product fp,$(USER_RUNTIME_CASE)),$(AARCH64_UEFI_DISK),$(call aarch64_variant_disk,user-runtime-$(USER_RUNTIME_CASE)))" \
 	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
 	  --elf "$(if $(filter product fp,$(USER_RUNTIME_CASE)),$(BUILD_DIR)/artifacts/kernel.elf,$(call aarch64_variant_kernel,user-runtime-$(USER_RUNTIME_CASE)))" \
-	  --qemu "$(AARCH64_QEMU)" \
-	  --llvm-nm "$(AARCH64_NM)" \
-	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
-	  --log-dir "$(OS01_ROOT)/test-results/aarch64-user-runtime-$(USER_RUNTIME_CASE)/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+	  $(call _aarch64_run_tail_nm,$(OS01_ROOT)/test-results/aarch64-user-runtime-$(USER_RUNTIME_CASE)/$$(date -u +%Y%m%dT%H%M%S)-$$$$)
 
 # Per-MODE lookups. The "extra" DTB flag is a Make variable (NOT a shell
 # variable) so it survives across recipe lines — a shell variable set
@@ -394,6 +391,32 @@ TEST_AARCH64_EXTRA_no-ack     := $(if $(filter 0,$(AARCH64_UEFI_SMP_DIAGNOSTIC_D
 TEST_AARCH64_EXTRA_gic-spi    := --diagnostic-dtb=auto
 # sync-fault has no DTB-mode knob — it runs the EL1h sync fault probe on
 # the existing UEFI/DTB mechanism but with an isolated image/firmware tree.
+
+# Shared aarch64 runner argument tails (the plumbing every python runner
+# takes, expanded at recipe time via $(call) — arguments keep the same
+# single-expansion semantics as direct recipe text, so $$-containing
+# log-dir timestamps pass through unchanged).
+#   _aarch64_run_tail    $(1)=image  $(2)=log-dir — the standard order
+#   (firmware, image, qemu, build-dir/profile, log-dir) shared by the
+#   smp/no-ack/gic-spi/sync-fault/m3-probe runners.
+#   _aarch64_run_tail_nm $(1)=log-dir — for runners whose image/ELF paths
+#   are passed earlier on the command line (user-runtime, sched,
+#   sched-ap): qemu, llvm-nm, build-dir/profile, log-dir.
+# test-aarch64-boot-logo keeps its explicit form (no --log-dir by design)
+# and the m1/boot-contract generators their eval-escaped forms.
+define _aarch64_run_tail
+--firmware "$(AARCH64_UEFI_FIRMWARE)" \
+--image "$(1)" \
+--qemu "$(AARCH64_QEMU)" \
+--build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
+--log-dir "$(2)"
+endef
+define _aarch64_run_tail_nm
+--qemu "$(AARCH64_QEMU)" \
+--llvm-nm "$(AARCH64_NM)" \
+--build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
+--log-dir "$(1)"
+endef
 
 # prep helpers (one per MODE) put the $(MAKE) sub-invocation on its own
 # recipe line so `make -n` honors the dry-run contract.  The uniform
@@ -426,11 +449,7 @@ _test-aarch64-run-smp:
 	  --expect-slab-selftest --expect-m3-selftest --expect-m3mc-selftest \
 	  --expect-scheduler-selftest \
 	  $(TEST_AARCH64_EXTRA_smp) \
-	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
-	  --image "$(call aarch64_variant_disk,selftest)" \
-	  --qemu "$(AARCH64_QEMU)" \
-	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
-	  --log-dir "$(OS01_ROOT)/test-results/aarch64-uefi-smp/$$(date -u +%Y%m%dT%H%M%S)-normal-$$$$"
+	  $(call _aarch64_run_tail,$(call aarch64_variant_disk,selftest),$(OS01_ROOT)/test-results/aarch64-uefi-smp/$$(date -u +%Y%m%dT%H%M%S)-normal-$$$$)
 # MODE=lma-layout (LMA Task 5): the paired-boot acceptance. The runner
 # manages its OWN private build root (default → relocated → default via
 # AARCH64_BUILD_ROOT, fixed KERNEL_SELFTEST=1) and every QEMU boot; the
@@ -448,20 +467,12 @@ _test-aarch64-run-no-ack:
 	python3 qemutests/aarch64_uefi_smp.py \
 	  --cpus 2 --repeat 1 --timeout 90 --expect-no-ack 1 \
 	  $(TEST_AARCH64_EXTRA_no-ack) \
-	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
-	  --image "$(AARCH64_UEFI_DISK)" \
-	  --qemu "$(AARCH64_QEMU)" \
-	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
-	  --log-dir "$(OS01_ROOT)/test-results/aarch64-uefi-smp/$$(date -u +%Y%m%dT%H%M%S)-no-ack-$$$$"
+	  $(call _aarch64_run_tail,$(AARCH64_UEFI_DISK),$(OS01_ROOT)/test-results/aarch64-uefi-smp/$$(date -u +%Y%m%dT%H%M%S)-no-ack-$$$$)
 _test-aarch64-run-gic-spi:
 	python3 qemutests/aarch64_gic_spi.py \
 	  --diagnostic-dtb=auto \
 	  --expect-scheduler-selftest \
-	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
-	  --image "$(call aarch64_variant_disk,selftest)" \
-	  --qemu "$(AARCH64_QEMU)" \
-	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
-	  --log-dir "$(OS01_ROOT)/test-results/aarch64-gic-spi/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+	  $(call _aarch64_run_tail,$(call aarch64_variant_disk,selftest),$(OS01_ROOT)/test-results/aarch64-gic-spi/$$(date -u +%Y%m%dT%H%M%S)-$$$$)
 # AAGU-EL1-sync Task 3: drives the dedicated sync-fault QEMU image
 # (KERNEL_VARIANT=sync-fault) in 1-CPU mode and asserts the EL1h sync fatal
 # diagnostic via qemutests/aarch64_sync_fault.py. The harness parser is the
@@ -470,11 +481,7 @@ _test-aarch64-run-gic-spi:
 _test-aarch64-run-sync-fault:
 	python3 qemutests/aarch64_sync_fault.py \
 	  --timeout 60 \
-	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
-	  --image "$(call aarch64_variant_disk,sync-fault)" \
-	  --qemu "$(AARCH64_QEMU)" \
-	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
-	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sync-fault/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+	  $(call _aarch64_run_tail,$(call aarch64_variant_disk,sync-fault),$(OS01_ROOT)/test-results/aarch64-sync-fault/$$(date -u +%Y%m%dT%H%M%S)-$$$$)
 
 # MODE=sched (spec §10.2, P5 Tasks 1-3): the strict scheduler acceptance
 # runner. Prep builds the exact KERNEL_SELFTEST=1 AARCH64_SCHED_TEST=<v>
@@ -520,10 +527,7 @@ AARCH64_SCHED_VARIANT = $(if $(filter $(1),positive),sched,sched-fault-$(1))
 _test-aarch64-run-sched:
 	python3 qemutests/aarch64_scheduler.py \
 	  $(if $(filter all,$(SCHED_CASE)),--case all $(foreach c,$(AARCH64_SCHED_CASES),$(call _aarch64_sched_variant_args,$(c),$(call AARCH64_SCHED_VARIANT,$(c)))),--case $(SCHED_CASE) $(call _aarch64_sched_variant_args,$(SCHED_CASE),$(call AARCH64_SCHED_VARIANT,$(SCHED_CASE)))) \
-	  --qemu "$(AARCH64_QEMU)" \
-	  --llvm-nm "$(AARCH64_NM)" \
-	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
-	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+	  $(call _aarch64_run_tail_nm,$(OS01_ROOT)/test-results/aarch64-sched/$$(date -u +%Y%m%dT%H%M%S)-$$$$)
 
 # P1 MODE=sched-ap: the AP cooperative-scheduler acceptance variants.
 # prep drives the controlled sub-make with KERNEL_SELFTEST=1 and
@@ -545,20 +549,14 @@ ifeq ($(AP_SCHED_CASE),fatal-owner)
 	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
 	  --elf "$(call aarch64_variant_kernel,sched-ap-fatal-owner)" \
 	  --normal-elf "$(call aarch64_variant_kernel,sched-ap)" \
-	  --qemu "$(AARCH64_QEMU)" \
-	  --llvm-nm "$(AARCH64_NM)" \
-	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
-	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched-ap/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+	  $(call _aarch64_run_tail_nm,$(OS01_ROOT)/test-results/aarch64-sched-ap/$$(date -u +%Y%m%dT%H%M%S)-$$$$)
 else
 	python3 qemutests/aarch64_ap_scheduler.py \
 	  --phase ap --case positive \
 	  --image "$(call aarch64_variant_disk,sched-ap)" \
 	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
 	  --elf "$(call aarch64_variant_kernel,sched-ap)" \
-	  --qemu "$(AARCH64_QEMU)" \
-	  --llvm-nm "$(AARCH64_NM)" \
-	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
-	  --log-dir "$(OS01_ROOT)/test-results/aarch64-sched-ap/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+	  $(call _aarch64_run_tail_nm,$(OS01_ROOT)/test-results/aarch64-sched-ap/$$(date -u +%Y%m%dT%H%M%S)-$$$$)
 endif
 
 # M3.5 Task 25: production shootdown probe (spec §7.3). Builds the
@@ -573,11 +571,7 @@ _test-aarch64-run-m3-probe:
 	python3 qemutests/aarch64_m3_probe.py \
 	  --diagnostic-dtb=auto \
 	  --timeout 90 \
-	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
-	  --image "$(AARCH64_UEFI_DISK)" \
-	  --qemu "$(AARCH64_QEMU)" \
-	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)" \
-	  --log-dir "$(OS01_ROOT)/test-results/aarch64-m3-probe/$$(date -u +%Y%m%dT%H%M%S)-$$$$"
+	  $(call _aarch64_run_tail,$(AARCH64_UEFI_DISK),$(OS01_ROOT)/test-results/aarch64-m3-probe/$$(date -u +%Y%m%dT%H%M%S)-$$$$)
 
 .PHONY: _test-aarch64-prep-boot-contract _test-aarch64-run-boot-contract
 _test-aarch64-prep-boot-contract:
