@@ -1026,7 +1026,7 @@ $(BUILD_DIR)/generated/aarch64_user_exec_child_image.o: $(BUILD_DIR)/generated/a
 
 $(BUILD_DIR)/selftest/fixtures/aarch64_user_signal.o: selftest/fixtures/aarch64_user_signal.S
 	@mkdir -p $(dir $@)
-	$(EFFECTIVE_CC) $(ALL_CFLAGS) -MD -MP -c $< -o $@
+	$(EFFECTIVE_CC) $(filter-out -mgeneral-regs-only,$(ALL_CFLAGS)) -MD -MP -c $< -o $@
 
 $(BUILD_DIR)/generated/aarch64_user_signal.elf: $(BUILD_DIR)/selftest/fixtures/aarch64_user_signal.o $(AARCH64_USER_FORK_COW_LD)
 	@mkdir -p $(dir $@)

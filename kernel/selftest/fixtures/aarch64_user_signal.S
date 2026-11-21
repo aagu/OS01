@@ -17,6 +17,9 @@
  *        rewrites saved frame.regs.x19 to 0x13572468, and returns to
  *        sigreturn_restorer (SYS_sigreturn). Main resumes with x0==0,
  *        g_sig_count==1, and x19==0x13572468.
+ *        2b. FP round-trip: main sets d8=pi/d15=e + fpsr(QC)/fpcr(RZ);
+ *            handler poisons them; sigreturn must restore every bit
+ *            (exit codes 0x0f/0x10/0x11/0x12 on mismatch).
  *     3. SYS_fork() -> child calls SYS_exec("/bin/user_signal", argv, NULL)
  *        with argc==2 -> child killed by SIGUSR1 -> parent waitpid() sees
  *        status == 10.
@@ -145,6 +148,22 @@ _start:
 8:
 
     /* ── 7. Set x19 = 0xdeadbeef, unblock SIGUSR1 -> handler runs ── */
+    /* FP round-trip setup: known callee-saved d8/d15 + fpsr/fpcr. */
+    movz    x9, #0x2d18
+    movk    x9, #0x5444, lsl #16
+    movk    x9, #0x921f, lsl #32
+    movk    x9, #0x4009, lsl #48           /* pi = 0x400921fb54442d18 */
+    fmov    d8, x9
+    movz    x9, #0x5769
+    movk    x9, #0x8b14, lsl #16
+    movk    x9, #0xbf0a, lsl #32
+    movk    x9, #0x4005, lsl #48           /* e = 0x4005bf0a8b145769 */
+    fmov    d15, x9
+    mov     x9, #(1 << 27)                 /* FPSR.QC (sticky, read-back) */
+    msr     fpsr, x9
+    mov     x9, #0x00c00000                /* FPCR.RMODE=RZ (no FP arith runs) */
+    msr     fpcr, x9
+
     movz    x19, #0xbeef
     movk    x19, #0xdead, lsl #16
 
@@ -180,6 +199,39 @@ _start:
     b.eq    12f
     US_EXIT 0x0b
 12:
+
+    /* FP round-trip: handler poisoned d8/d15/fpsr/fpcr; sigreturn
+     * must have restored every bit from the sigframe FP area. */
+    fmov    x9, d8
+    movz    x10, #0x2d18
+    movk    x10, #0x5444, lsl #16
+    movk    x10, #0x921f, lsl #32
+    movk    x10, #0x4009, lsl #48
+    cmp     x9, x10
+    b.eq    20f
+    US_EXIT 0x0f
+20:
+    fmov    x9, d15
+    movz    x10, #0x5769
+    movk    x10, #0x8b14, lsl #16
+    movk    x10, #0xbf0a, lsl #32
+    movk    x10, #0x4005, lsl #48
+    cmp     x9, x10
+    b.eq    21f
+    US_EXIT 0x10
+21:
+    mrs     x9, fpsr
+    mov     x10, #(1 << 27)
+    cmp     x9, x10
+    b.eq    22f
+    US_EXIT 0x11
+22:
+    mrs     x9, fpcr
+    mov     x10, #0x00c00000
+    cmp     x9, x10
+    b.eq    23f
+    US_EXIT 0x12
+23:
 
     /* ── 8. fork() + exec("/bin/user_signal", argv, NULL) + waitpid ── */
     mov     x8, #SYS_fork
@@ -253,6 +305,13 @@ sigusr1_handler:
     ldr     x10, [x9]
     add     x10, x10, #1
     str     x10, [x9]
+
+    /* Poison FP state the interrupted context expects back after
+     * sigreturn (the kernel must have saved it into the sigframe). */
+    movi    v8.16b, #0
+    movi    v15.16b, #0
+    msr     fpsr, xzr
+    msr     fpcr, xzr
 
     /* Rewrite saved frame.regs.x19 (offset 19 * 8 = 152) to 0x13572468 */
     movz    x11, #0x2468
