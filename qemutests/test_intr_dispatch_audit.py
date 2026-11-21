@@ -222,12 +222,15 @@ ffff800000104893: 48 8e df             	movq	%rdi, %ds
 ffff800000104896: 48 8e c7             	movq	%rdi, %es
 ffff800000104899: 48 89 e7             	movq	%rsp, %rdi
 ffff80000010489c: ff d2                	callq	*%rdx
-ffff80000010489e: 90                   	leaq	0x0(%rip), %rax # 0xffff80000014d120 <do_page_fault>
-ffff8000001048a5: 90                   	cmpq	%rax, 0x88(%rsp)
-ffff8000001048ad: 90                   	je	0xffff8000001047f3 <ret_from_intr>
-ffff8000001048b3: 90                   	leaq	0x0(%rip), %rax # 0xffff80000015a000 <do_system_call>
-ffff8000001048ba: 90                   	cmpq	%rax, 0x88(%rsp)
-ffff8000001048c2: 90                   	je	0xffff8000001047f3 <ret_from_intr>
+ffff80000010489e: 90                   	leaq	0x0(%rip), %rcx # 0xffff80000014d120 <do_page_fault>
+ffff8000001048a5: 90                   	cmpq	%rcx, 0x88(%rsp)
+ffff8000001048ad: 90                   	jne	0xffff8000001048b9 <error_code+0x60>
+ffff8000001048af: 83 f8 01             	cmpl	$0x1, %eax
+ffff8000001048b2: 90                   	je	0xffff8000001047f0 <ret_from_exception>
+ffff8000001048b5: 90                   	jmp	0xffff8000001047f3 <ret_from_intr>
+ffff8000001048b9: 90                   	leaq	0x0(%rip), %rcx # 0xffff80000015a000 <do_system_call>
+ffff8000001048c0: 90                   	cmpq	%rcx, 0x88(%rsp)
+ffff8000001048c4: 90                   	je	0xffff8000001047f3 <ret_from_intr>
 ffff8000001048c8: 90                   	jmp	0xffff8000001047f0 <ret_from_exception>
 """
 
@@ -1345,15 +1348,38 @@ class IntrDispatchAuditFuncSlotFormTests(IntrDispatchAuditFixture):
 
     def test_each_task_stack_path_requires_exact_function_and_branch(self):
         for addr, before, after in (
-            (0xFFFF80000010489E, "leaq\t0x0(%rip), %rax # 0xffff80000014d120 <do_page_fault>", "leaq\t0x0(%rip), %rax # 0xffff80000015a000 <do_system_call>"),
-            (0xFFFF8000001048B3, "leaq\t0x0(%rip), %rax # 0xffff80000015a000 <do_system_call>", "leaq\t0x0(%rip), %rax # 0xffff80000014d120 <do_page_fault>"),
-            (0xFFFF8000001048A5, "cmpq\t%rax, 0x88(%rsp)", "cmpq\t%rax, 0x80(%rsp)"),
-            (0xFFFF8000001048AD, "je\t0xffff8000001047f3 <ret_from_intr>", "jne\t0xffff8000001047f3 <ret_from_intr>"),
-            (0xFFFF8000001048C2, "je\t0xffff8000001047f3 <ret_from_intr>", "je\t0xffff8000001047f0 <ret_from_exception>"),
+            (0xFFFF80000010489E, "leaq\t0x0(%rip), %rcx # 0xffff80000014d120 <do_page_fault>", "leaq\t0x0(%rip), %rcx # 0xffff80000015a000 <do_system_call>"),
+            (0xFFFF8000001048B9, "leaq\t0x0(%rip), %rcx # 0xffff80000015a000 <do_system_call>", "leaq\t0x0(%rip), %rcx # 0xffff80000014d120 <do_page_fault>"),
+            (0xFFFF8000001048A5, "cmpq\t%rcx, 0x88(%rsp)", "cmpq\t%rcx, 0x80(%rsp)"),
+            (0xFFFF8000001048AF, "cmpl\t$0x1, %eax", "cmpl\t$0x2, %eax"),
+            (0xFFFF8000001048B2, "je\t0xffff8000001047f0 <ret_from_exception>", "je\t0xffff8000001047f3 <ret_from_intr>"),
+            (0xFFFF8000001048B5, "jmp\t0xffff8000001047f3 <ret_from_intr>", "jmp\t0xffff8000001047f0 <ret_from_exception>"),
+            (0xFFFF8000001048C4, "je\t0xffff8000001047f3 <ret_from_intr>", "je\t0xffff8000001047f0 <ret_from_exception>"),
         ):
             with self.subTest(addr=hex(addr)):
                 self.stage_x86(disasm_text=_mutate(X86_DISASM, addr, before, after))
                 self.assertTrue(any("selector" in e for e in self.audit()))
+
+    def test_wrong_func_consumes_eax_fails(self):
+        self.stage_x86(disasm_text=_mutate(
+            X86_DISASM, 0xFFFF80000010489E,
+            "leaq\t0x0(%rip), %rcx # 0xffff80000014d120 <do_page_fault>",
+            "leaq\t0x0(%rip), %rcx # 0xffff80000014bfb0 <do_general_protection>"))
+        self.assertTrue(any("selector" in e for e in self.audit()))
+
+    def test_pf_fixup_hit_enters_ret_from_intr_fails(self):
+        self.stage_x86(disasm_text=_mutate(
+            X86_DISASM, 0xFFFF8000001048B2,
+            "je\t0xffff8000001047f0 <ret_from_exception>",
+            "je\t0xffff8000001047f3 <ret_from_intr>"))
+        self.assertTrue(any("selector" in e for e in self.audit()))
+
+    def test_normal_pf_bypasses_ret_from_intr_fails(self):
+        self.stage_x86(disasm_text=_mutate(
+            X86_DISASM, 0xFFFF8000001048B5,
+            "jmp\t0xffff8000001047f3 <ret_from_intr>",
+            "jmp\t0xffff8000001047f0 <ret_from_exception>"))
+        self.assertTrue(any("selector" in e for e in self.audit()))
 
 
 # ────────────────────────────────────────────────────────────────────

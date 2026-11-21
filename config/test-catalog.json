@@ -2571,6 +2571,16 @@
       }
     },
     {
+      "id": "test_exception_trace",
+      "layer": "harness",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "qemutests/test_exception_trace.py"
+    },
+    {
       "id": "test_ext2_bmap",
       "layer": "host",
       "subsystem": "fs",
@@ -4933,6 +4943,16 @@
       "isolation": "none",
       "scenarios": [],
       "source": "hosttests/cases/test_trace_symbols.c"
+    },
+    {
+      "id": "test_unwind_fixup_x86",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "hosttests/cases/test_unwind_fixup_x86.c"
     },
     {
       "id": "test_usb_boot_runner",

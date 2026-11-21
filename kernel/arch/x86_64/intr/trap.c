@@ -2,6 +2,7 @@
 #include <arch/irq.h>
 #include <arch/x86_64/gate.h>
 #include <arch/x86_64/hw.h>
+#include <arch/x86_64/unwind.h>
 #include <arch/segment.h>
 #include <arch/x86_64/tss.h>
 #include <arch/x86_64/msr_safe.h>   /* arch_msr_gp_fixup (Task 1 safe-RDMSR fixup) */
@@ -968,7 +969,7 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 }
 
 __attribute__((no_stack_protector))
-void do_page_fault(pt_regs_t * regs, uint64_t error_code)
+int do_page_fault(pt_regs_t * regs, uint64_t error_code)
 {
     /* CR2 is read EXACTLY ONCE, here at the very front — before the
      * decoder and before any helper that could itself fault (spec
@@ -977,9 +978,14 @@ void do_page_fault(pt_regs_t * regs, uint64_t error_code)
     uint64_t cr2 = 0;
     __asm__	__volatile__("movq	%%cr2,	%0":"=r"(cr2)::"memory");
 
+    if (x86_unwind_fixup(regs, error_code, cr2)) {
+        return 1;
+    }
+
     struct intr_event ev;
     x86_intr_decode(&ev, regs, X86_VECTOR_PAGE_FAULT, error_code, cr2);
     arch_intr_dispatch(&ev, regs);
+    return 0;
 }
 
 __attribute__((no_stack_protector))

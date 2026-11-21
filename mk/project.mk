@@ -81,7 +81,7 @@ endif
 # The selector is x86-only (the aarch64 profile rejects it) and is
 # refused in combination with every other destructive / test variant.
 X86_INTR_FAULT_TEST ?=
-X86_INTR_FAULT_TESTS_VALID := none bp nmi
+X86_INTR_FAULT_TESTS_VALID := none bp nmi trace-read
 ifneq ($(strip $(X86_INTR_FAULT_TEST)),)
 ifeq ($(filter $(X86_INTR_FAULT_TEST),$(X86_INTR_FAULT_TESTS_VALID)),)
 $(error X86_INTR_FAULT_TEST='$(X86_INTR_FAULT_TEST)' is not one of: $(X86_INTR_FAULT_TESTS_VALID))
@@ -91,6 +91,8 @@ ifeq ($(X86_INTR_FAULT_TEST),bp)
 X86_INTR_FAULT_CFLAGS := -DX86_INTR_FAULT_TEST_BP=1
 else ifeq ($(X86_INTR_FAULT_TEST),nmi)
 X86_INTR_FAULT_CFLAGS := -DX86_INTR_FAULT_TEST_NMI=1
+else ifeq ($(X86_INTR_FAULT_TEST),trace-read)
+X86_INTR_FAULT_CFLAGS := -DX86_INTR_FAULT_TEST_TRACE_READ=1
 else
 X86_INTR_FAULT_CFLAGS :=
 endif
@@ -103,7 +105,7 @@ endif
 endif
 # The effective case — derived from the macro, which is the single
 # source of truth (the selector above only contributes to it).
-X86_INTR_FAULT_CASE := $(if $(findstring X86_INTR_FAULT_TEST_BP,$(KERNEL_EXTRA_CFLAGS)),bp,$(if $(findstring X86_INTR_FAULT_TEST_NMI,$(KERNEL_EXTRA_CFLAGS)),nmi,))
+X86_INTR_FAULT_CASE := $(if $(findstring X86_INTR_FAULT_TEST_BP,$(KERNEL_EXTRA_CFLAGS)),bp,$(if $(findstring X86_INTR_FAULT_TEST_NMI,$(KERNEL_EXTRA_CFLAGS)),nmi,$(if $(findstring X86_INTR_FAULT_TEST_TRACE_READ,$(KERNEL_EXTRA_CFLAGS)),trace-read,)))
 ifneq ($(strip $(X86_INTR_FAULT_CASE)),)
 ifneq ($(filter 1,$(KERNEL_SELFTEST) $(OS01_SYSTEST) $(OS01_NETTEST) $(KERNEL_CANARY_SELFTEST) $(KERNEL_TEST_FORCE_NO_RNDRRS) $(FB_RESOLUTION_TEST) $(CAPACITY_TEST)),)
 $(error X86_INTR_FAULT_TEST=$(X86_INTR_FAULT_CASE) is an x86-only destructive probe and cannot be combined with KERNEL_SELFTEST/OS01_SYSTEST/OS01_NETTEST/KERNEL_CANARY_SELFTEST/KERNEL_TEST_FORCE_NO_RNDRRS/FB_RESOLUTION_TEST/CAPACITY_TEST)

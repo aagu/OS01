@@ -632,3 +632,30 @@ $(TEST_BLD)/test_trace_symbols.elf: $(TEST_BLD)/test_trace_symbols.o \
 		$(TEST_BLD)/test_trace_symbols_empty.elf \
 		$(TEST_BLD)/test_trace_symbols_missing.elf
 	$(HOST_CC) -o $@ $(TEST_BLD)/test_trace_symbols.o $(TEST_BLD)/trace_symbols_production.o
+
+# x86_64 unwind #PF fixup production tests (Task 2)
+X86_UNWIND_HOST_CFLAGS := $(HOST_CFLAGS) $(FRAMEWORK_INC) $(KERNEL_INC) \
+                          -idirafter $(TESTS_DIR)/libc/include
+
+$(TEST_BLD)/x86_unwind_production.o: \
+		$(TESTS_DIR)/kernel/arch/x86_64/intr/unwind.c \
+		$(TESTS_DIR)/kernel/include/arch/unwind.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/unwind.h \
+		$(TESTS_DIR)/kernel/include/arch/regs.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(X86_UNWIND_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_unwind_fixup_x86.o: \
+		$(TEST_CASES)/test_unwind_fixup_x86.c \
+		$(TESTS_DIR)/kernel/include/arch/unwind.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/unwind.h \
+		$(TESTS_DIR)/kernel/include/arch/regs.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/regs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(X86_UNWIND_HOST_CFLAGS) -MMD -MP -c $< -o $@
+
+$(TEST_BLD)/test_unwind_fixup_x86.elf: \
+		$(TEST_BLD)/test_unwind_fixup_x86.o \
+		$(TEST_BLD)/x86_unwind_production.o
+	$(HOST_CC) -o $@ $^

@@ -73,6 +73,9 @@ ENTRY(ret_from_intr)
 	movl	%gs:PERCPU_CPU_ID_OFFSET,	%eax
 	leaq	selftest_x86_intr_returns(%rip),	%rdx
 	incq	(%rdx,%rax,8)
+#elif defined(X86_INTR_FAULT_TEST_TRACE_READ)
+	leaq	x86_trace_read_intr_returns(%rip),	%rdx
+	incq	(%rdx)
 #endif
 	cld
 	movq	%rsp,	%rbx
@@ -135,11 +138,17 @@ error_code:
 
 	# Only #PF and syscall enter this frame on a task stack. IST faults
 	# (including recoverable MSR #GP) must defer all task return work.
-	leaq	do_page_fault(%rip), %rax
-	cmpq	%rax, FUNC(%rsp)
-	je	ret_from_intr
-	leaq	do_system_call(%rip), %rax
-	cmpq	%rax, FUNC(%rsp)
+	# Unwind read fixup (#PF returning 1) restores directly without running
+	# ret_from_intr return work.
+	leaq	do_page_fault(%rip), %rcx
+	cmpq	%rcx, FUNC(%rsp)
+	jne	1f
+	cmpl	$1, %eax
+	je	ret_from_exception
+	jmp	ret_from_intr
+1:
+	leaq	do_system_call(%rip), %rcx
+	cmpq	%rcx, FUNC(%rsp)
 	je	ret_from_intr
 	jmp	ret_from_exception
 

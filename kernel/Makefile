@@ -266,6 +266,8 @@ ifneq ($(findstring X86_INTR_FAULT_TEST_BP,$(KERNEL_EXTRA_CFLAGS)),)
 KERNEL_X86_INTR_FAULT_C_SOURCES := $(ARCHDIR)/intr/fault_probe.c
 else ifneq ($(findstring X86_INTR_FAULT_TEST_NMI,$(KERNEL_EXTRA_CFLAGS)),)
 KERNEL_X86_INTR_FAULT_C_SOURCES := $(ARCHDIR)/intr/fault_probe.c
+else ifneq ($(findstring X86_INTR_FAULT_TEST_TRACE_READ,$(KERNEL_EXTRA_CFLAGS)),)
+KERNEL_X86_INTR_FAULT_C_SOURCES := $(ARCHDIR)/intr/fault_probe.c
 else
 KERNEL_X86_INTR_FAULT_C_SOURCES :=
 endif

@@ -674,23 +674,41 @@ def _audit_x86(symtab, blocks, order, repo: Path,
                              f"0x{func_disp:x}(%rsp) after {func_pushes} "
                              "pushes -> callq *%rdx")
         # Only #PF and syscall use task stacks. Prove the exact post-call
-        # selector; all IST frames must preserve pending work and restore.
+        # selector; #PF fixup (EAX == 1) goes directly to native restore,
+        # normal #PF and syscall go to ret_from_intr, and all IST frames
+        # go to ret_from_exception.
         call_index = next((i for i, ins in enumerate(ec_instrs)
                            if ins.text == "callq *%rdx"), -1)
         tail = ec_instrs[call_index + 1:]
-        valid = len(tail) == 7
+        valid = len(tail) == 10
         if valid:
-            for index, target in ((0, "do_page_fault"), (3, "do_system_call")):
-                ins = tail[index]
-                valid &= bool(re.fullmatch(r"leaq .+\(%rip\), %rax", ins.text))
-                valid &= symtab.resolve(_parse_imm("", ins.comment)) == target
-                valid &= tail[index + 1].text == "cmpq %rax, 0x88(%rsp)"
-                valid &= bool(re.fullmatch(r"je 0x[0-9a-f]+ <ret_from_intr>", tail[index + 2].text))
-                match = re.search(r"0x[0-9a-f]+", tail[index + 2].text)
-                valid &= bool(match and symtab.resolve(int(match.group(), 16)) == "ret_from_intr")
-            valid &= bool(re.fullmatch(r"jmp 0x[0-9a-f]+ <ret_from_exception>", tail[6].text))
-            match = re.search(r"0x[0-9a-f]+", tail[6].text)
-            valid &= bool(match and symtab.resolve(int(match.group(), 16)) == "ret_from_exception")
+            # 0..5: do_page_fault check + EAX == 1 native restore + ret_from_intr
+            ins0 = tail[0]
+            valid &= bool(re.fullmatch(r"leaq .+\(%rip\), %rcx", ins0.text))
+            valid &= symtab.resolve(_parse_imm("", ins0.comment)) == "do_page_fault"
+            valid &= tail[1].text == "cmpq %rcx, 0x88(%rsp)"
+            valid &= bool(re.fullmatch(r"jne 0x[0-9a-f]+ <error_code\+0x[0-9a-f]+>", tail[2].text))
+            valid &= tail[3].text in ("cmpl $0x1, %eax", "cmpl $1, %eax")
+            valid &= bool(re.fullmatch(r"je 0x[0-9a-f]+ <(ret_from_exception|ARCH_CONTEXT_RESTORE_FRAME|RESTORE_ALL)>", tail[4].text))
+            m4 = re.search(r"0x[0-9a-f]+", tail[4].text)
+            valid &= bool(m4 and symtab.resolve(int(m4.group(), 16)) in ("ret_from_exception", "ARCH_CONTEXT_RESTORE_FRAME", "RESTORE_ALL"))
+            valid &= bool(re.fullmatch(r"jmp 0x[0-9a-f]+ <ret_from_intr>", tail[5].text))
+            m5 = re.search(r"0x[0-9a-f]+", tail[5].text)
+            valid &= bool(m5 and symtab.resolve(int(m5.group(), 16)) == "ret_from_intr")
+
+            # 6..8: do_system_call check -> ret_from_intr
+            ins6 = tail[6]
+            valid &= bool(re.fullmatch(r"leaq .+\(%rip\), %rcx", ins6.text))
+            valid &= symtab.resolve(_parse_imm("", ins6.comment)) == "do_system_call"
+            valid &= tail[7].text == "cmpq %rcx, 0x88(%rsp)"
+            valid &= bool(re.fullmatch(r"je 0x[0-9a-f]+ <ret_from_intr>", tail[8].text))
+            m8 = re.search(r"0x[0-9a-f]+", tail[8].text)
+            valid &= bool(m8 and symtab.resolve(int(m8.group(), 16)) == "ret_from_intr")
+
+            # 9: fallback -> ret_from_exception
+            valid &= bool(re.fullmatch(r"jmp 0x[0-9a-f]+ <ret_from_exception>", tail[9].text))
+            m9 = re.search(r"0x[0-9a-f]+", tail[9].text)
+            valid &= bool(m9 and symtab.resolve(int(m9.group(), 16)) == "ret_from_exception")
         if not valid:
             errors.append("error_code: task-stack ret_from_intr / IST restore-only selector unproven")
 

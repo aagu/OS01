@@ -230,12 +230,122 @@ static void nmi_probe(void)
 
 #endif /* X86_INTR_FAULT_TEST_NMI */
 
+#if defined(X86_INTR_FAULT_TEST_TRACE_READ)
+#include <string.h>
+#include <arch/x86_64/unwind.h>
+#include <arch/x86_64/vmm.h>
+#include <arch/x86_64/pte.h>
+#include <memory/pmm.h>
+#include <memory/memory.h>
+
+uint64_t x86_trace_read_intr_returns = 0;
+
+static _Noreturn void trace_read_fail(const char *reason)
+{
+    probe_puts("[exception-trace] FAIL arch=x86_64 case=read reason=");
+    probe_puts(reason);
+    probe_putc('\n');
+    for (;;) {
+        __asm__ __volatile__("hlt" ::: "memory");
+    }
+}
+
+__attribute__((noinline))
+static void trace_read_probe(void)
+{
+    probe_check_precondition();
+
+    __asm__ __volatile__("cli" ::: "memory");
+    probe_print_variant();
+    probe_puts("[exception-trace] armed arch=x86_64 case=read variant="
+#ifdef KERNEL_VARIANT_NAME
+               OS01_STRINGIFY(KERNEL_VARIANT_NAME)
+#else
+               "default"
+#endif
+               "\n");
+
+    ptbl_t active_pgd = arch_get_page_table();
+    const uint64_t va = UINT64_C(1) << PAGE_PGD_SHIFT;
+    const size_t pgd_idx = (size_t)((va >> PAGE_PGD_SHIFT) & 0x1ffU);
+    if (active_pgd[pgd_idx] != 0) {
+        trace_read_fail("pgd_not_empty");
+    }
+
+    struct Page *page = alloc_pages(ZONE_NORMAL, 1, 0);
+    if (!page) {
+        trace_read_fail("alloc_page");
+    }
+    uint64_t phys = page->phy_address;
+    uint8_t *kva = (uint8_t *)Phy_To_Virt(phys);
+    memset(kva, 0, PAGE_4K_SIZE);
+
+    const uint64_t word0 = UINT64_C(0x1122334455667788);
+    const uint64_t word1 = UINT64_C(0x99aabbccddeeff00);
+    volatile uint64_t *tail = (volatile uint64_t *)(kva + PAGE_4K_SIZE - 16);
+    tail[0] = word0;
+    tail[1] = word1;
+
+    if (x86_vmm_map_4k(active_pgd, phys, va, PAGE_PRESENT | PAGE_RW) != 0) {
+        trace_read_fail("map_page");
+    }
+    flush_tlb();
+
+    uint64_t qphys = 0;
+    uint64_t qflags = 0;
+    if (x86_vmm_query_4k_page(active_pgd, va + PAGE_4K_SIZE, &qphys, &qflags) == 0) {
+        trace_read_fail("second_page_mapped");
+    }
+
+    /* 1. Same-page pair read succeeds */
+    struct unwind_frame frame;
+    frame.next_fp = 0;
+    frame.return_pc = 0;
+    if (!x86_unwind_load_pair((uintptr_t)(va + PAGE_4K_SIZE - 16), &frame)) {
+        trace_read_fail("same_page_read_failed");
+    }
+    if (frame.next_fp != word0 || frame.return_pc != word1) {
+        trace_read_fail("same_page_value_mismatch");
+    }
+
+    /* 2. Cross-page pair read (starts 8 bytes before page end) faults on
+     *    the second word, returns false, preserves both sentinels, and
+     *    does not increment ret_from_intr return-work counter. */
+    const uintptr_t sentinel0 = UINT64_C(0xdeadbeefcafebabe);
+    const uintptr_t sentinel1 = UINT64_C(0xfeedface12345678);
+    frame.next_fp = sentinel0;
+    frame.return_pc = sentinel1;
+    uint64_t before_returns = x86_trace_read_intr_returns;
+
+    bool cross_ok = x86_unwind_load_pair((uintptr_t)(va + PAGE_4K_SIZE - 8), &frame);
+
+    uint64_t after_returns = x86_trace_read_intr_returns;
+    if (cross_ok) {
+        trace_read_fail("cross_page_unexpected_ok");
+    }
+    if (frame.next_fp != sentinel0 || frame.return_pc != sentinel1) {
+        trace_read_fail("cross_page_clobbered_sentinel");
+    }
+    if (after_returns != before_returns) {
+        trace_read_fail("cross_page_ran_ret_from_intr");
+    }
+
+    probe_puts("[exception-trace] PASS arch=x86_64 case=read\n");
+    for (;;) {
+        __asm__ __volatile__("hlt" ::: "memory");
+    }
+}
+
+#endif /* X86_INTR_FAULT_TEST_TRACE_READ */
+
 void x86_intr_fault_probe_run(void)
 {
 #if defined(X86_INTR_FAULT_TEST_BP)
     bp_probe();
 #elif defined(X86_INTR_FAULT_TEST_NMI)
     nmi_probe();
+#elif defined(X86_INTR_FAULT_TEST_TRACE_READ)
+    trace_read_probe();
 #else
 #error "fault_probe.c compiled without a probe-selection macro"
 #endif
