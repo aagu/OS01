@@ -10,6 +10,8 @@ import subprocess
 import tempfile
 import unittest
 
+from qemutests import flake_ledger
+
 TEST_MANIFEST = {
     "id": "test_flake_report",
     "layer": "harness",
@@ -105,6 +107,111 @@ class FlakeReportTests(unittest.TestCase):
         out = buf.getvalue()
         self.assertIn("terminal-present", out)
         self.assertIn("QUARANTINE-CANDIDATE", out)
+
+
+class FlakeLedgerModelTests(unittest.TestCase):
+    """Tests for qemutests/flake_ledger.py (the in-repo ledger data model)."""
+
+    def _run(self, suite: str, run_id: str, ts: str, status: str) -> flake_ledger.LedgerRun:
+        return flake_ledger.LedgerRun(
+            suite=suite,
+            run_id=run_id,
+            utc_started_at=ts,
+            status=status,
+            profile="x86_64-clang",
+            source="local",
+        )
+
+    def test_missing_ledger_is_empty_not_an_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config" / "flake-ledger.json"
+            ledger, error = flake_ledger.load_ledger(path)
+            self.assertIsNone(error)
+            self.assertFalse(ledger.present)
+            self.assertEqual(ledger.runs, [])
+            self.assertEqual(ledger.decisions, {})
+
+    def test_ledger_round_trips_runs_and_decisions(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config" / "flake-ledger.json"
+            ledger = flake_ledger.Ledger(
+                runs=[self._run("gui", "r1", "2026-11-21T01:00:00Z", "FAIL")],
+                decisions={
+                    "gui": {
+                        "decision": "open",
+                        "note": "nightly timing family",
+                        "decided_at": "2026-11-21",
+                        "decided_by": "",
+                    }
+                },
+                present=True,
+            )
+            flake_ledger.save_ledger(ledger, path)
+
+            loaded, error = flake_ledger.load_ledger(path)
+            self.assertIsNone(error)
+            self.assertTrue(loaded.present)
+            self.assertEqual(len(loaded.runs), 1)
+            self.assertEqual(loaded.runs[0].suite, "gui")
+            self.assertEqual(loaded.runs[0].status, "FAIL")
+            self.assertEqual(loaded.decision_for("gui"), "open")
+            self.assertEqual(loaded.note_for("gui"), "nightly timing family")
+
+    def test_malformed_ledger_is_reported_as_error(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config" / "flake-ledger.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("{not json", encoding="utf-8")
+            ledger, error = flake_ledger.load_ledger(path)
+            self.assertIsNotNone(error)
+            self.assertEqual(ledger.runs, [])
+
+    def test_unknown_schema_version_is_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "config" / "flake-ledger.json"
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps({"schema_version": 99, "runs": []}), encoding="utf-8")
+            ledger, error = flake_ledger.load_ledger(path)
+            self.assertIsNotNone(error)
+            self.assertIn("schema_version", error)
+            self.assertEqual(ledger.runs, [])
+
+    def test_merge_dedups_by_suite_and_run_id(self) -> None:
+        a = self._run("gui", "r1", "2026-11-21T01:00:00Z", "FAIL")
+        b = self._run("gui", "r2", "2026-11-22T01:00:00Z", "PASS")
+        merged = flake_ledger.merge_runs([a, b], [a])
+        self.assertEqual([r.run_id for r in merged], ["r1", "r2"])
+
+    def test_merge_keeps_ledger_entry_when_incoming_repeats_it(self) -> None:
+        old = self._run("gui", "r1", "2026-11-21T01:00:00Z", "FAIL")
+        new = flake_ledger.LedgerRun(
+            suite="gui",
+            run_id="r1",
+            utc_started_at="2026-11-21T01:00:00Z",
+            status="PASS",
+            profile="x86_64-clang",
+        )
+        merged = flake_ledger.merge_runs([old], [new])
+        self.assertEqual(len(merged), 1)
+        self.assertEqual(merged[0].status, "FAIL")
+
+    def test_fragment_holds_only_runs_and_reloads(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "flake-ledger.fragment.json"
+            flake_ledger.write_fragment(path, [self._run("gui", "r1", "2026-11-21T01:00:00Z", "FAIL")])
+            data = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(data["kind"], "fragment")
+            self.assertEqual(data["schema_version"], flake_ledger.LEDGER_SCHEMA_VERSION)
+            self.assertEqual(len(data["runs"]), 1)
+
+            runs, error = flake_ledger.load_fragment(path)
+            self.assertIsNone(error)
+            self.assertEqual(len(runs), 1)
+            self.assertEqual(runs[0].run_id, "r1")
+
+    def test_unknown_decision_value_normalizes_to_open(self) -> None:
+        ledger = flake_ledger.Ledger(decisions={"gui": {"decision": "bogus"}})
+        self.assertEqual(ledger.decision_for("gui"), "open")
 
 
 if __name__ == "__main__":
