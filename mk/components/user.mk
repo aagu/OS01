@@ -51,19 +51,7 @@ $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)&: $(SYSROOT_STAMP) $(USER_RUNTIME_PREREQ
 	    fi; \
 	    exit 0; \
 	  fi; \
-	  mkdir -p "$(dir $(LOCK_DIR))"; \
-	  i=0; \
-	  while ! mkdir "$(LOCK_DIR)" 2>/dev/null; do \
-	    i=$$((i+1)); \
-	    if [ $$i -ge 600 ]; then \
-	      echo "ERROR: publish lock $(LOCK_DIR) held by:"; \
-	      cat "$(LOCK_DIR)/owner" 2>/dev/null || true; \
-	      exit 1; \
-	    fi; \
-	    sleep 0.1; \
-	  done; \
-	  trap "rm -f \"$(LOCK_DIR)/owner\"; rmdir \"$(LOCK_DIR)\" 2>/dev/null || true" EXIT; \
-	  echo "$$$$ $(MAKECMDGOALS) $$(date +%s)" > "$(LOCK_DIR)/owner"; \
+	  $(call os01_acquire_publish_lock) \
 	  gen=$$(readlink "$(SYSROOT)" 2>/dev/null) || gen=""; \
 	  if [ -z "$$gen" ]; then echo "ERROR: sysroot symlink is missing ($(SYSROOT)) — cannot resolve an immutable generation"; exit 1; fi; \
 	  genid=$${gen#sysroot-generations/}; \
@@ -164,19 +152,7 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	    echo "  [busybox] dry-run: not rebuilding"; \
 	    exit 0; \
 	  fi; \
-	  mkdir -p "$(dir $(LOCK_DIR))"; \
-	  i=0; \
-	  while ! mkdir "$(LOCK_DIR)" 2>/dev/null; do \
-	    i=$$((i+1)); \
-	    if [ $$i -ge 600 ]; then \
-	      echo "ERROR: publish lock $(LOCK_DIR) held by:"; \
-	      cat "$(LOCK_DIR)/owner" 2>/dev/null || true; \
-	      exit 1; \
-	    fi; \
-	    sleep 0.1; \
-	  done; \
-	  trap "rm -f \"$(LOCK_DIR)/owner\"; rmdir \"$(LOCK_DIR)\" 2>/dev/null || true" EXIT; \
-	  echo "$$$$ $(MAKECMDGOALS) $$(date +%s)" > "$(LOCK_DIR)/owner"; \
+	  $(call os01_acquire_publish_lock) \
 	  gen=$$(readlink "$(SYSROOT)" 2>/dev/null) || gen=""; \
 	  if [ -z "$$gen" ]; then echo "ERROR: sysroot symlink is missing ($(SYSROOT)) — cannot resolve an immutable generation"; exit 1; fi; \
 	  genid=$${gen#sysroot-generations/}; \

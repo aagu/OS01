@@ -563,6 +563,35 @@ LEASES_DIR := $(BUILD_DIR)/leases
 SYSROOT_GENERATIONS_DIR := $(BUILD_DIR)/sysroot-generations
 SYSROOT_STAMP := $(BUILD_DIR)/stamps/sysroot.stamp
 
+# os01_acquire_publish_lock — shared publish-lock prologue (shell text, one
+# logical line: every newline backslash-escaped, same shape as
+# os01_submake_cmd). Acquires $(LOCK_DIR) by atomic mkdir with the 60 s
+# bounded retry, installs the remove-on-exit trap and writes the owner
+# record; the caller releases the lock (rm owner + rmdir) and owns whatever
+# comes next (generation resolution, lease creation, lease wait). Every
+# recipe that takes the publish lock — sysroot publish (sysroot.mk), the
+# kernel/user/busybox artifact recipes (kernel.mk/user.mk) and clean
+# (run.mk) — expands this instead of carrying its own copy. The trap uses
+# the double-quote-escaped form so the same text also works inside the
+# $(SHELL) -ec '...' single-quoted wrappers of kernel.mk/user.mk (no raw
+# single quotes); with no shell-expandable content inside, it is equivalent
+# to the single-quoted form previously used by sysroot.mk/run.mk.
+define os01_acquire_publish_lock
+mkdir -p "$(dir $(LOCK_DIR))"; \
+i=0; \
+while ! mkdir "$(LOCK_DIR)" 2>/dev/null; do \
+  i=$$((i+1)); \
+  if [ $$i -ge 600 ]; then \
+    echo "ERROR: publish lock $(LOCK_DIR) held by:"; \
+    cat "$(LOCK_DIR)/owner" 2>/dev/null || true; \
+    exit 1; \
+  fi; \
+  sleep 0.1; \
+done; \
+trap "rm -f \"$(LOCK_DIR)/owner\"; rmdir \"$(LOCK_DIR)\" 2>/dev/null || true" EXIT; \
+echo "$$$$ $(MAKECMDGOALS) $$(date +%s)" > "$(LOCK_DIR)/owner";
+endef
+
 # FORCE — always out-of-date prerequisite for recipes that must run on every
 # invocation (content-gated staging stamps, the kernel artifact recipe).
 .PHONY: FORCE

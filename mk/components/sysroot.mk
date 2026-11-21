@@ -266,19 +266,7 @@ $(STAMPS_DIR)/compat-libs-install.stamp: FORCE
 $(SYSROOT_STAMP): $(SYSROOT_STAMP_PREREQS)
 	@mkdir -p $(dir $@) $(SYSROOT_GENERATIONS_DIR) $(LEASES_DIR)
 	@set -e; \
-	mkdir -p "$(dir $(LOCK_DIR))"; \
-	i=0; \
-	while ! mkdir "$(LOCK_DIR)" 2>/dev/null; do \
-	  i=$$((i+1)); \
-	  if [ $$i -ge 600 ]; then \
-	    echo "ERROR: publish lock $(LOCK_DIR) held by:"; \
-	    cat "$(LOCK_DIR)/owner" 2>/dev/null || true; \
-	    exit 1; \
-	  fi; \
-	  sleep 0.1; \
-	done; \
-	trap 'rm -f "$(LOCK_DIR)/owner"; rmdir "$(LOCK_DIR)" 2>/dev/null || true' EXIT; \
-	echo "$$$$ $(MAKECMDGOALS) $$(date +%s)" > "$(LOCK_DIR)/owner"; \
+	$(call os01_acquire_publish_lock) \
 	j=0; \
 	while [ -n "$$(ls -1 "$(LEASES_DIR)" 2>/dev/null | head -1)" ]; do \
 	  j=$$((j+1)); \

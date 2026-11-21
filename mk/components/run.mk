@@ -2051,19 +2051,7 @@ clean:
 	  exit 0; \
 	fi; \
 	set -e; \
-	mkdir -p "$(dir $(LOCK_DIR))"; \
-	i=0; \
-	while ! mkdir "$(LOCK_DIR)" 2>/dev/null; do \
-	  i=$$((i+1)); \
-	  if [ $$i -ge 600 ]; then \
-	    echo "ERROR: publish lock $(LOCK_DIR) held by:"; \
-	    cat "$(LOCK_DIR)/owner" 2>/dev/null || true; \
-	    exit 1; \
-	  fi; \
-	  sleep 0.1; \
-	done; \
-	trap 'rm -f "$(LOCK_DIR)/owner"; rmdir "$(LOCK_DIR)" 2>/dev/null || true' EXIT; \
-	echo "$$$$ $(MAKECMDGOALS) $$(date +%s)" > "$(LOCK_DIR)/owner"; \
+	$(call os01_acquire_publish_lock) \
 	if [ -d "$(LEASES_DIR)" ] && [ -n "$$(ls -A "$(LEASES_DIR)" 2>/dev/null)" ]; then \
 	  echo "ERROR: cannot clean while sysroot generations are leased:"; \
 	  ls -A "$(LEASES_DIR)"; \
