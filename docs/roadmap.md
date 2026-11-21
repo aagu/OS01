@@ -11,7 +11,7 @@
 
 | 优先级 | 主题 | 未完成项 | 备注 |
 |-------|------|---------|------|
-| **P0** | 工程与测试基础设施 | 2 | flake 账本入库 · 测试框架重构（已设计待实施） |
+| **P0** | 工程与测试基础设施 | 1 | flake 账本入库 |
 | **P1** | 安全加固 | 3 | ASLR-A / ASLR-B / UBSan+KASan |
 | **P2** | aarch64 适配 | 11 | 内存与执行体 3 · 架构统一 2 · 真机阻断 6 |
 | **P2** | 架构治理 / 扩展性 | 0 | 新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填该节 |
@@ -28,7 +28,6 @@
 | 项 | 内容 / 完成条件 | 依赖 | 备注 |
 |----|-----------------|------|------|
 | flake 账本入库 | `make test-flake-report` 报告器已就位（连续失败 ≥3 轮标记 quarantine 候选，`QUARANTINE_STREAK_THRESHOLD=3`，`qemutests/flake_report.py:19`），但**账本本身没有入库文件**：报告只能现算——本地走 `build/*/logs/tests/**/result.json`，CI 走 artifacts（`flake_report.py` 只读、不写回），本地无历史账本可审计。**且 CI workflow 从不调用报告器**（`.github/workflows/ci.yml` 只在 warning 文案里提及 `make test-flake-report`），`--from-ci` 路径目前只能人工触发 | 报告器 ✅ | `qemutests/flake_report.py`、`mk/components/run.mk:771-772`（帮助文本 `:1885`）；已知开放 flake 家族：terminal-present / gui / gui-desktop / sched-ap + SMP 时序类（nightly terminal/gfx timing family，non-blocking） |
-| 测试框架重构（已设计待实施） | 三工程方案：① `@os01-test` 文件内元数据 + `tools/tests/scan_tests.py` 单一事实源与自动发现脊柱（六处平行清单归一，含 scenario-catalog 契约）② mock 归档库 + fixture v2 + qemutests 去重 ③ 断言分层 + strict/tolerant 时序分级。spec/plan 已入库（`docs/superpowers/specs/2026-11-14-test-framework-design.md`、`docs/superpowers/plans/2026-11-14-test-framework-redesign.md`，22 任务三阶段，提交 `f223a289`，8 轮评审 APPROVE）；用户裁决（2026-11-14）**暂不实施**，启动时按 plan 执行（建议 subagent-driven + worktree `feature/test-framework-redesign`）；D7 试点范围、D8 strict 零重试已定，D8 tolerant 白名单解释留待用户确认 | 设计/计划 ✅ | D2 已推翻「禁止 auto-discovery」Ruling 3（opt-in 元数据驱动发现） |
 
 ## 🔒 P1 安全加固
 
