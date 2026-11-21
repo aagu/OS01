@@ -74,8 +74,40 @@ static void schedule_charge_regression(void)
 #endif
 }
 
+#if !EXPECT_SCHED_CHARGE
+static void aarch64_balance_vetoes_pf_process(void)
+{
+    sched_notify_reset();
+    num_cpus = 2;
+    percpu_data[0].online = 1;
+    percpu_data[0].scheduler_ok = 1;
+    percpu_data[1].online = 1;
+    percpu_data[1].scheduler_ok = 1;
+
+    task_t user_proc;
+    memset(&user_proc, 0, sizeof(user_proc));
+    user_proc.state = TASK_RUNNING;
+    user_proc.pid = 42;
+    user_proc.flags = PF_PROCESS;
+    user_proc.cpu = 0;
+    user_proc.allowed_cpus = 3ULL;
+    user_proc.vruntime = 10;
+    user_proc.deadline = 20;
+    user_proc.on_cpu = 0;
+    enqueue_task(&user_proc, &percpu_data[0]);
+
+    sched_balance(&percpu_data[1]);
+    assert_eq(0, (int)user_proc.cpu);
+    assert_eq(1, (int)percpu_data[0].nr_running);
+    assert_eq(0, (int)percpu_data[1].nr_running);
+}
+#endif
+
 TEST_LIST_BEGIN
     TEST_ENTRY(schedule_charge_regression),
+#if !EXPECT_SCHED_CHARGE
+    TEST_ENTRY(aarch64_balance_vetoes_pf_process),
+#endif
 TEST_LIST_END
 
 int main(void)

@@ -79,7 +79,8 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     if (rc)
         return rc;
 
-    int target_cpu = aarch64_user_pick_cpu();
+    uint64_t picked_mask = 0;
+    int target_cpu = aarch64_user_pick_cpu(&picked_mask);
     if (target_cpu < 0)
         return target_cpu;
 
@@ -159,7 +160,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     task_t *tsk = NULL;
     int pid = 0;
     rc = sched_alloc_and_publish_task((uint32_t)target_cpu,
-                                      true /* single-bit affinity */,
+                                      picked_mask,
                                       PF_PROCESS, task_basename(path),
                                       user_task_prepare, user_task_discard,
                                       &pctx, &tsk, &pid);

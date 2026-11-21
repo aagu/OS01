@@ -137,6 +137,7 @@ typedef struct task_struct
     uint64_t      vruntime;   // accumulated virtual runtime (ticks)
     uint64_t      deadline;   // vruntime + slice, rbtree sort key
     bool          on_rq;      // true when on a CPU's runqueue
+    bool          irq_return_migratable; // true only across EL0 IRQ-return schedule()
 
     // ── Real runtime in ticks (monitor plan Task 2, spec §2.1) ──
     // Independent of vruntime (wakeups/fork/migration perturb vruntime,

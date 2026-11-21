@@ -84,12 +84,14 @@ void vmm_gate_check(void);
  * window), and -EOPNOTSUPP when the topology/caller CPU is invalid. */
 int aarch64_user_mm_runtime_check(void);
 
-/* Pick a target CPU for a new user process:
- * - During BSP boot-5 creation window, returns 0.
- * - At runtime, round-robins across ready CPUs (online && ipi_ready &&
- *   scheduler_ok), starting cursor at 1.
- * - Returns negative errno if no legal target is ready. */
-int aarch64_user_pick_cpu(void);
+/* Pick a target CPU and ready-CPU affinity mask for a new user process:
+ * - During BSP boot-5 creation window, returns 0 and writes 1 to *allowed_cpus.
+ * - At runtime, captures one ready snapshot (online && ipi_ready &&
+ *   scheduler_ok), round-robins across it, and writes that snapshot to
+ *   *allowed_cpus.
+ * - On failure, writes 0 to *allowed_cpus (when non-NULL) and returns
+ *   a negative errno. */
+int aarch64_user_pick_cpu(uint64_t *allowed_cpus);
 
 /* Weak violation hook (see file comment); defined in vmm_gate.c. */
 void vmm_gate_violation(const char *reason);

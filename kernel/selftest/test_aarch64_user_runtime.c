@@ -230,6 +230,11 @@ void aarch64_user_runtime_test_irq_sched_after(struct task_struct *tsk,
 {
     if (!g_urt_active || !tsk || !regs)
         return;
+    if (tsk->irq_return_migratable) {
+        log_err("irq_sched_after: irq_return_migratable left set on pid=%lld\n",
+                (long long)tsk->pid);
+        return;
+    }
     if (arch_current_task() != tsk || regs->elr_el1 != elr_before)
         return;
     if (!aarch64_user_frame_is_valid(regs))
@@ -259,6 +264,10 @@ void aarch64_user_runtime_test_vm_edit_pause(struct mm_struct *mm)
     struct aarch64_user_task *owner = aarch64_user_task_owner(cur);
     if (!owner || !owner->image || !owner->vm.edit_active)
         return;
+    if (cur->irq_return_migratable) {
+        log_err("vm_edit_pause: irq_return_migratable set during paused edit\n");
+        return;
+    }
 
     g_vm_pause_done = true;
     g_a_paused_task = cur;

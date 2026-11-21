@@ -202,10 +202,10 @@ bool aarch64_user_frame_is_valid(const struct pt_regs *regs)
     task_t *t = arch_current_task();
     if (!aarch64_user_task_is_user(t))
         return false;
-    /* ... a real process with single-bit affinity on this CPU ... */
+    /* ... a real process eligible to run on this CPU ... */
     if (!(t->flags & PF_PROCESS))
         return false;
-    if (t->cpu != cpu->cpu_id || t->allowed_cpus != (1ULL << cpu->cpu_id))
+    if (t->cpu != cpu->cpu_id || ((t->allowed_cpus >> cpu->cpu_id) & 1ULL) == 0)
         return false;
     /* ... with a private mm that is the image's own mm ... */
     const struct aarch64_user_task *owner = t->thread->user_task;
@@ -524,7 +524,9 @@ bool arch_context_reschedule_return(struct pt_regs *frame)
         aarch64_user_runtime_test_irq_sched_before(
             cur, frame, &switches_before, &elr_before);
 #endif
+        cur->irq_return_migratable = true;
         schedule();
+        cur->irq_return_migratable = false;
 #ifdef AARCH64_USER_RUNTIME_TEST
         aarch64_user_runtime_test_irq_sched_after(
             cur, frame, switches_before, elr_before);
@@ -1230,14 +1232,15 @@ static int user_task_fork_publish(void *arg)
         .files_state = &ctx->files_state,
     };
 
-    int target_cpu = aarch64_user_pick_cpu();
+    uint64_t picked_mask = 0;
+    int target_cpu = aarch64_user_pick_cpu(&picked_mask);
     if (target_cpu < 0)
         return target_cpu;
 
     task_t *tsk = NULL;
     int pid = 0;
     int rc = sched_alloc_and_publish_task((uint32_t)target_cpu,
-                                          true /* single-bit affinity */,
+                                          picked_mask,
                                           PF_PROCESS, ctx->parent->comm,
                                           user_task_prepare, user_task_discard,
                                           &pctx, &tsk, &pid);
@@ -1375,7 +1378,7 @@ int aarch64_user_task_spawn_on_cpu(const struct aarch64_user_elf_source *catalog
 
     task_t *tsk = NULL;
     int pid = 0;
-    rc = sched_alloc_and_publish_task(cpu, true /* pinned to explicit CPU */,
+    rc = sched_alloc_and_publish_task(cpu, 1ULL << cpu,
                                       PF_PROCESS, name,
                                       user_task_prepare, user_task_discard,
                                       &pctx, &tsk, &pid);

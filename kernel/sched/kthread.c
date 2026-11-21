@@ -101,8 +101,8 @@ static int kthread_place_unpinned(unsigned *out_cpu)
  * happens BEFORE the task becomes visible to another CPU, and the
  * publication order is task_list_lock then rq_lock.
  */
-int sched_alloc_and_publish_task(unsigned cpu, bool pinned, uint64_t flags,
-                                  const char *name,
+int sched_alloc_and_publish_task(unsigned cpu, uint64_t allowed_cpus,
+                                  uint64_t flags, const char *name,
                                   int (*prepare)(task_t *, void *),
                                   void (*discard)(task_t *, void *),
                                   void *arg,
@@ -118,17 +118,20 @@ int sched_alloc_and_publish_task(unsigned cpu, bool pinned, uint64_t flags,
         return -EINVAL;
     if (cpu >= NR_CPUS || cpu >= num_cpus)
         return -EINVAL;
+    if ((allowed_cpus & (1ULL << cpu)) == 0)
+        return -EINVAL;
     if (!__atomic_load_n(&percpu_data[cpu].online, __ATOMIC_ACQUIRE))
+        return -EINVAL;
+    if ((flags & PF_PROCESS) &&
+        !__atomic_load_n(&percpu_data[cpu].ipi_ready, __ATOMIC_ACQUIRE))
         return -EINVAL;
     if (!__atomic_load_n(&percpu_data[cpu].scheduler_ok,
                          __ATOMIC_ACQUIRE)) {
         /* The boot-phase exception: while the BSP boot window is open
          * (CPU0 online, scheduler_ok not yet published — the
          * kernel_start_userspace creation window), a task may land on
-         * CPU0.  This covers the boot-5 init spawn, which IS a pinned
-         * user task (2026-11-19: the window exists exactly for that
-         * spawn; the x86 spawn path has its own boot-phase admission
-         * in spawn_boot_target_allowed).  Once the window is closed no
+         * CPU0.  A real user task in this window MUST stay pinned to
+         * CPU0 (allowed_cpus == 1ULL).  Once the window is closed no
          * CPU0 fallback exists at all. */
         bool boot_fallback = cpu == 0 && sched_boot_creation_open();
         if (!boot_fallback)
@@ -208,10 +211,9 @@ int sched_alloc_and_publish_task(unsigned cpu, bool pinned, uint64_t flags,
                                                    : fair_start;
     tsk->deadline = tsk->vruntime + EEVDF_MIN_SLICE;
 
-    /* Affinity: a pinned task owns exactly one CPU; an unpinned one
-     * keeps the arch default reach. */
-    tsk->allowed_cpus = pinned ? (1ULL << cpu)
-                               : arch_kthread_default_mask();
+    /* Affinity: caller-supplied explicit mask (validated above to contain
+     * the initial CPU). */
+    tsk->allowed_cpus = allowed_cpus;
 
     /* 5. Flags: exactly what the caller asked for.  PF_SELF_REAP and
      *    the on-CPU / on-runqueue / in-schedule flags are never
@@ -239,9 +241,13 @@ int sched_alloc_and_publish_task(unsigned cpu, bool pinned, uint64_t flags,
 
     /* Re-validate the placement under the same protected snapshot that
      * publishes the task: the target CPU must still be usable. */
+    bool boot_fallback = cpu == 0 && sched_boot_creation_open() &&
+                         (!(flags & PF_PROCESS) || allowed_cpus == 1ULL);
     if (!__atomic_load_n(&rq->online, __ATOMIC_ACQUIRE) ||
+        ((flags & PF_PROCESS) &&
+         !__atomic_load_n(&rq->ipi_ready, __ATOMIC_ACQUIRE)) ||
         (!__atomic_load_n(&rq->scheduler_ok, __ATOMIC_ACQUIRE) &&
-         !(cpu == 0 && sched_boot_creation_open()))) {
+         !boot_fallback)) {
         spin_unlock_irqrestore(&rq->rq_lock, rq_flags);
         spin_unlock_irqrestore(&task_list_lock, tl_flags);
         /* The prepare hook acquired its resources before the locked
@@ -339,8 +345,10 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
     if (!fn)
         return -EINVAL;
 
+    uint64_t allowed = pinned ? (1ULL << target_cpu)
+                              : arch_kthread_default_mask();
     struct kthread_prepare_ctx ctx = { .fn = fn, .arg = arg };
-    return sched_alloc_and_publish_task(target_cpu, pinned, PF_KTHREAD, name,
+    return sched_alloc_and_publish_task(target_cpu, allowed, PF_KTHREAD, name,
                                          kthread_prepare, kthread_discard,
                                          &ctx, out_task, out_pid);
 }

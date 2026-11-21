@@ -226,20 +226,50 @@ static void case_post_smp_count_mismatch_then_match(void)
     vmm_gate_check();
 
     /* C2: during BSP boot-5 creation window, aarch64_user_pick_cpu()
-     * only picks 0 even when all DTB IPIs are ready. */
+     * only picks 0 even when all DTB IPIs are ready, with mask 1. */
+    uint64_t picked_mask = 0;
     percpu_data[0].scheduler_ok = 0;
     mock_boot_creation_open = true;
-    assert_eq(0, aarch64_user_pick_cpu());
-    assert_eq(0, aarch64_user_pick_cpu());
+    assert_eq(0, aarch64_user_pick_cpu(&picked_mask));
+    assert_eq(1ULL, picked_mask);
+    assert_eq(0, aarch64_user_pick_cpu(&picked_mask));
+    assert_eq(1ULL, picked_mask);
     mock_boot_creation_open = false;
 
     /* C2: after BSP and AP scheduler_ok are published, two runtime
-     * aarch64_user_pick_cpu() calls return 1, 0 in order. */
+     * aarch64_user_pick_cpu() calls return 1, 0 in order, mask 3. */
     percpu_data[0].scheduler_ok = 1;
     percpu_data[1].online = 1;
     percpu_data[1].scheduler_ok = 1;
-    assert_eq(1, aarch64_user_pick_cpu());
-    assert_eq(0, aarch64_user_pick_cpu());
+    assert_eq(1, aarch64_user_pick_cpu(&picked_mask));
+    assert_eq(3ULL, picked_mask);
+    assert_eq(0, aarch64_user_pick_cpu(&picked_mask));
+    assert_eq(3ULL, picked_mask);
+
+    /* Three target gates (online, ipi_ready, scheduler_ok) each exclude
+     * CPU0 when cleared, leaving CPU1 (mask 2). */
+    percpu_data[0].online = 0;
+    assert_eq(1, aarch64_user_pick_cpu(&picked_mask));
+    assert_eq(2ULL, picked_mask);
+    percpu_data[0].online = 1;
+
+    percpu_data[0].ipi_ready = 0;
+    assert_eq(1, aarch64_user_pick_cpu(&picked_mask));
+    assert_eq(2ULL, picked_mask);
+    percpu_data[0].ipi_ready = 1;
+
+    percpu_data[0].scheduler_ok = 0;
+    assert_eq(1, aarch64_user_pick_cpu(&picked_mask));
+    assert_eq(2ULL, picked_mask);
+
+    /* Empty ready set returns -EAGAIN and writes 0 to allowed_cpus. */
+    percpu_data[1].scheduler_ok = 0;
+    picked_mask = 0xffULL;
+    assert_eq(-EAGAIN, aarch64_user_pick_cpu(&picked_mask));
+    assert_eq(0ULL, picked_mask);
+
+    percpu_data[0].scheduler_ok = 1;
+    percpu_data[1].scheduler_ok = 1;
 
     /* Bumping cpu_count up again makes the gate re-trip (defensive —
      * confirms we are reading the live counter, not a cached value). */

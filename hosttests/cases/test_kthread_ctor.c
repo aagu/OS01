@@ -575,6 +575,106 @@ static void suite_picker_qualification_three_states(void)
     assert_eq(1, (int)last_created_task()->cpu);
 }
 
+static int g_publish_prepare_calls;
+static int g_publish_discard_calls;
+static int g_publish_revoke_ipi_in_prepare;
+
+static int publish_test_prepare(task_t *tsk, void *arg)
+{
+    (void)tsk;
+    (void)arg;
+    g_publish_prepare_calls++;
+    if (g_publish_revoke_ipi_in_prepare)
+        percpu_data[0].ipi_ready = 0;
+    return 0;
+}
+
+static void publish_test_discard(task_t *tsk, void *arg)
+{
+    (void)tsk;
+    (void)arg;
+    g_publish_discard_calls++;
+}
+
+static void suite_publish_explicit_mask_and_gates(void)
+{
+    TEST_SUITE("publish rejects missing cpu bit, runtime gate failure, and multi-bit boot mask");
+    switch_tail_reset();
+    num_cpus = 2;
+    percpu_data[0].online = 1;
+    percpu_data[0].ipi_ready = 1;
+    percpu_data[0].scheduler_ok = 1;
+    percpu_data[1].online = 1;
+    percpu_data[1].ipi_ready = 1;
+    percpu_data[1].scheduler_ok = 1;
+
+    task_t *tsk = (task_t *)1;
+    int pid = 99;
+    g_publish_prepare_calls = 0;
+    g_publish_discard_calls = 0;
+    g_publish_revoke_ipi_in_prepare = 0;
+
+    /* Missing initial CPU bit: rejected before prepare, nothing queued. */
+    int rc = sched_alloc_and_publish_task(0, 2ULL, PF_PROCESS, "bad-bit",
+                                          publish_test_prepare,
+                                          publish_test_discard, NULL,
+                                          &tsk, &pid);
+    assert_eq(-EINVAL, rc);
+    assert_true(tsk == NULL);
+    assert_eq(0, pid);
+    assert_eq(0, g_publish_prepare_calls);
+    assert_eq(0, g_publish_discard_calls);
+    assert_eq(0, task_list_len());
+    assert_eq(0, (int)percpu_data[0].nr_running);
+
+    /* Runtime gate failure (ipi_ready revoked before lock): discard called, nothing queued. */
+    g_publish_revoke_ipi_in_prepare = 1;
+    rc = sched_alloc_and_publish_task(0, 3ULL, PF_PROCESS, "ipi-revoked",
+                                      publish_test_prepare,
+                                      publish_test_discard, NULL,
+                                      &tsk, &pid);
+    assert_eq(-EINVAL, rc);
+    assert_true(tsk == NULL);
+    assert_eq(0, pid);
+    assert_eq(1, g_publish_prepare_calls);
+    assert_eq(1, g_publish_discard_calls);
+    assert_eq(0, task_list_len());
+    assert_eq(0, (int)percpu_data[0].nr_running);
+    assert_true((size_t)0 == mock_kmalloc_live_bytes);
+
+    /* Boot window open, CPU0 scheduler_ok == 0: multi-bit mask rejected, single-bit accepted. */
+    g_publish_prepare_calls = 0;
+    g_publish_discard_calls = 0;
+    g_publish_revoke_ipi_in_prepare = 0;
+    percpu_data[0].ipi_ready = 1;
+    percpu_data[0].scheduler_ok = 0;
+    sched_boot_creation_begin();
+    rc = sched_alloc_and_publish_task(0, 3ULL, PF_PROCESS, "boot-multi",
+                                      publish_test_prepare,
+                                      publish_test_discard, NULL,
+                                      &tsk, &pid);
+    assert_eq(-EINVAL, rc);
+    assert_true(tsk == NULL);
+    assert_eq(0, pid);
+    assert_eq(1, g_publish_prepare_calls);
+    assert_eq(1, g_publish_discard_calls);
+    assert_eq(0, task_list_len());
+    assert_eq(0, (int)percpu_data[0].nr_running);
+    assert_true((size_t)0 == mock_kmalloc_live_bytes);
+
+    rc = sched_alloc_and_publish_task(0, 1ULL, PF_PROCESS, "boot-one",
+                                      publish_test_prepare,
+                                      publish_test_discard, NULL,
+                                      &tsk, &pid);
+    assert_eq(0, rc);
+    assert_true(tsk != NULL);
+    assert_true(pid > 0);
+    if (tsk)
+        assert_eq(1ULL, tsk->allowed_cpus);
+    assert_eq(1, task_list_len());
+    assert_eq(1, (int)percpu_data[0].nr_running);
+}
+
 int main(void)
 {
     suite_window_initially_closed();
@@ -584,6 +684,7 @@ int main(void)
     suite_publication_order();
     suite_pinned_api();
     suite_empty_affinity();
+    suite_publish_explicit_mask_and_gates();
     suite_window_close_permanent();
     suite_runtime_create();
     suite_notify_uses_captured_cpu_after_publication();

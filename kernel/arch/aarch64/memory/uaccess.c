@@ -102,7 +102,7 @@ aarch64_user_range_precheck(uint64_t addr, size_t len,
 
     task_t *t = arch_current_task();
     if (!t || !(t->flags & PF_PROCESS) ||
-        t->cpu != cpu->cpu_id || t->allowed_cpus != (1ULL << cpu->cpu_id))
+        t->cpu != cpu->cpu_id || ((t->allowed_cpus >> cpu->cpu_id) & 1ULL) == 0)
         return AARCH64_RANGE_DENIED;
 
     struct mm_struct *mm = aarch64_user_current_mm();

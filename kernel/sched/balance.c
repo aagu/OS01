@@ -216,6 +216,9 @@ void sched_balance(percpu_t *rq)
              * plan explicitly forbids the silent fallback.
              */
             if (t->pid != user_init_pid &&
+#ifdef __aarch64__
+                !(t->flags & PF_PROCESS) &&
+#endif
                 !__atomic_load_n(&t->on_cpu, __ATOMIC_ACQUIRE) &&
                 ((t->allowed_cpus >> rq->cpu_id) & 1ULL)) {
                 dequeue_task(t, src_rq);

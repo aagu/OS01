@@ -213,6 +213,7 @@ static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t f) { (void)f; 
 typedef struct mock_percpu {
     uint32_t cpu_id;
     uint32_t online;
+    uint32_t ipi_ready;
     uint32_t scheduler_ok;
     uint32_t need_resched;
     uint32_t nr_running;
@@ -243,8 +244,8 @@ int kthread_alloc_and_publish(uint64_t (*fn)(uint64_t), uint64_t arg,
  * production TU; <sched/internal.h> is skipped in this fixture, so their
  * prototypes are provided here (they must stay in sync with the real
  * header). */
-int sched_alloc_and_publish_task(unsigned cpu, bool pinned, uint64_t flags,
-                                  const char *name,
+int sched_alloc_and_publish_task(unsigned cpu, uint64_t allowed_cpus,
+                                  uint64_t flags, const char *name,
                                   int (*prepare)(task_t *, void *),
                                   void (*discard)(task_t *, void *),
                                   void *arg,

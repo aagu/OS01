@@ -192,8 +192,12 @@ int aarch64_user_mm_runtime_check(void)
 
 static uint32_t user_pick_rr_cursor = 1;
 
-int aarch64_user_pick_cpu(void)
+int aarch64_user_pick_cpu(uint64_t *allowed_cpus)
 {
+    if (!allowed_cpus)
+        return -EINVAL;
+    *allowed_cpus = 0;
+
     if (__atomic_load_n(&smp_starting, __ATOMIC_ACQUIRE) == 0)
         return -EAGAIN;
 
@@ -210,6 +214,7 @@ int aarch64_user_pick_cpu(void)
         if (!__atomic_load_n(&percpu_data[0].online, __ATOMIC_ACQUIRE) ||
             !__atomic_load_n(&percpu_data[0].ipi_ready, __ATOMIC_ACQUIRE))
             return -EAGAIN;
+        *allowed_cpus = 1ULL;
         return 0;
     }
 
@@ -242,6 +247,7 @@ int aarch64_user_pick_cpu(void)
         uint32_t next = ((uint32_t)picked + 1U) % ncpus;
         if (__atomic_compare_exchange_n(&user_pick_rr_cursor, &cur, next, true,
                                         __ATOMIC_RELAXED, __ATOMIC_RELAXED)) {
+            *allowed_cpus = ready_mask;
             return picked;
         }
     }
