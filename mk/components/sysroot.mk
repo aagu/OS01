@@ -51,6 +51,25 @@ define stamp_check
 	fi
 endef
 
+# staging_stamp_tail <stage> <component> <install-target> <extra sub-make
+# args> — the mechanical tail shared by the kernel-headers/libc/libgfx/gui
+# staging stamps: compare the input key the caller computed into $$in_key,
+# skip the staging sub-make when it is unchanged (and a manifest exists),
+# otherwise run the install and record the key, then run stamp_check. The
+# input-key computation stays at each call site — that is where the stages
+# genuinely differ (header set, receipts of upstream stamps, test macros).
+define staging_stamp_tail
+old_key=""; \
+if [ -f "$@.input_key" ]; then old_key=$$(cat "$@.input_key"); fi; \
+if [ "$$in_key" = "$$old_key" ] && [ -f "$(STAGING_DIR)/$(1)/manifest" ]; then \
+  echo "  [staging] $(1) input unchanged, skipping staging sub-make"; \
+else \
+  $(call os01_submake_cmd,$(2),$(3) INSTALL_ROOT=$(STAGING_DIR)/$(1) $(4) $(OS01_SUBMAKE_ARGS)); \
+  printf '%s\n' "$$in_key" > "$@.input_key"; \
+fi
+	$(call stamp_check,$(STAGING_DIR)/$(1))
+endef
+
 $(STAMPS_DIR)/kernel-headers-install.stamp: FORCE
 	@mkdir -p $(dir $@) $(RECEIPTS_DIR)
 	@# FB_RESOLUTION_TEST is part of the key because kernel install-headers
@@ -58,15 +77,7 @@ $(STAMPS_DIR)/kernel-headers-install.stamp: FORCE
 	@# a normal -> resolution-test flip in one build dir would skip the
 	@# staging sub-make and the sysroot would keep missing the UAPI header.
 	@in_key=$$( { find $(OS01_ROOT)/kernel/include -type f -exec sha256sum {} + 2>/dev/null | sort; printf 'arch: %s\n' "$(SYSROOT_ARCH)"; printf 'fb_resolution_test: %s\n' "$(FB_RESOLUTION_TEST)"; } | sha256sum | cut -d' ' -f1 ); \
-	old_key=""; \
-	if [ -f "$@.input_key" ]; then old_key=$$(cat "$@.input_key"); fi; \
-	if [ "$$in_key" = "$$old_key" ] && [ -f "$(STAGING_DIR)/kernel-headers/manifest" ]; then \
-	  echo "  [staging] kernel-headers input unchanged, skipping staging sub-make"; \
-	else \
-	  $(call os01_submake_cmd,kernel,install-headers INSTALL_ROOT=$(STAGING_DIR)/kernel-headers ARCH=$(SYSROOT_ARCH) $(OS01_SUBMAKE_ARGS)); \
-	  printf '%s\n' "$$in_key" > "$@.input_key"; \
-	fi
-	$(call stamp_check,$(STAGING_DIR)/kernel-headers)
+	$(call staging_stamp_tail,kernel-headers,kernel,install-headers,ARCH=$(SYSROOT_ARCH))
 
 $(STAMPS_DIR)/libc-install.stamp: FORCE
 	@mkdir -p $(dir $@) $(RECEIPTS_DIR)
@@ -75,15 +86,7 @@ $(STAMPS_DIR)/libc-install.stamp: FORCE
 	  printf 'toolchain: %s\n' "$$($(CLANG) --version 2>/dev/null | head -1)"; \
 	  printf 'launcher: %s\n' "$(COMPILER_LAUNCHER)"; \
 	} | sha256sum | cut -d' ' -f1 ); \
-	old_key=""; \
-	if [ -f "$@.input_key" ]; then old_key=$$(cat "$@.input_key"); fi; \
-	if [ "$$in_key" = "$$old_key" ] && [ -f "$(STAGING_DIR)/libc/manifest" ]; then \
-	  echo "  [staging] libc input unchanged, skipping staging sub-make"; \
-	else \
-	  $(call os01_submake_cmd,libc,install INSTALL_ROOT=$(STAGING_DIR)/libc ARCH=$(SYSROOT_ARCH) $(OS01_SUBMAKE_ARGS)); \
-	  printf '%s\n' "$$in_key" > "$@.input_key"; \
-	fi
-	$(call stamp_check,$(STAGING_DIR)/libc)
+	$(call staging_stamp_tail,libc,libc,install,ARCH=$(SYSROOT_ARCH))
 
 # ── libgfx staging (Task 3) ─────────────────────────────────────
 # Static userland 2D graphics library.  Ordered AFTER the kernel
@@ -105,15 +108,7 @@ $(STAMPS_DIR)/libgfx-install.stamp: $(STAMPS_DIR)/kernel-headers-install.stamp \
 	  printf 'toolchain: %s\n' "$$($(CLANG) --version 2>/dev/null | head -1)"; \
 	  printf 'launcher: %s\n' "$(COMPILER_LAUNCHER)"; \
 	} | sha256sum | cut -d' ' -f1 ); \
-	old_key=""; \
-	if [ -f "$@.input_key" ]; then old_key=$$(cat "$@.input_key"); fi; \
-	if [ "$$in_key" = "$$old_key" ] && [ -f "$(STAGING_DIR)/libgfx/manifest" ]; then \
-	  echo "  [staging] libgfx input unchanged, skipping staging sub-make"; \
-	else \
-	  $(call os01_submake_cmd,libgfx,install INSTALL_ROOT=$(STAGING_DIR)/libgfx $(OS01_SUBMAKE_ARGS)); \
-	  printf '%s\n' "$$in_key" > "$@.input_key"; \
-	fi
-	$(call stamp_check,$(STAGING_DIR)/libgfx)
+	$(call staging_stamp_tail,libgfx,libgfx,install,)
 
 # ── libgui staging ───────────────────────────────────────────────
 $(STAMPS_DIR)/gui-install.stamp: $(STAMPS_DIR)/kernel-headers-install.stamp \
@@ -127,15 +122,7 @@ $(STAMPS_DIR)/gui-install.stamp: $(STAMPS_DIR)/kernel-headers-install.stamp \
 	  printf 'toolchain: %s\n' "$$($(CLANG) --version 2>/dev/null | head -1)"; \
 	  printf 'launcher: %s\n' "$(COMPILER_LAUNCHER)"; \
 	} | sha256sum | cut -d' ' -f1 ); \
-	old_key=""; \
-	if [ -f "$@.input_key" ]; then old_key=$$(cat "$@.input_key"); fi; \
-	if [ "$$in_key" = "$$old_key" ] && [ -f "$(STAGING_DIR)/gui/manifest" ]; then \
-	  echo "  [staging] gui input unchanged, skipping staging sub-make"; \
-	else \
-	  $(call os01_submake_cmd,libgui,install INSTALL_ROOT=$(STAGING_DIR)/gui $(OS01_SUBMAKE_ARGS)); \
-	  printf '%s\n' "$$in_key" > "$@.input_key"; \
-	fi
-	$(call stamp_check,$(STAGING_DIR)/gui)
+	$(call staging_stamp_tail,gui,libgui,install,)
 
 # ── mbedTLS adapter (R7, Task B1) ──────────────────────────────────
 # No shared /tmp, no writes into the submodule, no final-sysroot writes.
