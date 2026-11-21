@@ -69,6 +69,10 @@
  * different privilege levels: an EL1h frame can never carry a
  * lower-EL abort, and an EL0t frame can never carry a same-EL abort. */
 #define AARCH64_EC_SVC_LOWER          0x15ULL
+/* EC 0b000111: trapped AdvSIMD/FP instruction (EL0/EL1, CPACR_EL1.FPEN
+ * disable trap).  OS01 runs FPEN=0b11 everywhere, so reaching this
+ * class means the FPEN invariant is broken. */
+#define AARCH64_EC_FP_ACCESS          0x07ULL
 #define AARCH64_EC_INSN_ABORT_LOWER   0x20ULL
 #define AARCH64_EC_INSN_ABORT_SAME    0x21ULL
 #define AARCH64_EC_PC_ALIGNMENT       0x22ULL

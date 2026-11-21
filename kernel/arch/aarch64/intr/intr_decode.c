@@ -109,6 +109,10 @@ void aarch64_intr_decode_sync(struct intr_event *out, const pt_regs_t *regs,
         out->reason = INTR_REASON_PROTECTION;
         out->access = INTR_ACCESS_UNKNOWN;
         break;
+    case AARCH64_EC_FP_ACCESS:
+        out->reason = INTR_REASON_PROTECTION;
+        out->access = INTR_ACCESS_UNKNOWN;
+        break;
     default:
         out->reason = INTR_REASON_OTHER;
         out->access = INTR_ACCESS_UNKNOWN;

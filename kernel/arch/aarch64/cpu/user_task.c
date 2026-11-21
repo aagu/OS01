@@ -633,6 +633,17 @@ void aarch64_user_task_sync(pt_regs_t *regs, const struct intr_event *event)
 #endif
 
     if (ec != A64_EC_SVC_LOWER) {
+        /* FP access at EL0 with CPACR_EL1.FPEN=0b11 is a kernel
+         * invariant violation (FPEN is set once per CPU at init and
+         * never cleared).  Stop loudly instead of killing FP-using
+         * tasks one by one. */
+        if (ec == AARCH64_EC_FP_ACCESS) {
+            log_err("[user-task] FATAL: FP access trap at EL0 with "
+                    "FPEN=0b11 esr=%lx elr=%lx\n",
+                    (unsigned long)esr, (unsigned long)regs->elr_el1);
+            for (;;)
+                arch_cpu_halt();
+        }
         /* Not an SVC: an eligible EL0 demand fault is filled and the
          * same PC is retried; every other fault keeps the old
          * termination path.  Policy exhaustion reports -ENOMEM. */

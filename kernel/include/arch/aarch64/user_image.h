@@ -56,8 +56,10 @@ struct aarch64_user_image;
 #define AARCH64_USER_STACK_HEADROOM UINT64_C(512)
 
 /* Initial EL0 PSTATE: EL0t (M = 0) with D/A/F masked and I enabled.
- * User code runs with interrupts on; the FP/SIMD trap stays masked
- * because the kernel explicitly disables FPEN. */
+ * User code runs with interrupts on.  F masks FIQ — it has nothing to
+ * do with FP/SIMD access (that is controlled solely by
+ * CPACR_EL1.FPEN, which the kernel sets to 0b11 on every CPU; per-task
+ * FP state is saved/restored by switch_to()). */
 #define AARCH64_USER_TASK_PSTATE  UINT64_C(0x340)
 
 /* Build an image from `bytes`/`size` with a `stack_pages`-page user
