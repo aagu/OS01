@@ -120,6 +120,11 @@ static bool xhci_hid_has_bound_devices(void)
     return false;
 }
 
+bool xhci_hid_keyboard_bound(void)
+{
+    return s_kind_bound[XHCI_HID_KEYBOARD];
+}
+
 bool xhci_hid_mouse_bound(void)
 {
     return s_kind_bound[XHCI_HID_MOUSE];

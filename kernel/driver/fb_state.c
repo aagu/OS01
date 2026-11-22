@@ -23,36 +23,12 @@
 #include <stdbool.h>
 #include <string.h>
 
-/* The input route (kernel/driver/input_route.c) is part of the x86 PS/2
- * chain and is therefore x86-selected, while this coordinator belongs
- * to the architecture-neutral driver set.  The references are weak so
- * that set still links on a platform without a PS/2 chain: there the
- * route is absent, no lease can exist, and every bind is refused with
- * -ENODEV. */
-#ifdef __aarch64__
-/* aarch64 has no PS/2 input-route chain yet; provide no-op stubs so
- * high-half AArch64 linking never sees undefined weak symbols at 0. */
-int input_route_bind(const void *view, struct file *kbd, struct file *mouse,
-                     uint64_t *generation, uint32_t *initial_modifiers)
-{
-    (void)view; (void)kbd; (void)mouse;
-    (void)generation; (void)initial_modifiers;
-    return -ENODEV;
-}
-void input_route_unbind(const void *view, uint64_t generation, int reason)
-{
-    (void)view; (void)generation; (void)reason;
-}
-int input_route_lease_live(const void **view, uint64_t *generation)
-{
-    (void)view; (void)generation;
-    return 0;
-}
-#else
+/* The input route (kernel/driver/input_route.c) is architecture-neutral,
+ * while hosttests that link fb_state.c without input_route.c rely on weak
+ * references so every bind is refused with -ENODEV when the route is absent. */
 #pragma weak input_route_bind
 #pragma weak input_route_unbind
 #pragma weak input_route_lease_live
-#endif
 
 /* ── Display coordinator private state ── */
 static spinlock_T display_state_lock;

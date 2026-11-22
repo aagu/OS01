@@ -12,12 +12,22 @@
 
 #define SUBSYS_PHASE_5        5
 #define SUBSYS_PHASE_6        6
+#define SUBSYS_PHASE_STORAGE  SUBSYS_PHASE_6
 #define SUBSYS_FLAG_OPTIONAL  (1 << 0)
 
 typedef int (*subsys_initcall_t)(void);
 
 int register_subsys(const char *name, int (*init)(void),
                     int phase, uint32_t flags);
+static inline int register_subsys_deps(const char *name, int (*init)(void),
+                                       int phase, uint32_t flags,
+                                       const char *const *requires,
+                                       unsigned require_count)
+{
+    (void)requires;
+    (void)require_count;
+    return register_subsys(name, init, phase, flags);
+}
 int subsys_status(const char *name);
 
 /* Host-test hook: receives each SUBSYS_INITCALL function pointer. */

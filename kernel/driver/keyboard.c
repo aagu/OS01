@@ -1,14 +1,10 @@
 #include <stddef.h>
 #include <stdbool.h>
 #include <driver/keyboard.h>
-#include <driver/i8042.h>
 #include <driver/input_ps2.h>
 #include <driver/input_route.h>
-#include <intr/interrupt.h>
-#include <arch/irq.h>
 #include <core/debug.h>
 #include <tty/tty.h>
-#include <arch/io.h>
 #include <arch/spinlock.h>
 #include <fs/devfs.h>
 #include <fs/vfs.h>
@@ -243,24 +239,6 @@ static void keyboard_translate_frame(const input_ps2_frame_t *frame,
 }
 
 // ═══════════════════════════════════════════════════════════
-//  Byte consumer — dispatched by the i8042 demux layer
-// ═══════════════════════════════════════════════════════════
-
-// Called by i8042_pump() with the i8042 lock HELD and local IRQs
-// disabled: must not touch the i8042 ports, re-take the i8042 lock,
-// sleep, or copy user memory.  Lock order: i8042 → route → NORMAL
-// queue/poll.
-//
-// The byte is handed to the input route and NOTHING else happens here:
-// the route frames it into a COMPLETE sequence, updates the physical
-// key state and publishes the sequence either to the legacy NORMAL
-// path (ring + console TTY) or to the leased ACTIVE path.
-static void kbd_consume(uint8_t sc)
-{
-    input_route_keyboard_byte(sc);
-}
-
-// ═══════════════════════════════════════════════════════════
 //  The NORMAL path — the legacy /dev/keyboard ring and the console
 //  TTY.  The route calls these while it holds its own lock, so the
 //  ring / poll lock below is always taken INSIDE the route lock
@@ -291,12 +269,11 @@ static void keyboard_publish_normal_frame(const input_ps2_frame_t *frame,
     if (kbd_tty) {
         keyboard_translate_frame(frame, modifiers);
     } else {
-        // One-shot: a keyboard byte arrived before the TTY was set up.
-        // Write a lock-free debug marker to serial.
+        // One-shot: a keyboard frame arrived before the TTY was set up.
         static int warned = 0;
         if (!warned) {
             warned = 1;
-            arch_outb(0x3F8, '!');  // single byte — visible in serial output
+            debug_irq("kbd: frame arrived before tty ready\n");
         }
     }
 }
@@ -348,18 +325,6 @@ const struct devfs_ops keyboard_ops = {
     .poll_file    = input_route_poll,
 };
 
-// ── IRQ1 handler ──────────────────────────────────────────────
-// The IRQ line is only a wake-up hint: the shared i8042 layer owns
-// the bytes and decides per byte (status bit 5) whether it is a
-// keyboard or aux (mouse) byte.  pump()'s negative return (bounded
-// drain gave up on a stuck status line) is benign here — the next
-// IRQ retries.
-static void keyboard_handler(uint64_t nr __attribute__((unused)), uint64_t parameter __attribute__((unused)),
-                      pt_regs_t *regs __attribute__((unused)))
-{
-    (void)i8042_pump();
-}
-
 // ═══════════════════════════════════════════════════════════
 //  Public API
 // ═══════════════════════════════════════════════════════════
@@ -373,15 +338,6 @@ void keyboard_set_tty(tty_t *tty)
 tty_t *keyboard_get_tty(void)
 {
     return kbd_tty;
-}
-
-// Drain the 8042 output buffer through the shared demux layer.
-// Must be called from task context (shares the consumer's static
-// e0_prefix state with the IRQ handler — safe because both run
-// under the i8042 lock while ingesting).
-void keyboard_poll(void)
-{
-    (void)i8042_pump();
 }
 
 int keyboard_read_scancodes(uint8_t *buffer, int size)
@@ -448,33 +404,6 @@ int keyboard_devfs_read(vfs_node_t *node, uint64_t offset,
 //  Init
 // ═══════════════════════════════════════════════════════════
 
-// Enable keyboard IRQ generation at the PS/2 controller level.
-// The controller's command byte bit 0 (keyboard interrupt enable)
-// may be 0 after UEFI boot — without it, IRQ1 never fires.
-// Runs the read-modify-write as two i8042 transactions; returns 0 on
-// success, negative when the controller failed to answer.
-static int keyboard_enable_irq(void)
-{
-    uint8_t cmd;
-    if (i8042_read_command_byte(&cmd) != I8042_OK)
-        return -1;
-
-    debug_irq("kbd: PS/2 command byte was %#x", cmd);
-
-    // Bit 0: keyboard interrupt enable
-    // Bit 2: system flag (tell controller we passed POST)
-    // Bit 3: keyboard enable (0 = enable, 1 = disable)
-    cmd |= 0x01;   // enable IRQ1
-    cmd |= 0x04;   // set system flag
-    cmd &= ~0x08;  // ensure keyboard is enabled
-
-    if (i8042_write_command_byte(cmd) != I8042_OK)
-        return -1;
-
-    debug_irq(" → %#x\n", cmd);
-    return 0;
-}
-
 static bool kbd_input_initialized;
 
 void keyboard_input_init(void)
@@ -499,56 +428,3 @@ void keyboard__test_reset(void)
     input_route_init();
 }
 #endif
-
-int keyboard_init(void)
-{
-    // Initialise the route and NORMAL sink first (idempotent) so USB
-    // keyboard input remains usable even if i8042 probing fails.
-    keyboard_input_init();
-
-    // Shared controller layer first, then claim the keyboard bytes.
-    i8042_init();
-    i8042_set_kbd_consumer(kbd_consume);
-
-    if (keyboard_enable_irq() != 0)
-        goto fail;
-
-    uint32_t kbd_gsi = arch_irq_isa_to_gsi(1);
-    if (register_irq(kbd_gsi, NULL, &keyboard_handler, 0, IRQF_TRIGGER_EDGE, "keyboard") != 1) {
-        // Best-effort rollback: drop the IRQ-enable bit again so an
-        // enabled but unhandled IRQ1 cannot storm the CPU.
-        uint8_t cmd;
-        if (i8042_read_command_byte(&cmd) == I8042_OK)
-            i8042_write_command_byte(cmd & ~(uint8_t)0x01);
-        goto fail;
-    }
-
-    return 0;
-
-fail:
-    // Leave no half-installed consumer behind: bytes pumped after a
-    // failed init must go nowhere (no ring, no TTY, no poller wakes).
-    i8042_set_kbd_consumer(NULL);
-    return -1;
-}
-
-#include <subsys/subsys.h>
-// Register this driver into the platform's subsystem table. The
-// _register function is collected by arch_register_subsys() at boot via
-// the .subsys_init linker section; it calls register_subsys() to queue
-// the init wrapper for subsys_init_phase() to run later. The split
-// (register vs init) ensures each driver's init runs ONCE — at the
-// right phase — and never during the .subsys_init pass (which would
-// race init order with sibling drivers).
-static int _keyboard_init_wrapper(void)
-{
-    // Propagate the real status: subsys_init_phase maps ret != 0 to
-    // initialized = -1, so subsys_status("keyboard") becomes != 1.
-    return keyboard_init();
-}
-static int _keyboard_register(void)
-{
-    return register_subsys("keyboard", _keyboard_init_wrapper,
-                           SUBSYS_PHASE_5, SUBSYS_FLAG_OPTIONAL);
-}
-SUBSYS_INITCALL(_keyboard_register);

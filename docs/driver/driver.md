@@ -739,10 +739,11 @@ typedef struct hw_int_type {
 | 4 | 定时器 | `timer_init()` | 是 |
 | 4 | PIT | `pit_init()` | 可选 |
 | 4 | LAPIC 定时器 | `lapic_timer_init()` | 可选 |
-| 5 | 键盘 | `keyboard_init()` | 可选 |
 | 5 | 串口 IRQ | `init_serial_irq()` | 是 |
-| 6 | AHCI | `ahci_init()` | 可选 |
-| 6 | PS/2 鼠标 | `mouse_init()` | 可选（探测 500 ms 内放弃）|
+| 6 (`SUBSYS_PHASE_STORAGE`) | 设备/总线 + xHCI | `device_boot_init()` | 是 |
+| 6 (`SUBSYS_PHASE_STORAGE`) | USB HID | `xhci_hid_init()` | 可选（依赖 `device-boot`）|
+| 6 (`SUBSYS_PHASE_STORAGE`) | 键盘裁决 | `x86_keyboard_arbitrate_init()`（USB-HID 优先，按需 `keyboard_init()`）| 可选（依赖 `usb-hid`）|
+| 6 (`SUBSYS_PHASE_STORAGE`) | 鼠标裁决 | `x86_mouse_arbitrate_init()`（USB-HID 优先，按需 `mouse_init()`）| 可选（依赖 `usb-hid`、`keyboard`）|
 
 ### Phase 7-9（硬编码在 kernel_main 中）
 
@@ -796,6 +797,18 @@ typedef struct hw_int_type {
 * `kernel/include/intr/pic.h` - PIC/IOAPIC 控制器头文件
 * `kernel/include/time/timer.h` - 定时器设备头文件
 * `kernel/include/block/blockdev.h` - 块设备层头文件
+
+## 多硬件生产者与 SUBSYS_INITCALL 裁决规范
+
+当同一逻辑设备（如 `/dev/keyboard`、`/dev/mouse`、块设备或网卡）存在多种可选硬件后端/总线生产者（如 `USB-HID`、`i8042 PS/2`、`virtio-input`）时，驱动开发与初始化必须遵循以下四条规范：
+
+1. **消费抽象与路由中立化**：逻辑设备节点（`devfs_ops`）、事件队列与路由层留在 `kernel/driver/`，不依赖任何具体总线或控制器（如 `i8042`、`xHCI`、`virtio-mmio`）。
+2. **硬件生产者彼此零耦合**：各硬件生产者只负责探测/驱动自身硬件并向统一路由/核心层注入事件；**禁止**在某个硬件驱动内部直接 `#include`、探测或退避另一套硬件驱动（例如 `ps2_kbd.c`/`ps2_mouse.c` 不得引用 `xhci_hid.h` 或反向退避，`xhci_hid.c` 也不得感知 `i8042`）。
+3. **集中到 `SUBSYS_INITCALL` 裁决层**：设备探测顺序、优先级与启用裁决由独立的平台裁决单元通过 `SUBSYS_INITCALL` + `register_subsys_deps()` 声明拓扑依赖并在统一相位完成：
+   - 高优先级总线/热插拔后端先完成探测（如 `device-boot` → `usb-hid`）；
+   - 裁决入口按优先级检查已就绪后端，命中则跳过低优先级硬件探测，未命中再按需调用对应硬件驱动的初始化函数；
+   - 例：`kernel/arch/x86_64/driver/input_arbitrate.c` 在 `SUBSYS_PHASE_STORAGE` 依赖 `usb-hid`，优先使用 `xhci_hid_keyboard_bound()` / `xhci_hid_mouse_bound()`，仅在未绑定 USB-HID 时按需调用 `ps2_kbd.c::keyboard_init()` / `ps2_mouse.c::mouse_init()`。
+4. **devfs 节点按实际可用性注册**：`arch_boot_device_nodes()` 仅在子系统就绪或至少一个硬件后端已绑定时注册对应 `/dev/*` 节点。
 
 ## 扩展驱动程序
 

@@ -276,6 +276,8 @@ See [验证报告](../superpowers/reports/2026-11-08-boot-4-validation.md).
 
 ---
 
+- **Multi-producer arbitration**: when a logical device has multiple competing hardware producers (e.g. `USB-HID` vs `i8042 PS/2`), individual hardware drivers must not probe or back off against each other; declare topological ordering and perform priority arbitration in a dedicated `SUBSYS_INITCALL` coordinator using `register_subsys_deps()` (see [多硬件生产者与 SUBSYS_INITCALL 裁决规范](../driver/driver.md#多硬件生产者与-subsys_initcall-裁决规范)).
+
 ## File Locations
 
 | File | Purpose |

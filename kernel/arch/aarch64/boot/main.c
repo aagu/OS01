@@ -39,6 +39,8 @@
 #include <selftest/boot_contract_fixture.h>
 #include <subsys/subsys.h>
 #include <fs/devfs.h>            /* devfs_register_chrdev (/dev/mem) */
+#include <driver/keyboard.h>
+#include <driver/mouse.h>
 #include <errno.h>   /* SUBSYS_PHASE_4 macro + subsys_init_phase() decl
                               * for SUBSYS_INITCALL Task 2 R3-1 register+dispatch
                               * pair. Lightweight header — only <stdint.h>
@@ -880,6 +882,14 @@ int arch_boot_device_nodes(void)
     int rc = devfs_register_chrdev("mem", NULL, &mem_dev_ops);
     if (rc < 0)
         return rc;
+    keyboard_input_init();
+    rc = devfs_register_chrdev("keyboard", NULL, &keyboard_ops);
+    if (rc != 0 && rc != -EEXIST)
+        log_warn("[keyboard] devfs_register_chrdev(\"keyboard\") failed (%d)\n", rc);
+    mouse_input_init();
+    rc = devfs_register_chrdev("mouse", NULL, &mouse_ops);
+    if (rc != 0 && rc != -EEXIST)
+        log_warn("[mouse] devfs_register_chrdev(\"mouse\") failed (%d)\n", rc);
     if (Pos.FB_addr) {
         if (devfs_register_chrdev("fb", NULL, &fb_ops) < 0)
             log_warn("[fb] devfs_register_chrdev(\"fb\") failed\n");

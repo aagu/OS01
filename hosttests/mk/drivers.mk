@@ -13,11 +13,29 @@ KBD_HOST_CFLAGS := $(HOST_CFLAGS) $(KBD_SHADOW_INC) $(KERNEL_INC) \
     -DOS01_HOST_TEST -D_ARCH_IO_H -D_ARCH_SPINLOCK_H -D_ARCH_CPU_H \
     -include $(TEST_MOCK)/i8042_test_runtime.h
 
-$(TEST_BLD)/i8042_production.o: $(TESTS_DIR)/kernel/driver/i8042.c \
+$(TEST_BLD)/i8042_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/i8042.c \
 		$(TESTS_DIR)/kernel/include/driver/i8042.h \
 		$(TEST_MOCK)/i8042_test_runtime.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(I8042_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/input_arbitrate_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/input_arbitrate.c \
+		$(TESTS_DIR)/kernel/include/driver/keyboard.h \
+		$(TESTS_DIR)/kernel/include/driver/mouse.h \
+		$(TESTS_DIR)/kernel/include/driver/xhci_hid.h \
+		$(TEST_MOCK)/kbd_include/subsys/subsys.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(KBD_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/ps2_kbd_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/ps2_kbd.c \
+		$(TESTS_DIR)/kernel/include/driver/keyboard.h \
+		$(TESTS_DIR)/kernel/include/driver/i8042.h \
+		$(TEST_MOCK)/i8042_test_runtime.h \
+		$(TEST_MOCK)/kbd_include/intr/interrupt.h \
+		$(TEST_MOCK)/kbd_include/core/debug.h \
+		$(TEST_MOCK)/kbd_include/subsys/subsys.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(KBD_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/keyboard_production.o: $(TESTS_DIR)/kernel/driver/keyboard.c \
 		$(TESTS_DIR)/kernel/include/driver/keyboard.h \
@@ -59,6 +77,8 @@ $(TEST_BLD)/test_i8042_demux.o: $(TEST_CASES)/test_i8042_demux.c \
 
 $(TEST_BLD)/test_i8042_demux.elf: $(TEST_BLD)/test_i8042_demux.o \
 		$(TEST_BLD)/i8042_production.o \
+		$(TEST_BLD)/input_arbitrate_production.o \
+		$(TEST_BLD)/ps2_kbd_production.o \
 		$(TEST_BLD)/keyboard_production.o \
 		$(TEST_BLD)/input_route_kbd_production.o \
 		$(TEST_BLD)/input_ps2_production.o
@@ -83,6 +103,10 @@ $(TEST_BLD)/test_mouse_proto.elf: $(TEST_BLD)/test_mouse_proto.o $(TEST_BLD)/mou
 test_mouse_proto: $(TEST_BLD)/test_mouse_proto.elf
 	$<
 
+$(TEST_BLD)/ps2_mouse_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/ps2_mouse.c $(TESTS_DIR)/kernel/include/driver/mouse.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(KBD_HOST_CFLAGS) -c $< -o $@
+
 $(TEST_BLD)/mouse_init_mouse_production.o: $(TESTS_DIR)/kernel/driver/mouse.c $(TESTS_DIR)/kernel/include/driver/mouse.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(KBD_HOST_CFLAGS) -c $< -o $@
@@ -100,6 +124,7 @@ $(TEST_BLD)/test_mouse_init.o: $(TEST_CASES)/test_mouse_init.c $(TESTS_DIR)/kern
 	$(HOST_CC) $(KBD_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_mouse_init.elf: $(TEST_BLD)/test_mouse_init.o \
+		$(TEST_BLD)/ps2_mouse_production.o \
 		$(TEST_BLD)/mouse_init_mouse_production.o \
 		$(TEST_BLD)/mouse_init_route_production.o \
 		$(TEST_BLD)/mouse_init_ps2_production.o

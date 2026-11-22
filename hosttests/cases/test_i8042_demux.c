@@ -735,7 +735,7 @@ static void test_keyboard_init_fails_on_register_irq(void)
     /* registration happened at phase 5, optional; wrapper propagates */
     int idx = kbd_subsys_index("keyboard");
     assert_true(idx >= 0);
-    assert_eq(SUBSYS_PHASE_5, kbd_subsys[idx].phase);
+    assert_eq(SUBSYS_PHASE_STORAGE, kbd_subsys[idx].phase);
     assert_true(kbd_subsys[idx].flags & SUBSYS_FLAG_OPTIONAL);
     assert_true(kbd_subsys[idx].init() != 0);   /* still failing */
 

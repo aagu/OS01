@@ -200,11 +200,15 @@ void x86_64_boot_devices(const struct boot_context *bootctx)
 
 int x86_64_boot_device_nodes(void)
 {
-    keyboard_input_init();
-    int ret = devfs_register_chrdev("keyboard", NULL, &keyboard_ops);
-    if (ret != 0 && ret != -EEXIST) {
-        log_err("keyboard: failed to register /dev/keyboard (%d)\n", ret);
-        return ret;
+    int ret;
+
+    if (subsys_status("keyboard") == 1 || xhci_hid_keyboard_bound()) {
+        keyboard_input_init();
+        ret = devfs_register_chrdev("keyboard", NULL, &keyboard_ops);
+        if (ret != 0 && ret != -EEXIST) {
+            log_err("keyboard: failed to register /dev/keyboard (%d)\n", ret);
+            return ret;
+        }
     }
 
     if (subsys_status("mouse") == 1 || xhci_hid_mouse_bound()) {
