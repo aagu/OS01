@@ -36,10 +36,17 @@
 #endif
 #endif
 
-/* OS01_HAS_NET: the lwIP-backed socket fd paths inside kernel/fs/file.c and
- * kernel/fs/poll.c.  aarch64 does not build lwIP yet, so those FD_SOCKET
- * code blocks are compiled out while the fs syscalls stay hidden behind
- * OS01_SYSCALL_A64_SUBSET's non-fs entries. */
+/* OS01_HAS_NET: the lwIP-backed socket fd paths inside kernel/fs/file.c
+ * (the lwIP includes + weak socket_free() fallback, the file_free()
+ * socket teardown, and the file_read()/file_write() FD_SOCKET cases).
+ * aarch64 does not build lwIP yet, so those blocks are compiled out
+ * while the fs syscalls stay hidden behind OS01_SYSCALL_A64_SUBSET's
+ * non-fs entries.
+ *
+ * kernel/fs/poll.c is deliberately NOT gated: its FD_SOCKET branch
+ * compiles on both architectures and is only runtime-unreachable on
+ * aarch64, where no socket fd can exist because the socket syscalls stay
+ * hidden behind OS01_SYSCALL_A64_SUBSET. */
 #ifndef OS01_HAS_NET
 #if defined(__x86_64__)
 #define OS01_HAS_NET        1

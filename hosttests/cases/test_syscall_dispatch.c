@@ -178,10 +178,11 @@ int main(void)
         return 1;
     }
 
-    /* Numbers the AArch64 port does not serve: a socket call (net stays
-     * hidden behind OS01_HAS_NET=0), the unimplemented getpeername slot,
-     * futex (x86-only block), an out-of-range number, and a high-bit
-     * polluted number. */
+    /* Numbers the AArch64 port does not serve: a socket call (the
+     * socket group lives in the x86-only OS01_SYSCALL_A64_SUBSET
+     * block; OS01_HAS_NET=0 is why aarch64 could not serve it anyway),
+     * the unimplemented getpeername slot, futex (x86-only block), an
+     * out-of-range number, and a high-bit polluted number. */
     if (syscall_has_handler(SYS_socket) || syscall_has_handler(SYS_getpeername) ||
         syscall_has_handler(SYS_futex) ||
         syscall_has_handler(UINT64_MAX) ||
