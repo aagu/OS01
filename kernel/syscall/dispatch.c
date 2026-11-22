@@ -69,6 +69,12 @@ static const syscall_entry_t syscall_table[SYS_fsync + 1] = {
     [SYS_uname] = { sys_misc_dispatch, "uname" },
     [SYS_msync] = { sys_mm_dispatch, "msync" },
 #endif
+#if !defined(OS01_SYSCALL_A64_SUBSET) || OS01_HAS_USERSPACE
+    [SYS_time] = { sys_time_dispatch, "time" },
+    [SYS_gettimeofday] = { sys_time_dispatch, "gettimeofday" },
+    [SYS_nanosleep] = { sys_time_dispatch, "nanosleep" },
+    [SYS_times] = { sys_time_dispatch, "times" },
+#endif
 
 /* The fs syscall group is served by the arch-neutral kernel/syscall/sys_fs.c.
  * x86 serves it unconditionally; aarch64 serves it together with the VFS
@@ -114,10 +120,6 @@ static const syscall_entry_t syscall_table[SYS_fsync + 1] = {
     [SYS_getrlimit] = { sys_resource_dispatch, "getrlimit" },
     [SYS_setrlimit] = { sys_resource_dispatch, "setrlimit" },
     [SYS_futex] = { sys_mm_dispatch, "futex" },
-    [SYS_time] = { sys_time_dispatch, "time" },
-    [SYS_gettimeofday] = { sys_time_dispatch, "gettimeofday" },
-    [SYS_nanosleep] = { sys_time_dispatch, "nanosleep" },
-    [SYS_times] = { sys_time_dispatch, "times" },
     [SYS_putchar] = { sys_misc_dispatch, "putchar" },
     [SYS_getrandom] = { sys_misc_dispatch, "getrandom" },
     [SYS_sync] = { sys_misc_dispatch, "sync" },

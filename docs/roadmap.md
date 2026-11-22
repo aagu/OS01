@@ -13,7 +13,7 @@
 |-------|------|---------|------|
 | **P0** | 工程与测试基础设施 | 0 | flake 账本入库已于 2026-11-21 闭环（见 [`changelog.md`](changelog.md)） |
 | **P1** | 安全加固 | 2 | UBSan/KASan 后续项（v1 已于 2026-11-22 闭环）+ ASLR 剩余范围（栈基址随机化 / aarch64） |
-| **P2** | aarch64 适配 | 12 | 内存与执行体 0 · 能力齐平 7 · 架构统一 0 · 真机阻断 5 |
+| **P2** | aarch64 适配 | 11 | 内存与执行体 0 · 能力齐平 6 · 架构统一 0 · 真机阻断 5 |
 | **P2** | 架构治理 / 扩展性 | 0 | 新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填该节 |
 | **P3** | GUI | 7 | GUI-4/5/6 + 优化与验证 4 |
 | **P4** | 硬件适配 | 5 | USB 2 · NVMe · HPET · ACPI S3 |
@@ -47,11 +47,10 @@ AAGU-5 arch entropy facade（STRONG-only 控制流）→ 用户堆与 ELF 映射
 
 ### 能力齐平：对标 x86_64 的剩余缺口（2026-11-21 扫描，2026-11-22 复核）
 
-范围：能力门（`kernel/include/arch/features.h`）+ 共享 syscall 表（`kernel/syscall/dispatch.c`）+ 驱动/设备注册面 + userland 应用与 E2E 套件的全量对比。差距呈「外设与生态 > syscall > 执行体细节」梯度：执行体核心（fork/exec/信号/SMP 用户调度）已收口，本节只记**此前未立任务的缺口**。头部事实：`OS01_HAS_NET` / `OS01_HAS_PCI` / `OS01_HAS_USB` 在 aarch64 全为 0；共享 syscall 表 x86_64 服务 **77** 项、aarch64 产品态 **51** 项（15 共享原生 + 32 fs 组 + 4 misc，与 changelog 2026-11-18「47 项」口径衔接），缺 26 项 = 网络 13 · 时间 4（`time`/`gettimeofday`/`nanosleep`/`times`）· 会话 5（`umask`/`setpgid`/`getpgid`/`setsid`/`getsid`）· rlimit 2 · `futex` 1 · `putchar` 1。
+范围：能力门（`kernel/include/arch/features.h`）+ 共享 syscall 表（`kernel/syscall/dispatch.c`）+ 驱动/设备注册面 + userland 应用与 E2E 套件的全量对比。差距呈「外设与生态 > syscall > 执行体细节」梯度：执行体核心（fork/exec/信号/SMP 用户调度）已收口，本节只记**此前未立任务的缺口**。头部事实：`OS01_HAS_NET` / `OS01_HAS_PCI` / `OS01_HAS_USB` 在 aarch64 全为 0；共享 syscall 表 x86_64 服务 **79** 项、aarch64 产品态 **57** 项（15 共享原生 + 33 fs 组 + 5 misc/msync + 4 time 组），缺 22 项 = 网络 13 · 会话 5（`umask`/`setpgid`/`getpgid`/`setsid`/`getsid`）· rlimit 2 · `futex` 1 · `putchar` 1。
 
 | 任务 | 内容与完成条件 | 前置 |
 |------|----------------|------|
-| 时间 syscall 组 | 解除 `OS01_SYSCALL_A64_SUBSET` 隐藏的 `sys_time_dispatch` 四项（`kernel/syscall/dispatch.c:114-117`）。handler 架构中立（`kernel/syscall/sys_time.c`：`arch_clocksource` facade + `blocker_wait`/`wakeup_ns` 条件回调），libc 包装已备（`libc/unistd/nanosleep.c`、`sleep.c`）。验收 = aarch64 guest 内 busybox `sleep` 真睡、时钟读数随 QEMU 虚拟时间前进；`SYS_time` / `gettimeofday` 自身仍是写 0（1970）的 MVP 桩，且桩在**架构中立**的 `kernel/syscall/sys_time.c:24-45`（非 x86 专属路径），真墙上时钟不在本项 | 独立（aarch64 clocksource ✅，`kernel/arch/aarch64/platform/clocksource.c`） |
 | 会话/资源 syscall 组 | 两档：`getrlimit`/`setrlimit` 的 `sys_resource_dispatch` 架构中立（`kernel/syscall/sys_resource.c`），解除隐藏即得；`umask` 与进程组四项的 `sys_proc_dispatch` 现为 x86 专属实现（`kernel/arch/x86_64/syscall/sys_proc.c:36`），须先下沉到 `kernel/syscall/` 再解除 aarch64 隐藏；`putchar` 需在 aarch64 自有 misc handler 补桩——**现 `kernel/arch/aarch64/syscall/sys_misc.c` 只服务 getrandom/sync/reboot/uname 四项（dispatch 入口 `:25`），尚无 `putchar` 分支**。验收 = aarch64 guest 内 `setsid`/进程组行为与 x86 一致 | 独立（SIGTSTP/SIGCONT 停止状态机是 P5「作业控制」既有缺口，两架构共用，不在本项） |
 | futex(2) 移植 | `kernel/arch/aarch64/sync/futex.c` 已建 64 桶等待队列但无 syscall 到达（头注释自述任务说明）；把 x86 `do_futex_wait`/`wake` 的用户地址物理页解析（x86 走 4KB/2MB 叶 helper）迁到 aarch64 leaf walker（`kernel/include/arch/aarch64/user_vm_leaf.h`），解除 `SYS_futex` 隐藏。P5 clone/pthread 链在 aarch64 侧的硬前置 | EL0 用户页表叶游走 ✅（user_vm_leaf） |
 | 网络栈接入（`OS01_HAS_NET` 0→1） | 三段：① lwIP 纳入 aarch64 profile 构建（现 aarch64 不编译 lwIP，`kernel/arch/aarch64/make.config:46` `ARCH_ENABLE_LWIP = 0`，x86 同文件 `:46` = 1）；② virtio-net 传输层——现驱动是 x86 PCI legacy IO-port 传输（`kernel/driver/virtio-net.c:1-4`，内联 `inl/outl`），aarch64 需参照 virtio-blk-mmio（`kernel/arch/aarch64/driver/virtio_blk.c`）实现 MMIO transport，或先抽公共 virtio 设备核心再两架构分接；③ 翻门解锁 `kernel/fs/file.c` 的 4 处 FD_SOCKET 块（`#if OS01_HAS_NET`：`:30-43` / `:181` / `:942-1012` / `:1280-1328`）并解除 13 项 socket syscall 隐藏（`kernel/syscall/dispatch.c:123-135`）；`kernel/fs/poll.c:328-350` 的 FD_SOCKET 分支**无编译门**，仅因 socket syscall 隐藏而运行时不可达，无需翻门。验收 = aarch64 上 `SUITE=network` 等价 E2E 跑通 | 独立；E2E 依赖本节「E2E 套件 aarch64 化」 |
@@ -201,6 +200,7 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 
 | 闭环项 | 日期 | 详情 |
 |--------|------|------|
+| **aarch64 时间 syscall 组解禁**（`kernel/syscall/dispatch.c` 在 `OS01_HAS_USERSPACE=1` 下对 aarch64 开放 `sys_time_dispatch` 四项 `SYS_time`/`gettimeofday`/`nanosleep`/`times`，`kernel/Makefile` 纳入 `syscall/sys_time.c`；2 核 QEMU 实测 `/bin/timeit /bin/busybox sleep 1` 真睡 `real 1.021863`） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [syscall](syscall/syscall.md) |
 | **inode 级 `MAP_SHARED` 剩余五项闭环**（磁盘回写 `msync`/`fsync`/`sync`/拆卸落盘、fd I/O 读写与共享页双向覆盖对齐、`vfs_truncate` 撤页与尾页清零回收、POSIX `shm_open`/`shm_unlink` + `SYS_msync`/`SYS_fsync` ABI、`x86_64` 用户 VM 全链接入共享对象注册表） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [cow-mmap](memory/cow-mmap.md#3-跨进程-inode-级-map_shared2026-11-22aarch64) · [syscall](syscall/syscall.md) |
 | **USB boot M0 固件检查点退役**（`USB_BOOT_CASE=firmware` 子用例删除：过期的 `rc=-19` 预期失败断言、case 表与 make 白名单一并收敛；其正面证明——xHCI 枚举 + MSC 发布 + GUID 选盘 usba 根 + 两个分区标记——并入 `readonly` 的成功证据链，并同步 `mk/components/run.mk` 的帮助文本与三处过期注释） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [build](build/build.md) · [driver](driver/driver.md) |
 | **跨进程 inode 级 `MAP_SHARED`**（架构中立共享对象注册表 `kernel/memory/shared_backing.c`，键 `(挂载实例, inode)`、匿名对象 fork 继承；aarch64 mmap/fork/uaccess/拆卸全链接入；产品 E2E `USER_RUNTIME_CASE=map-shared` 实跑 `/bin/test_map_shared` 覆盖会合/偏移隔离/rename/unlink/权限上限/两种拆卸入口） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [cow-mmap](memory/cow-mmap.md#3-跨进程-inode-级-map_shared2026-11-22aarch64) · [arch.md](arch.md) |

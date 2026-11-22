@@ -7,6 +7,10 @@
 
 ## 2026-11-22
 
+- feat(aarch64,syscall): **aarch64 时间 syscall 组解禁**（闭合 `docs/roadmap.md` P2「能力齐平 — 时间 syscall 组」）：
+  - **解禁四项时间 syscall**（`kernel/syscall/dispatch.c`、`kernel/Makefile`）：将 `sys_time_dispatch` 四项（`SYS_time`、`SYS_gettimeofday`、`SYS_nanosleep`、`SYS_times`）从 `#ifndef OS01_SYSCALL_A64_SUBSET` 移至 `#if !defined(OS01_SYSCALL_A64_SUBSET) || OS01_HAS_USERSPACE`，保留 `OS01_HAS_USERSPACE=0` 自测变体冻结的 15 项子集契约；`kernel/Makefile` 为 aarch64 纳入架构中立的 `syscall/sys_time.c`（复用 `arch_clocksource_read_ns()` 与 `blocker_wait(BLOCKER_NANOSLEEP)`）。
+  - **验收**：`hosttests/cases/test_syscall_dispatch.c` 补入 aarch64 userspace 时间组断言；`make test-host`、`make test-static` 全绿；aarch64 2 核 QEMU 实测 `/bin/timeit /bin/busybox sleep 1` 输出 `real 1.021863`（真睡且虚拟时钟前进）。`SYS_time`/`gettimeofday` 维持写 0（1970）MVP 桩。
+
 - feat(memory,fs,libc,x86_64,aarch64): **inode 级 `MAP_SHARED` 剩余五项闭环**（闭合 `docs/roadmap.md` P2「inode 级 `MAP_SHARED` 的剩余范围」全部五项）：
   - **① 磁盘回写**（`kernel/memory/shared_backing.c`、`kernel/arch/{x86_64,aarch64}/memory/`）：`shared_page_node` 增加 `dirty` 标记，两架构在可写装页/写故障/uaccess/mprotect 扩写及 x86 `PAGE_DIRTY` 摘页时置位；`shared_backing_writeback_range()` 使用 4 KiB bounce buffer 在注册表锁外调用 `vfs_write()`（按 `node->size` 截断，绝不越过 EOF 扩长文件），由 `msync(MS_SYNC)`、`fsync(fd)`、`SYS_sync`、`munmap` 与 `backing_destroy()`（exec/exit 末引用释放）触发落盘。
   - **② fd I/O 一致性**（`kernel/fs/file.c`、`kernel/memory/shared_backing.c`）：`fd_read` 在 `FD_VFS` 读取后叠加 `shared_backing_read_overlay()`，未落盘的共享页修改对 `read()` 立即可见；`fd_write`（含 `O_APPEND` 的 `vfs_append`）在写入成功后叠加 `shared_backing_write_overlay()`，通过 fd 写入的数据对活跃 `MAP_SHARED` 映射立即可见。
