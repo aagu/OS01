@@ -35,6 +35,7 @@
 #include <memory/pmm.h>
 #include <memory/slab.h>  /* kmalloc / kfree (phdr array) */
 #include <core/debug.h>
+#include <log/log.h>      /* log_err (PIE reloc rejection) */
 #include <arch/elf.h>
 #include <errno.h>
 #include <stdint.h>
@@ -340,6 +341,16 @@ int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
                 const elf64_rela_t *rel = &chk->items[j];
                 uint64_t dst_va = bias + rel->r_offset;
                 uint64_t *pte = vmm_pt_walk(pgd, dst_va & PAGE_4K_MASK, 0, 0);
+                /* Every PT_LOAD page is mapped above before patching; a
+                 * missing/absent leaf here means the reloc targets memory
+                 * outside the image — reject instead of dereferencing. */
+                if (!pte || !(*pte & PAGE_FLAGS_VALID_BIT)) {
+                    log_err("elf_load: PIE reloc %u/%u targets unmapped va=%#lx "
+                            "(bias=%#lx r_offset=%#lx)\n",
+                            j, chk->count, dst_va, bias, rel->r_offset);
+                    rc = -ENOEXEC;
+                    goto rollback;
+                }
                 uint64_t pa = x86_pte_4k_pa(*pte);
                 uint64_t val = bias + (uint64_t)rel->r_addend;
                 memcpy((void *)((uintptr_t)Phy_To_Virt(pa) +

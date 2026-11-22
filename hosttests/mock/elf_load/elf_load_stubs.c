@@ -14,6 +14,7 @@ extern int posix_memalign(void **memptr, size_t alignment, size_t size);
 
 elf_load_state_t elf_load_state;
 int g_log_level = 3;
+void _log_err_impl(const char *f, ...) { (void)f; }
 
 /* ── Queueable STRONG RNG stub ── */
 #define RNG_QUEUE_MAX 32
