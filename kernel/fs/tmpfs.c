@@ -238,7 +238,17 @@ static int tmpfs_vfs_read(struct vfs_node *node, uint64_t offset,
         uint64_t blk_idx = pos / 4096;
         uint32_t blk_off = (uint32_t)(pos % 4096);
         tmpfs_block_ptr_t *bp = tmpfs_find_block(tn, blk_idx);
-        if (!bp) { tmpfs_unlock_ctx(ctx); return -1; }
+        if (!bp) {
+            /* Sparse hole (e.g. truncate-extend): zero-fill the chunk and
+             * keep walking — matches the aarch64 file fault zero-fill. */
+            uint32_t chunk = 4096 - blk_off;
+            if (chunk > remaining) chunk = (uint32_t)remaining;
+            memset(out, 0, chunk);
+            out       += chunk;
+            pos       += chunk;
+            remaining -= chunk;
+            continue;
+        }
 
         uint32_t chunk = 4096 - blk_off;
         if (chunk > remaining) chunk = (uint32_t)remaining;
@@ -604,6 +614,13 @@ static int tmpfs_vfs_rename(struct vfs_node *olddir, const char *oldname,
 
     int dst_idx = tmpfs_find_child(nd, newname);
     tmpfs_node_t *dst_child = (dst_idx >= 0) ? nd->children[dst_idx] : NULL;
+    if (dst_child && dst_child == od->children[idx]) {
+        /* Same internal node (e.g. oldpath == newpath): POSIX no-op success.
+         * Keeps the dirent, link count and active node intact so callers
+         * holding the old node keep a usable reference. */
+        tmpfs_unlock_ctx(ctx);
+        return 0;
+    }
 
     // Ensure capacity in newdir before modifying any node state
     if (!dst_child && nd->child_count >= nd->child_cap) {

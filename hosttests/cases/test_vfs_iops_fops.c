@@ -683,6 +683,190 @@ TEST_FUNC(test_fat32_rmdir_open_dir_deferred_reclaim) {
     assert_eq(1, fs->test_reclaim_count);
 }
 
+TEST_FUNC(test_tmpfs_read_truncate_holes) {
+    vfs_init();
+    vfs_test_set_sched_ready(true);
+    assert_eq(0, vfs_mount_fs("tmpfs", "/", NULL, NULL));
+
+    vfs_node_t *f = NULL;
+    assert_eq(0, vfs_create_file("/holes.bin", "/", &f));
+    assert_not_null(f);
+
+    /* Only truncate-extend an empty file: size 8193, blocks stay
+     * unallocated — every read below spans sparse holes. */
+    assert_eq(0, vfs_truncate(f, 8193));
+
+    static char zeros[8193];
+    char *buf = malloc(8193);
+    assert_not_null(buf);
+
+    /* Full-file read covering three hole blocks (loop segmentation) */
+    memset(buf, 0xA5, 8193);
+    assert_eq(8193, vfs_read(f, 0, 8193, buf));
+    assert_eq(0, memcmp(buf, zeros, 8193));
+
+    /* Straddle the blk0 -> blk1 boundary */
+    memset(buf, 0xA5, 64);
+    assert_eq(6, vfs_read(f, 4094, 6, buf));
+    assert_eq(0, memcmp(buf, zeros, 6));
+
+    /* Straddle the blk2 boundary down to EOF */
+    memset(buf, 0xA5, 64);
+    assert_eq(13, vfs_read(f, 8180, 40, buf));
+    assert_eq(0, memcmp(buf, zeros, 13));
+
+    /* 4095 .. 8193: ends exactly at EOF */
+    memset(buf, 0xA5, 8193);
+    assert_eq(4098, vfs_read(f, 4095, 4098, buf));
+    assert_eq(0, memcmp(buf, zeros, 4098));
+
+    /* Short read clamped at the last byte: 1 of 2 requested */
+    memset(buf, 0xA5, 64);
+    assert_eq(1, vfs_read(f, 8192, 2, buf));
+    assert_eq(0, memcmp(buf, zeros, 1));
+
+    /* EOF reads */
+    assert_eq(0, vfs_read(f, 8193, 4, buf));
+    assert_eq(0, vfs_read(f, 16384, 4, buf));
+
+    free(buf);
+    vfs_node_put(f);
+}
+
+TEST_FUNC(test_rename_same_file_keeps_identity) {
+    static const char payload[2] = { 'O', 'K' };
+    char rbuf[16];
+
+    /* ── ext2: same-path rename keeps disk inode identity ── */
+    vfs_init();
+    vfs_test_set_sched_ready(true);
+    format_mock_ext2_disk();
+    assert_eq(0, vfs_mount_fs("ext2", "/", &s_ram_block_dev, NULL));
+    vfs_node_t *r = vfs_lookup("/");
+    assert_not_null(r);
+    ext2_fs_t *efs = (ext2_fs_t *)r->mount->fs_data;
+    vfs_node_put(r);
+    assert_not_null(efs);
+
+    vfs_node_t *h = NULL;
+    assert_eq(0, vfs_create_file("/id.txt", "/", &h));
+    assert_not_null(h);
+    uint64_t ino_e = h->ino;
+    assert_eq(2, vfs_write(h, 0, 2, (void *)payload));
+
+    assert_eq(0, vfs_rename("/id.txt", "/id.txt", "/"));
+
+    vfs_node_t *n2 = vfs_lookup("/id.txt");
+    if (n2) {
+        assert_eq(ino_e, n2->ino);
+        assert_eq(1, n2->nlink);
+        assert_true((n2->node_flags & VFS_NODE_ORPHANED) == 0);
+        assert_eq(0, efs->test_reclaim_count);
+        memset(rbuf, 0, sizeof(rbuf));
+        assert_eq(2, vfs_read(n2, 0, sizeof(rbuf), rbuf));
+        assert_eq(0, memcmp(rbuf, payload, 2));
+        vfs_node_put(n2);
+    } else {
+        assert_not_null(n2);
+    }
+    vfs_node_put(h);
+
+    /* Release all old handles, then lookup again: content survives */
+    n2 = vfs_lookup("/id.txt");
+    if (n2) {
+        memset(rbuf, 0, sizeof(rbuf));
+        assert_eq(2, vfs_read(n2, 0, sizeof(rbuf), rbuf));
+        assert_eq(0, memcmp(rbuf, payload, 2));
+        vfs_node_put(n2);
+    } else {
+        assert_not_null(n2);
+    }
+
+    /* ── vfat: 8.3 case-alias rename resolves to the same dirent slot ── */
+    vfs_init();
+    vfs_test_set_sched_ready(true);
+    format_mock_fat32_disk();
+    assert_eq(0, vfs_mount_fs("vfat", "/", &s_ram_block_dev, NULL));
+    r = vfs_lookup("/");
+    assert_not_null(r);
+    fat32_fs_t *ffs = (fat32_fs_t *)r->mount->fs_data;
+    vfs_node_put(r);
+    assert_not_null(ffs);
+
+    h = NULL;
+    assert_eq(0, vfs_create_file("/mark.txt", "/", &h));
+    assert_not_null(h);
+    uint64_t ino_f = h->ino;
+    assert_eq(2, vfs_write(h, 0, 2, (void *)payload));
+
+    assert_eq(0, vfs_rename("/mark.txt", "/MARK.TXT", "/"));
+
+    n2 = vfs_lookup("/MARK.TXT");
+    if (n2) {
+        assert_eq(ino_f, n2->ino);
+        assert_eq(1, n2->nlink);
+        assert_true((n2->node_flags & VFS_NODE_ORPHANED) == 0);
+        assert_eq(0, ffs->test_reclaim_count);
+        memset(rbuf, 0, sizeof(rbuf));
+        assert_eq(2, vfs_read(n2, 0, sizeof(rbuf), rbuf));
+        assert_eq(0, memcmp(rbuf, payload, 2));
+        vfs_node_put(n2);
+    } else {
+        assert_not_null(n2);
+    }
+    vfs_node_put(h);
+
+    n2 = vfs_lookup("/MARK.TXT");
+    if (n2) {
+        memset(rbuf, 0, sizeof(rbuf));
+        assert_eq(2, vfs_read(n2, 0, sizeof(rbuf), rbuf));
+        assert_eq(0, memcmp(rbuf, payload, 2));
+        vfs_node_put(n2);
+    } else {
+        assert_not_null(n2);
+    }
+
+    /* ── tmpfs: same-path rename keeps the internal node ──
+     * Ordered last: the pre-fix implementation treats the source as the
+     * unlink target, drops it from the parent, then re-finds the name —
+     * a process-level OOB/crash.  ext2/vfat failures print first. */
+    vfs_init();
+    vfs_test_set_sched_ready(true);
+    assert_eq(0, vfs_mount_fs("tmpfs", "/", NULL, NULL));
+
+    h = NULL;
+    assert_eq(0, vfs_create_file("/id.bin", "/", &h));
+    assert_not_null(h);
+    uint64_t ino_t = h->ino;
+    assert_eq(2, vfs_write(h, 0, 2, (void *)payload));
+
+    assert_eq(0, vfs_rename("/id.bin", "/id.bin", "/"));
+
+    n2 = vfs_lookup("/id.bin");
+    if (n2) {
+        assert_eq(ino_t, n2->ino);
+        assert_eq(1, n2->nlink);
+        assert_true((n2->node_flags & VFS_NODE_ORPHANED) == 0);
+        memset(rbuf, 0, sizeof(rbuf));
+        assert_eq(2, vfs_read(n2, 0, sizeof(rbuf), rbuf));
+        assert_eq(0, memcmp(rbuf, payload, 2));
+        vfs_node_put(n2);
+    } else {
+        assert_not_null(n2);
+    }
+    vfs_node_put(h);
+
+    n2 = vfs_lookup("/id.bin");
+    if (n2) {
+        memset(rbuf, 0, sizeof(rbuf));
+        assert_eq(2, vfs_read(n2, 0, sizeof(rbuf), rbuf));
+        assert_eq(0, memcmp(rbuf, payload, 2));
+        vfs_node_put(n2);
+    } else {
+        assert_not_null(n2);
+    }
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_lookup_300_entries_tmpfs),
     TEST_ENTRY(test_devfs_and_tmpfs_metadata_and_getattr),
@@ -693,6 +877,8 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_fat32_shared_file_object_and_orphan_reclaim),
     TEST_ENTRY(test_ext2_disk_inode_metadata_stat),
     TEST_ENTRY(test_fat32_rmdir_open_dir_deferred_reclaim),
+    TEST_ENTRY(test_tmpfs_read_truncate_holes),
+    TEST_ENTRY(test_rename_same_file_keeps_identity),
 TEST_LIST_END
 
 int main(void) {

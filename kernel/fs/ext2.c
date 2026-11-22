@@ -1936,6 +1936,12 @@ static __attribute__((noinline)) int ext2_vfs_rename(struct vfs_node *olddir, co
     int exists = ext2_find_dirent(fs, new_ino_dir, newname,
                                   &exist_ino, &exist_type,
                                   &exist_block, &exist_off);
+    if (exists == 0 && exist_ino == target_ino) {
+        // Same inode (e.g. oldpath == newpath or a hard-link alias):
+        // no-op success before any deletion or orphan write.
+        ext2_unlock(fs);
+        return 0;
+    }
 
     ext2_inode_t *inobuf = kmalloc(2 * sizeof(ext2_inode_t));
     if (!inobuf) { ext2_unlock(fs); return -ENOMEM; }

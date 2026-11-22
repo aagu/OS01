@@ -1297,6 +1297,13 @@ int fat_rename(vfs_node_t *olddir, const char *oldname,
     uint64_t dst_lba = 0;
     uint32_t dst_off = 0;
     int64_t dst_idx = fat32_find_by_name(fs, dst_dir_cl, newname, &dst_lba, &dst_off);
+    if (dst_idx >= 0 && dst_lba == src_lba && dst_off == src_off) {
+        // Same dirent slot (e.g. 8.3 case-alias rename resolves to the same
+        // entry): no-op success — keeps the entry, link count and the linked
+        // file object intact.
+        fat_unlock(fs);
+        return 0;
+    }
     if (dst_idx >= 0) {
         FAT32_DIRENT dst_ent;
         if (fat32_read_entry_at(fs, dst_lba, dst_off, &dst_ent) != 0) {
