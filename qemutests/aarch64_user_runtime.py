@@ -13,6 +13,7 @@ import argparse
 import hashlib
 import json
 import re
+import shutil
 import subprocess
 import sys
 import time
@@ -77,6 +78,17 @@ PASS_SUMMARY_RE = {
 }
 SELFTEST_DONE_RE = re.compile(r"^\[selftest\] done \(failed=(\d+)\)$")
 
+# map-shared (inode MAP_SHARED product E2E): boots the NORMAL product
+# image on 2 CPUs from a private writable copy; /bin/test_map_shared's
+# standalone PASS line is the sole success evidence.
+PRODUCT_IMAGE_CASES = ("product", "fp", "map-shared")
+TWO_CPU_CASES = ("smp", "migration", "map-shared")
+MAP_SHARED_PASS_LINE = "test_map_shared: PASS"
+
+
+def boot_cpus_for(case):
+    return 2 if case in TWO_CPU_CASES else 1
+
 REQUIRED_SYMBOLS = ("test_aarch64_user_runtime_run",)
 FORBIDDEN_PRODUCT_PREFIXES = (
     "aarch64_user_runtime_test_",
@@ -121,7 +133,7 @@ def audit_elf(elf_path, llvm_nm, case="irq"):
         parts = line.split()
         if len(parts) >= 3:
             syms.add(parts[-1])
-    if case in ("product", "fp"):
+    if case in PRODUCT_IMAGE_CASES:
         for sym in sorted(syms):
             if any(sym.startswith(pfx) for pfx in FORBIDDEN_PRODUCT_PREFIXES):
                 errors.append(f"forbidden test symbol {sym} in normal product ELF {path}")
@@ -570,7 +582,56 @@ def parse_product_boot_evidence(text, check_shell_io=False, test_fp_pass=False):
     return len(errors) == 0, errors
 
 
-def qemu_command(qemu_bin, cpus, image, firmware, dtb):
+def parse_map_shared_evidence(text):
+    """Validate serial output for the map-shared product E2E.
+
+    The probe's single success line is the standalone
+    ``test_map_shared: PASS``; any ``test_map_shared: FAIL <stage>``
+    line, duplicate/missing PASS, missing boot/respawn evidence or a
+    fatal line fails.  Returns ``(ok, errors)``.
+    """
+    errors = []
+    lines = [line.rstrip("\r") for line in text.splitlines()]
+    for line in lines:
+        if ANY_FATAL_RE.search(line):
+            errors.append(f"fatal/fail line observed: {line.strip()}")
+
+    boot_ok, boot_errs = parse_product_boot_evidence(text,
+                                                     check_shell_io=False)
+    errors.extend(boot_errs)
+
+    pass_lines = [line for line in lines
+                  if line.strip() == MAP_SHARED_PASS_LINE]
+    if len(pass_lines) == 0:
+        errors.append(
+            "missing standalone 'test_map_shared: PASS' output line")
+    elif len(pass_lines) > 1:
+        errors.append(
+            f"duplicate standalone 'test_map_shared: PASS' line "
+            f"({len(pass_lines)})")
+
+    if any(line.strip().startswith("test_map_shared: FAIL")
+           for line in lines):
+        errors.append("test_map_shared FAIL line observed")
+
+    # Respawn evidence mirrors the product shell-IO checks: the probe
+    # exits back into ash, which init respawns (second banner/prompt).
+    banners = sum(1 for line in lines if "built-in shell (ash)" in line)
+    prompts = sum(1 for line in lines if "# " in line)
+    if banners < 2:
+        errors.append(
+            f"expected respawned busybox ash banner after exit, got {banners}")
+    if prompts < 2:
+        errors.append(f"expected second '# ' prompt after exit, got {prompts}")
+
+    return len(errors) == 0, errors
+
+
+def qemu_command(qemu_bin, cpus, image, firmware, dtb, writable=False):
+    # The virtio disk drive is readonly unless the caller explicitly
+    # boots a private writable COPY (map-shared); pflash stays
+    # readonly in every configuration.
+    disk_ro = "off" if writable else "on"
     return [
         qemu_bin,
         "-M", "virt,gic-version=2,acpi=off",
@@ -578,7 +639,7 @@ def qemu_command(qemu_bin, cpus, image, firmware, dtb):
         "-smp", str(cpus),
         "-m", str(MEMORY_MB),
         "-drive", f"if=pflash,format=raw,readonly=on,file={firmware}",
-        "-drive", f"if=none,file={image},format=raw,readonly=on,id=disk",
+        "-drive", f"if=none,file={image},format=raw,readonly={disk_ro},id=disk",
         "-device", "virtio-blk-device,drive=disk",
         "-device", "virtio-rng-device",
         "-dtb", str(dtb),
@@ -725,10 +786,105 @@ def _run_product_cpu(args, cpus, archive, run_dir, budget, drain, dtb_factory):
     return result, errors, session, timed_out, child_exited_before_runner_stop, command
 
 
+def _run_map_shared(args, archive, run_dir, budget, drain, dtb_factory):
+    """Boot a private writable COPY of the product image on 2 CPUs and
+    run /bin/test_map_shared from the ash.
+
+    Only this case touches a disk: the copy lives in the run's own
+    directory, the original image path is never handed to QEMU as a
+    writable drive, and the copy is removed once QEMU has stopped.
+    Returns ``(result, errors, session, timed_out, child_exited,
+    command, copy_dir)``.
+    """
+    copy_dir = run_dir / "private-disk"
+    copy_path = copy_dir / Path(args.image).name
+    command = []
+    session = None
+    child_exited_before_runner_stop = False
+
+    try:
+        copy_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(args.image, copy_path)
+    except Exception as error:
+        return (False, [f"private writable disk copy failed: {error}"],
+                None, False, False, command, copy_dir)
+
+    dtb = (dtb_factory or generate_diagnostic_dtb)(args.qemu, str(run_dir),
+                                                   2)
+    command = qemu_command(args.qemu, 2, str(copy_path), args.firmware,
+                           dtb, writable=True)
+    if ProcessSession is None:
+        shutil.rmtree(copy_dir, ignore_errors=True)
+        return (False, ["spawn error: ProcessSession is unavailable"],
+                None, False, False, command, copy_dir)
+
+    try:
+        session = ProcessSession(
+            argv=command,
+            run_dir=run_dir,
+            timeout_s=budget - drain,
+            writable_stdin=True,
+        )
+        session.start()
+        session.wait_for(
+            lambda text: parse_product_boot_evidence(
+                text, check_shell_io=False)[0]
+        )
+        if not session.timed_out:
+            session.send(b"/bin/test_map_shared\n")
+            session.wait_for(
+                lambda text: any(
+                    l.strip() == "test_map_shared: PASS"
+                    for l in text.splitlines()
+                )
+            )
+            session.send(b"exit\n")
+            # Respawn evidence: a fresh banner inside the post-cursor
+            # slice (the final parse still counts two over the whole
+            # transcript).
+            session.wait_for(
+                lambda text: text.count("built-in shell (ash)") >= 1
+            )
+        session.observe(drain)
+        child_exited_before_runner_stop = session.returncode is not None
+        session.stop()
+        child_exited_before_runner_stop |= not session.stopped_by_runner
+        session.close()
+    except Exception as error:
+        if session is not None:
+            try:
+                session.close()
+            except Exception:
+                pass
+        shutil.rmtree(copy_dir, ignore_errors=True)
+        return (False, [f"spawn error: {error}"], session, False, False,
+                command, copy_dir)
+
+    text = session.text
+    timed_out = session.timed_out
+    accepted, why = parse_map_shared_evidence(text)
+    result = accepted and not timed_out and not child_exited_before_runner_stop
+
+    errors = []
+    if timed_out:
+        errors.append(f"cpus=2: 120s boot deadline expired")
+    if child_exited_before_runner_stop:
+        errors.append(
+            f"cpus=2: QEMU exited before runner completed observation drain")
+    errors.extend(f"cpus=2: {e}" for e in why)
+
+    # QEMU has stopped — the private copy is no longer needed.
+    shutil.rmtree(copy_dir, ignore_errors=True)
+    return (result, errors, session, timed_out,
+            child_exited_before_runner_stop, command, copy_dir)
+
+
 def run_boot(args, deadline_s=None, dtb_factory=None):
     started = time.monotonic()
-    cpus = 2 if args.case in ("smp", "migration") else 1
-    variant = "product" if args.case == "product" else f"user-runtime-{args.case}"
+    cpus = boot_cpus_for(args.case)
+    variant = ("product"
+               if args.case in ("product", "fp", "map-shared")
+               else f"user-runtime-{args.case}")
     archive = None
     if args.build_dir and RunArchive is not None:
         archive = RunArchive.create(Path(args.build_dir), SUITE)
@@ -777,6 +933,28 @@ def run_boot(args, deadline_s=None, dtb_factory=None):
             print(f"PASS: user-runtime case={args.case} cpus=1,2,4,8 ({run_dir})")
             return 0
         for err in all_errors:
+            print(f"FAIL: {err}", file=sys.stderr)
+        return 1
+
+    if args.case == "map-shared":
+        (result, errors, session, timed_out, child_exited, command,
+         copy_dir) = _run_map_shared(
+            args, archive, run_dir, budget, drain, dtb_factory
+        )
+        shutil.rmtree(copy_dir, ignore_errors=True)   # post-stop cleanup
+        _write_report(
+            archive, argv=command, profile=args.profile, cpu=cpus,
+            variant=variant, firmware=args.firmware, image=args.image,
+            started=started,
+            status="PASS" if result else "FAIL",
+            runner_exit_code=0 if result else 1, session=session,
+            errors=errors,
+            extra={"timeout": timed_out, "case": args.case},
+        )
+        if result:
+            print(f"PASS: user-runtime case={args.case} cpus={cpus} ({run_dir})")
+            return 0
+        for err in errors:
             print(f"FAIL: {err}", file=sys.stderr)
         return 1
 
@@ -873,7 +1051,7 @@ def run_boot(args, deadline_s=None, dtb_factory=None):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--case", default="irq", choices=("irq", "asid", "smp", "migration", "product", "fp"))
+    parser.add_argument("--case", default="irq", choices=("irq", "asid", "smp", "migration", "product", "fp", "map-shared"))
     parser.add_argument("--image", required=True)
     parser.add_argument("--firmware", required=True)
     parser.add_argument("--elf", required=True)

@@ -302,7 +302,21 @@ aarch64 的匿名 VM 策略在 `kernel/arch/aarch64/memory/user_vm_policy.c`
 `kernel/include/arch/aarch64/user_vm_leaf.h`），fork 事务在
 `kernel/arch/aarch64/memory/user_vm_fork.c`（与策略共享
 `kernel/include/arch/aarch64/user_vm_internal.h` 的内部访问器），
-共享 VMA 原语在 `kernel/memory/vm_area.c`。x86 的用户 VM 按生命周期拆分：
+共享 VMA 原语在 `kernel/memory/vm_area.c`。
+
+### 3. 跨进程 inode 级 `MAP_SHARED`（2026-11-22，aarch64）
+
+独立进程的文件/匿名共享不依赖 PMM COW：架构中立的共享对象注册表
+`kernel/memory/shared_backing.c`（声明 `kernel/include/memory/shared_backing.h`）
+按 `(挂载实例, inode)` 键会合文件共享映射，匿名 `MAP_SHARED` 每次 mmap 建独立
+零填对象并由 fork 继承。对象拥有已发布页的 PA；VMA 片段持一个对象引用
+（`vma_t.vm_shared_backing`），每条驻留记录以 `USER_VM_PAGE_BACKING` 来源
+**借用**对象 PA——拆卸/回滚只撤叶、不释放、不触碰 PMM COW 计数
+（`USER_VM_PAGE_IO` 同款借用语义）。fork 对对象页借用同 PA、按逻辑权限装叶
+或还原 stash，不降权父页；CPU 缺页与 uaccess 统一走 `instantiate_absent()`
+（`vm_pgoff + 页内偏移` 取对象页）。写上限以 `VMA_SHARED_MAYWRITE`
+随 VMA 记录，mprotect 扩写在切分前对整段原子校验。PMM COW 机制继续只服务
+fork 私有页；磁盘回写、fd I/O 一致性、truncate 撤页为后续范围。x86 的用户 VM 按生命周期拆分：
 `brk.c`（堆 VMA + brk 提交/回滚）、`mmap.c`（mmap/munmap/mprotect 事务）、
 `vma.c`（节点销毁 + fork 元数据 + 退休根清理）、`uaccess.c`（内核→用户
 写入预备对），声明统一在 `kernel/include/arch/x86_64/vma.h`。两个 VM

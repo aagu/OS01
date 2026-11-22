@@ -48,7 +48,7 @@ aarch64 已有 EL0 用户态，但 ASLR 本项暂未扩大到 aarch64。
 
 | 任务 | 内容与完成条件 | 前置 |
 |------|----------------|------|
-| 跨进程 inode 级 `MAP_SHARED` | 引入 shmem/页缓存注册表，使非 fork 后代的独立进程间共享文件/匿名映射可见一致（目前共享仅靠 fork 的 COW 引用计数，`kernel/arch/aarch64/memory/user_vm_policy.c:338-366,715-722`） | 文件映射与 `MAP_SHARED` v1 ✅（2026-11-19） |
+| 跨进程 inode 级 `MAP_SHARED` | 引入 shmem/页缓存注册表，使非 fork 后代的独立进程间共享文件/匿名映射可见一致 | **✅（2026-11-22）**：架构中立共享对象注册表（`kernel/memory/shared_backing.c`，键 `(挂载实例, inode)`、匿名对象 fork 继承）+ aarch64 mmap/fork/uaccess/拆卸全链接入 + 产品 E2E `USER_RUNTIME_CASE=map-shared`；磁盘回写、fd I/O 一致性、truncate 撤页、共享内存 ABI、x86_64 VM 接入为后续范围 | 文件映射与 `MAP_SHARED` v1 ✅（2026-11-19） |
 
 ### 能力齐平：对标 x86_64 的剩余缺口（2026-11-21 扫描）
 
@@ -72,7 +72,7 @@ aarch64 已有 EL0 用户态，但 ASLR 本项暂未扩大到 aarch64。
 |----|------|------|------|
 | GICv2 Phase 2 | **软件实现与 QEMU 验收已完成（2026-11-21）**：正式 EL1 VBAR `+0x180`/`+0x380`/`+0x580` SError 入口→`aarch64_serror_fatal` 首错诊断→`aarch64_serror_park`、`AARCH64_USER_TASK_PSTATE=0x240`、GICv2 `SecurityExtn` Non-secure Group 1 交接契约与 PMR 校验、1020 INTID 边界与 1020–1023 跳过、`gic_cpu_target_mask` 折叠与每核原子 claim；**真机待验证**：实机 IRQ 覆盖（CNTP/定向 SGI/PL011 RX→TTY）与物理 SError 注入待目标板卡就位后按 [`arch.md`](arch.md#aarch64-serror-与-gicv2-phase-22026-11-21) 模板取证 | GICv2 Phase 1 ✅；`dtb_gicd_base` 解耦 ✅（2026-11-18） | |
 
-**距离「用户态就绪的统一内核」还差多远（粗估，一个人全职）**：剩余差距集中在跨进程 inode 级 `MAP_SHARED` 与 x86_64 signal 帧 FPU 区（见 P5）；aarch64 的 EL0 FP/SIMD 已于 2026-11-21 闭环。详见 `docs/arch.md` §aarch64 用户态现状与末段、统一 kernel_main spec/plan。
+**距离「用户态就绪的统一内核」还差多远（粗估，一个人全职）**：剩余差距集中在 x86_64 signal 帧 FPU 区（见 P5）；aarch64 的 EL0 FP/SIMD 已于 2026-11-21 闭环、跨进程 inode 级 `MAP_SHARED` 已于 2026-11-22 闭环（aarch64 侧）。详见 `docs/arch.md` §aarch64 用户态现状与末段、统一 kernel_main spec/plan。
 
 **永远无法统一的（ISA/HW 差异）**：`head.S`/`entry.S` 指令集差异；MMU 页表格式（PTE bit-position）；
 中断控制器驱动；SoC 外设（UART/timer/GPIO 等）。靠 arch 抽象层封装，统一接口、不统一实现。

@@ -198,6 +198,136 @@ def _good_fp_trace():
     )
 
 
+def _good_map_shared_trace():
+    # USER_RUNTIME_CASE=map-shared shape: 2-core product boot, the shell
+    # runs /bin/test_map_shared, its standalone PASS line is the sole
+    # success evidence, then the shell respawns.
+    return (
+        "[INFO] [boot-5] init-created pid=1\n"
+        "[INFO] init: inittab loaded\n"
+        "BusyBox v1.36.1 (2026-11-22 00:00:00 CST) built-in shell (ash)\n"
+        "# /bin/test_map_shared\n"
+        "test_map_shared: PASS\n"
+        "# exit\n"
+        "BusyBox v1.36.1 (2026-11-22 00:00:00 CST) built-in shell (ash)\n"
+        "# "
+    )
+
+
+class MapSharedRuntimeTests(unittest.TestCase):
+    def test_valid_map_shared_trace_passes(self):
+        ok, errors = runner.parse_map_shared_evidence(_good_map_shared_trace())
+        self.assertTrue(ok, errors)
+        self.assertEqual(errors, [])
+
+    def test_map_shared_missing_pass_fails(self):
+        text = _good_map_shared_trace().replace("test_map_shared: PASS\n", "")
+        ok, errors = runner.parse_map_shared_evidence(text)
+        self.assertFalse(ok)
+        self.assertTrue(any("test_map_shared: PASS" in e for e in errors), errors)
+
+    def test_map_shared_duplicate_pass_fails(self):
+        text = _good_map_shared_trace().replace(
+            "# exit\n",
+            "test_map_shared: PASS\n# exit\n",
+        )
+        ok, errors = runner.parse_map_shared_evidence(text)
+        self.assertFalse(ok)
+        self.assertTrue(any("duplicate" in e for e in errors), errors)
+
+    def test_map_shared_fail_line_fails(self):
+        text = _good_map_shared_trace().replace(
+            "test_map_shared: PASS\n",
+            "test_map_shared: FAIL p1-uaccess-visible\n",
+        )
+        ok, errors = runner.parse_map_shared_evidence(text)
+        self.assertFalse(ok)
+        self.assertTrue(
+            any("FAIL line observed" in e for e in errors), errors)
+
+    def test_map_shared_command_echo_only_fails(self):
+        # The shell echo of the typed command is NOT evidence: a trace
+        # with only the echoed command (no probe output) must fail.
+        text = _good_map_shared_trace().replace("test_map_shared: PASS\n", "")
+        ok, errors = runner.parse_map_shared_evidence(text)
+        self.assertFalse(ok)
+
+    def test_map_shared_respawn_required(self):
+        text = _good_map_shared_trace().replace(
+            "BusyBox v1.36.1 (2026-11-22 00:00:00 CST) built-in shell (ash)\n# ",
+            "",
+        )
+        ok, errors = runner.parse_map_shared_evidence(text)
+        self.assertFalse(ok)
+        self.assertTrue(any("respawn" in e for e in errors), errors)
+
+    def test_map_shared_boot_evidence_required(self):
+        text = _good_map_shared_trace().replace("init-created pid=1\n", "")
+        ok, errors = runner.parse_map_shared_evidence(text)
+        self.assertFalse(ok)
+        self.assertTrue(any("pid 1" in e or "init-created" in e
+                            for e in errors), errors)
+
+    def test_map_shared_runs_on_two_cpus(self):
+        self.assertEqual(runner.boot_cpus_for("map-shared"), 2)
+        self.assertEqual(runner.boot_cpus_for("irq"), 1)
+        self.assertEqual(runner.boot_cpus_for("smp"), 2)
+        self.assertEqual(runner.boot_cpus_for("product"), 1)
+
+    def test_map_shared_uses_product_image_paths(self):
+        self.assertIn("map-shared", runner.PRODUCT_IMAGE_CASES)
+        self.assertIn("product", runner.PRODUCT_IMAGE_CASES)
+        self.assertIn("fp", runner.PRODUCT_IMAGE_CASES)
+
+    def test_writable_flag_defaults_off_and_pflash_stays_ro(self):
+        base = [
+            "--image", "/tmp/orig.img",
+            "--firmware", "/tmp/fw.code",
+        ]
+        cmd = runner.qemu_command("qemu-system-aarch64", 2,
+                                  "/tmp/run-copy.img", "/tmp/fw.code",
+                                  "/tmp/dev.dtb")
+        disk_args = [a for a in cmd if a.startswith("if=none,")]
+        self.assertEqual(len(disk_args), 1)
+        self.assertIn("readonly=on", disk_args[0])
+        self.assertIn("file=/tmp/run-copy.img", disk_args[0])
+        pflash = [a for a in cmd if a.startswith("if=pflash,")]
+        self.assertTrue(all("readonly=on" in a for a in pflash))
+
+        cmd_w = runner.qemu_command("qemu-system-aarch64", 2,
+                                    "/tmp/run-copy.img", "/tmp/fw.code",
+                                    "/tmp/dev.dtb", writable=True)
+        disk_w = [a for a in cmd_w if a.startswith("if=none,")]
+        self.assertEqual(len(disk_w), 1)
+        self.assertIn("readonly=off", disk_w[0])
+        self.assertIn("file=/tmp/run-copy.img", disk_w[0])
+        # The ORIGINAL image path never appears as a writable drive.
+        self.assertNotIn("file=/tmp/orig.img", " ".join(cmd_w))
+        pflash_w = [a for a in cmd_w if a.startswith("if=pflash,")]
+        self.assertTrue(all("readonly=on" in a for a in pflash_w))
+
+    def test_other_cases_drive_stays_readonly(self):
+        # The product/fp cases keep their readonly single drive: the
+        # writable parameter exists only for the map-shared copy.
+        for cpus in (1, 2, 8):
+            cmd = runner.qemu_command("qemu-system-aarch64", cpus,
+                                      "/tmp/orig.img", "/tmp/fw.code",
+                                      "/tmp/dev.dtb")
+            disk_args = [a for a in cmd if a.startswith("if=none,")]
+            self.assertEqual(len(disk_args), 1)
+            self.assertIn("readonly=on", disk_args[0])
+
+    def test_map_shared_audit_elf_uses_product_branch(self):
+        # The product ELF must carry no test symbols: map-shared audits
+        # the same forbidden prefixes as product/fp (not the selftest
+        # required-symbol branch).
+        self.assertIn("map-shared", runner.PRODUCT_IMAGE_CASES)
+        errors = runner.audit_elf("/nonexistent.elf", "llvm-nm",
+                                  case="map-shared")
+        self.assertTrue(errors)
+        self.assertFalse(any("required symbol" in e for e in errors))
+
+
 class UserRuntimeEvidenceTests(unittest.TestCase):
     def test_valid_irq_trace_passes(self):
         ok, errors = runner.parse_user_runtime_evidence(_good_irq_trace(), "irq")

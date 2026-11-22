@@ -168,14 +168,14 @@ net / proc / resource / time / misc 组仍隐藏。详见
 
 **当前边界（2026-11-20 更新，如实记录）**：
 
-- **产品用户态已接入（2026-11-19）**：`OS01_HAS_VFS=1`、`OS01_HAS_USERSPACE=1`，aarch64 产品镜像经 boot-5 编排装载 `/bin/init` → `/bin/sh`，支持 `MAP_FIXED`、文件映射、`MAP_SHARED`（fork 后代一致性）与 `/dev/mem` 设备映射。
+- **产品用户态已接入（2026-11-19）**：`OS01_HAS_VFS=1`、`OS01_HAS_USERSPACE=1`，aarch64 产品镜像经 boot-5 编排装载 `/bin/init` → `/bin/sh`，支持 `MAP_FIXED`、文件映射、`MAP_SHARED`（2026-11-22 起为跨进程 inode 级共享对象，独立进程经 `(挂载实例, inode)` 会合，见 `kernel/memory/shared_backing.c`）与 `/dev/mem` 设备映射。
 - **正式 EL0 IRQ 返回与抢占（2026-11-20）**：`aarch64_el0_irq()` 计入 per-CPU IRQ 深度，在设备分派与 EOI 后由正式分支调用 `aarch64_user_irq_return()`（检查拥有帧与 `need_resched` 后调 `schedule()`，并在返回 EL0 前投递挂起信号）。VM 授权/edit 状态按任务持有（`aarch64_vm_task_editing()`），copy window 按 CPU 持有，`switch_to()` 原子完成保存 prev TLS → 切换用户根 → 恢复 next TLS。旧 `aarch64_el0_preempt` 探针仍限单核（`kernel/selftest/test_aarch64_el0.c:414-416`）。
 - **8-bit ASID 与失效边界（2026-11-20）**：`user_asid.c` 维护 1..255 非零标签池（0 为退化回退），`TCR_EL1.A1=0, AS=0`，ASID 编码于 `TTBR0[55:48]`（CnP=0），用户叶带 `nG` 位。BSP 与 AP 在接入调度前均安装共享空 TTBR0 根（内核与设备地址走 TTBR1）；活跃低 VA 使用 `tlbi vaae1is`，标签回收先完成 `tlbi aside1is` 再归还池位。
 - **SMP 用户调度与运行期跨核任务迁移（2026-11-20 ~ 2026-11-21）**：PID 1 固定 BSP（boot-5 特例），运行期 VFS spawn/fork 通过 `aarch64_user_pick_cpu(&allowed_cpus)` 设置多核 `allowed_cpus` 掩码并在就绪 CPU 上轮转放核（`sched_alloc_and_publish_task`）。`pull_aarch64_user_task(dst, src)` 仅迁移已从 `arch_context_reschedule_return` 离核（`on_cpu==0 && irq_return_migratable && !aarch64_vm_task_editing(p)`）的 `PF_PROCESS` 任务，配合每核 8-tick 空闲平衡节奏（`aarch64_sched_tick_take_idle_balance()`）与 `aarch64_vm_edit_begin()` 的 `aarch64_user_mm_quiesce(mm)` 校验确保 `TTBR0`/ASID/per-task VM 状态一致。配套完成两阶段孤儿退出交接（`task_finish_switch` / `task_publish_process_exit`）、COW 末引用释放顺序、原子信号 pending、共享 `FD_VFS` `file_t` pos 锁与 `ic ialluis` 跨核同步；已通过 1/2/4/8 核启动、2 核串口交互与双核迁移验收（`MODE=user-runtime USER_RUNTIME_CASE=irq|asid|smp|migration|product`）。
 - **EL0 FP/SIMD 闭环（2026-11-21）**：EL0 浮点指令在 FPEN=0b11 下不陷入（先前「F 位掩码导致陷入」的表述系误记——PSTATE.F 是 FIQ 掩码，FP 访问陷入类为 EC 0x07；EL0 来源的该陷入现以 fatal 停机兜底于 `aarch64_user_task_sync`）；signal 帧 v2（816 B：regs/blocked/reserved/fp[528]@288）在交付时保存存活 FP 状态、sigreturn 两段复制后恢复，FP-using handler 不再毁掉被打断上下文（fixture `aarch64_user_signal` 含 d8/d15/fpsr/fpcr 往返断言）；`USER_RUNTIME_CASE=fp` 在产品镜像 1/2/4/8 核实跑 `/bin/test_fp` 为运行时证据。x86_64 signal 帧仍无 FPU 区（后续任务，见 roadmap）。
 - **仍保留的边界**：用户态进入/返回已纳入 `arch/context.h` 门面（首入准备、共享返回工作编排与同址 `arch_context_restore_frame`，底层仍保留 x86 `iretq` / aarch64 `eret` 及原生 IST/EL1h 特殊恢复边界）；`arch_cpu_features()` 已于 2026-11-21 落地；`arch_smp_boot_aps()` 已于 2026-11-19 随统一 SMP 启动闭环落地。
 
-**剩余差距**：跨进程 inode 级 `MAP_SHARED`。规划项见 [roadmap.md](roadmap.md) P2。
+**跨进程 inode 级 `MAP_SHARED` 已闭环（2026-11-22）**：架构中立共享对象注册表（`kernel/memory/shared_backing.c`）按 `(挂载实例, inode)` 键会合独立进程的文件共享映射，匿名共享对象由 fork 继承、晚触页会合；VMA 持对象引用并记录 `VMA_SHARED_MAYWRITE` 最大写权限（mprotect 整段原子校验），resident 记录以 `USER_VM_PAGE_BACKING` 借用对象 PA（不经 PMM COW）；CPU 缺页与 uaccess 统一走 `instantiate_absent`。fd I/O 一致性、truncate 撤页、磁盘回写与 x86_64 VM 接入为后续范围。产品验收：`make PROFILE=aarch64-clang test-aarch64 MODE=user-runtime USER_RUNTIME_CASE=map-shared`。
 闭环记录见 `docs/changelog.md` 2026-11-11 ~ 2026-11-21 各条目；COW/VM 细节见
 [cow-mmap.md](memory/cow-mmap.md#aarch64-cow--匿名-vma2026-11-11--2026-11-13-闭环)。
 
