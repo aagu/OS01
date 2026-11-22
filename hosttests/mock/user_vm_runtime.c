@@ -47,6 +47,25 @@ void user_vm_test_fail_page_after(int ok_count) { g_page_budget = ok_count; }
 void user_vm_test_fail_map_after(int ok_count)  { g_map_budget  = ok_count; }
 
 /* ══════════════════════════════════════════════════════════════
+ * Registry-lock discipline (shared-backing race tests)
+ * ══════════════════════════════════════════════════════════════ */
+
+uint32_t shared_backing_test_lock_depth(void);
+
+static int g_lock_violations;
+static int g_kmalloc_count;
+static int g_kfree_count;
+
+static void check_no_registry_lock(const char *what)
+{
+    if (shared_backing_test_lock_depth() != 0) {
+        fprintf(stderr, "user_vm_runtime: %s ran inside the shared"
+                " backing registry lock\n", what);
+        __atomic_add_fetch(&g_lock_violations, 1, __ATOMIC_RELAXED);
+    }
+}
+
+/* ══════════════════════════════════════════════════════════════
  * Allocation accounting
  * ══════════════════════════════════════════════════════════════ */
 
@@ -63,45 +82,70 @@ static int      g_live_count;
 static uint64_t g_freed[MAX_FREES];
 static int      g_free_count;
 static int      g_double_frees;
+static int      g_node_alloc_fails;
+static int      g_page_alloc_fails;
 
 void *kmalloc(size_t size)
 {
-    g_node_allocs++;
-    if (budget_fail(&g_node_budget))
+    check_no_registry_lock("kmalloc");
+    __atomic_add_fetch(&g_node_allocs, 1, __ATOMIC_RELAXED);
+    __atomic_add_fetch(&g_kmalloc_count, 1, __ATOMIC_RELAXED);
+    if (budget_fail(&g_node_budget)) {
+        __atomic_add_fetch(&g_node_alloc_fails, 1, __ATOMIC_RELAXED);
         return NULL;
+    }
     return calloc(1, size);
 }
 
 size_t kfree(void *ptr)
 {
+    __atomic_add_fetch(&g_kfree_count, 1, __ATOMIC_RELAXED);
     free(ptr);
     return 0;
 }
 
+/* The shared-backing race tests run two threads against the fake
+ * allocators, so the live/free records are guarded by the atomic host
+ * spinlock. */
+static spinlock_T g_alloc_lock = { .lock = 1L };
+
 uint64_t alloc_4k_page(void)
 {
-    g_page_allocs++;
-    if (budget_fail(&g_page_budget))
+    check_no_registry_lock("alloc_4k_page");
+    __atomic_add_fetch(&g_page_allocs, 1, __ATOMIC_RELAXED);
+    if (budget_fail(&g_page_budget)) {
+        __atomic_add_fetch(&g_page_alloc_fails, 1, __ATOMIC_RELAXED);
         return 0;
+    }
     /* Fake physical pages must be 4 KiB aligned: the M4 COW contract
      * validates PA alignment before touching a leaf.  Allocate one
      * extra page and align inside it; the malloc base is remembered so
      * free_4k_page() can release it correctly. */
-    if (g_live_count >= MAX_LIVE_PAGES)
+    uint64_t pa = 0;
+    spin_lock(&g_alloc_lock);
+    if (g_live_count >= MAX_LIVE_PAGES) {
+        spin_unlock(&g_alloc_lock);
         return 0;
+    }
     void *raw = malloc(PAGE_4K_SIZE + PAGE_4K_SIZE);
-    if (!raw)
+    if (!raw) {
+        spin_unlock(&g_alloc_lock);
         return 0;
+    }
     uintptr_t aligned = ((uintptr_t)raw + PAGE_4K_SIZE - 1) &
                         ~(uintptr_t)(PAGE_4K_SIZE - 1);
     memset((void *)aligned, 0, PAGE_4K_SIZE);
     g_live_raw[g_live_count] = raw;
     g_live[g_live_count++] = (uint64_t)aligned;
-    return (uint64_t)aligned;
+    pa = (uint64_t)aligned;
+    spin_unlock(&g_alloc_lock);
+    return pa;
 }
 
 void free_4k_page(uint64_t pa)
 {
+    check_no_registry_lock("free_4k_page");
+    spin_lock(&g_alloc_lock);
     for (int i = 0; i < g_live_count; i++) {
         if (g_live[i] == pa) {
             void *raw = g_live_raw[i];
@@ -109,18 +153,25 @@ void free_4k_page(uint64_t pa)
             g_live_raw[i] = g_live_raw[g_live_count];
             if (g_free_count < MAX_FREES)
                 g_freed[g_free_count++] = pa;
+            spin_unlock(&g_alloc_lock);
             free(raw);
             return;
         }
     }
-    g_double_frees++;
+    spin_unlock(&g_alloc_lock);
+    __atomic_add_fetch(&g_double_frees, 1, __ATOMIC_RELAXED);
 }
 
-int      user_vm_test_node_allocs(void) { return g_node_allocs; }
-int      user_vm_test_page_allocs(void) { return g_page_allocs; }
-int      user_vm_test_map_calls(void)   { return g_map_calls; }
-int      user_vm_test_free_count(void)  { return g_free_count; }
-int      user_vm_test_double_frees(void){ return g_double_frees; }
+int      user_vm_test_node_allocs(void) { return __atomic_load_n(&g_node_allocs, __ATOMIC_RELAXED); }
+int      user_vm_test_page_allocs(void) { return __atomic_load_n(&g_page_allocs, __ATOMIC_RELAXED); }
+int      user_vm_test_map_calls(void)   { return __atomic_load_n(&g_map_calls, __ATOMIC_RELAXED); }
+int      user_vm_test_free_count(void)  { return __atomic_load_n(&g_free_count, __ATOMIC_RELAXED); }
+int      user_vm_test_double_frees(void){ return __atomic_load_n(&g_double_frees, __ATOMIC_RELAXED); }
+
+/* Failed (injected) allocation attempts: the alloc counters count
+ * calls, not successes — net-baseline assertions subtract these. */
+int      user_vm_test_node_alloc_fails(void) { return __atomic_load_n(&g_node_alloc_fails, __ATOMIC_RELAXED); }
+int      user_vm_test_page_alloc_fails(void) { return __atomic_load_n(&g_page_alloc_fails, __ATOMIC_RELAXED); }
 
 uint64_t user_vm_test_free_pa_at(int index)
 {
@@ -569,43 +620,6 @@ bool syscall_has_handler(uint64_t nr)
     }
 }
 
-/* ══════════════════════════════════════════════════════════════
- * Reset + log stubs
- * ══════════════════════════════════════════════════════════════ */
-
-void user_vm_test_reset(void)
-{
-    memset(g_leaves, 0, sizeof(g_leaves));
-    g_leaf_count = 0;
-    g_replace_cow_calls = 0;
-    g_cow_n = 0;
-    g_node_budget = -1;
-    g_page_budget = -1;
-    g_map_budget  = -1;
-    g_node_allocs = 0;
-    g_page_allocs = 0;
-    g_map_calls   = 0;
-    g_free_count  = 0;
-    g_double_frees = 0;
-    for (int i = 0; i < g_live_count; i++)
-        free(g_live_raw[i]);
-    g_live_count = 0;
-
-    g_current_mm   = NULL;
-    g_frame_valid  = 0;
-    g_ttbr0        = 0;
-    g_published    = 0;
-    g_irq_masked   = 1;
-    g_root_switches = 0;
-    g_root_installs = 0;
-    g_installed_root = 0;
-    g_tls_live[0]  = 0;
-    g_tls_live[1]  = 0;
-    g_tls_restores = 0;
-    g_quiesce_error = 0;
-    memset(g_mock_tasks, 0, sizeof(g_mock_tasks));
-    current = &g_mock_tasks[0];
-}
 
 int g_log_level = 3;   /* LOG_ERR */
 void _log_err_impl(const char *fmt, ...)
@@ -659,10 +673,173 @@ struct vfs_node *user_vm_test_make_file_node(const unsigned char *bytes,
     return (struct vfs_node *)(void *)g_fake_node_storage;
 }
 
-int vfs_read(struct vfs_node *node, uint64_t offset, uint64_t size,
-             void *buffer)
+void user_vm_test_set_file_bytes(const unsigned char *bytes, uint64_t size)
 {
-    (void)node;
+    g_test_file_node.bytes = bytes;
+    g_test_file_node.size = size;
+}
+
+/* ══════════════════════════════════════════════════════════════
+ * Shared-backing fixtures: real-layout mounts/nodes, per-node data,
+ * injectable read, node ref accounting, registry-lock discipline.
+ * ══════════════════════════════════════════════════════════════ */
+
+#include <fs/vfs.h>
+
+uint32_t shared_backing_test_lock_depth(void);
+
+#define USER_VM_TEST_MAX_MOUNTS 4
+#define USER_VM_TEST_MAX_NODES  16
+
+static struct {
+    vfs_fs_type_t type;
+    vfs_mount_t   hdr;
+    char          name[16];
+    bool          used;
+} g_test_mounts[USER_VM_TEST_MAX_MOUNTS];
+
+struct user_vm_test_node {
+    vfs_node_t           hdr;      /* REAL layout */
+    const unsigned char *bytes;
+    uint64_t             size;
+    int                  read_err;
+    int                  gets;
+    int                  puts;
+    bool                 freed;
+    bool                 used;
+};
+static struct user_vm_test_node g_test_nodes[USER_VM_TEST_MAX_NODES];
+
+static struct user_vm_test_node *test_node_of(struct vfs_node *node)
+{
+    if (!node)
+        return NULL;
+    for (int i = 0; i < USER_VM_TEST_MAX_NODES; i++)
+        if (g_test_nodes[i].used && &g_test_nodes[i].hdr == node)
+            return &g_test_nodes[i];
+    return NULL;
+}
+
+struct vfs_mount *user_vm_test_make_mount(const char *fs_name)
+{
+    for (int i = 0; i < USER_VM_TEST_MAX_MOUNTS; i++) {
+        if (g_test_mounts[i].used)
+            continue;
+        memset(&g_test_mounts[i], 0, sizeof(g_test_mounts[i]));
+        g_test_mounts[i].used = true;
+        snprintf(g_test_mounts[i].name, sizeof(g_test_mounts[i].name), "%s",
+                 fs_name ? fs_name : "tmpfs");
+        g_test_mounts[i].type.name = g_test_mounts[i].name;
+        g_test_mounts[i].hdr.fs_type = &g_test_mounts[i].type;
+        spin_init(&g_test_mounts[i].hdr.active_lock);
+        return &g_test_mounts[i].hdr;
+    }
+    abort();
+}
+
+struct vfs_node *user_vm_test_make_mount_node(struct vfs_mount *mount,
+                                              uint64_t ino,
+                                              const unsigned char *bytes,
+                                              uint64_t size)
+{
+    for (int i = 0; i < USER_VM_TEST_MAX_NODES; i++) {
+        struct user_vm_test_node *tn = &g_test_nodes[i];
+        if (tn->used)
+            continue;
+        memset(tn, 0, sizeof(*tn));
+        tn->used = true;
+        tn->bytes = bytes;
+        tn->size = size;
+        tn->hdr.name = (char *)"testnode";
+        tn->hdr.ino = ino;
+        tn->hdr.size = size;
+        tn->hdr.mode = 0100644;
+        tn->hdr.nlink = 1;
+        tn->hdr.type = VFS_FILE;
+        tn->hdr.refcount = 1;   /* the caller owns this handle */
+        tn->hdr.mount = mount;
+        return &tn->hdr;
+    }
+    abort();
+}
+
+struct vfs_node *user_vm_test_make_mount_dir(struct vfs_mount *mount,
+                                             uint64_t ino)
+{
+    struct vfs_node *n = user_vm_test_make_mount_node(mount, ino, NULL, 0);
+    n->type = VFS_DIR;
+    n->mode = 040755;
+    return n;
+}
+
+void user_vm_test_set_node_read_err(struct vfs_node *node, int err)
+{
+    struct user_vm_test_node *tn = test_node_of(node);
+    if (tn)
+        tn->read_err = err;
+}
+
+int  user_vm_test_node_gets(struct vfs_node *node)
+{
+    struct user_vm_test_node *tn = test_node_of(node);
+    return tn ? __atomic_load_n(&tn->gets, __ATOMIC_RELAXED) : 0;
+}
+
+int  user_vm_test_node_puts(struct vfs_node *node)
+{
+    struct user_vm_test_node *tn = test_node_of(node);
+    return tn ? __atomic_load_n(&tn->puts, __ATOMIC_RELAXED) : 0;
+}
+
+bool user_vm_test_node_freed(struct vfs_node *node)
+{
+    struct user_vm_test_node *tn = test_node_of(node);
+    return tn ? __atomic_load_n((int *)&tn->freed, __ATOMIC_RELAXED) != 0
+              : false;
+}
+
+/* ── Registry-lock discipline + thread-safe accounting ──────── */
+
+int user_vm_test_lock_violations(void)
+{
+    return __atomic_load_n(&g_lock_violations, __ATOMIC_RELAXED);
+}
+
+int user_vm_test_kmallocs(void)
+{
+    return __atomic_load_n(&g_kmalloc_count, __ATOMIC_RELAXED);
+}
+
+int user_vm_test_kfrees(void)
+{
+    return __atomic_load_n(&g_kfree_count, __ATOMIC_RELAXED);
+}
+
+/* ── Injectable backend read ────────────────────────────────── */
+
+static user_vm_test_read_fn g_injected_read;
+
+void user_vm_test_set_vfs_read(user_vm_test_read_fn fn)
+{
+    g_injected_read = fn;
+}
+
+static int default_vfs_read(struct vfs_node *node, uint64_t offset,
+                            uint64_t size, void *buffer)
+{
+    struct user_vm_test_node *tn = test_node_of(node);
+    if (tn) {
+        if (tn->read_err)
+            return tn->read_err;
+        if (!tn->bytes || offset >= tn->size)
+            return 0;
+        uint64_t n = tn->size - offset;
+        if (n > size)
+            n = size;
+        memcpy(buffer, tn->bytes + offset, (size_t)n);
+        return (int)n;
+    }
+    /* Legacy single-node behavior for the private-file tests. */
     if (!g_test_file_node.bytes || offset >= g_test_file_node.size)
         return 0;
     uint64_t n = g_test_file_node.size - offset;
@@ -672,21 +849,35 @@ int vfs_read(struct vfs_node *node, uint64_t offset, uint64_t size,
     return (int)n;
 }
 
-void user_vm_test_set_file_bytes(const unsigned char *bytes, uint64_t size)
+int vfs_read(struct vfs_node *node, uint64_t offset, uint64_t size,
+             void *buffer)
 {
-    g_test_file_node.bytes = bytes;
-    g_test_file_node.size = size;
+    check_no_registry_lock("vfs_read");
+    if (g_injected_read)
+        return g_injected_read(node, offset, size, buffer);
+    return default_vfs_read(node, offset, size, buffer);
 }
 
-/* No-op node reference counting: the fake node never goes away. */
+/* Registry nodes carry real reference accounting; the legacy opaque
+ * tag node keeps the old no-op behavior. */
 struct vfs_node *vfs_node_get(struct vfs_node *node)
 {
+    struct user_vm_test_node *tn = test_node_of(node);
+    if (tn) {
+        __atomic_add_fetch(&tn->gets, 1, __ATOMIC_RELAXED);
+        __sync_add_and_fetch(&tn->hdr.refcount, 1);
+    }
     return node;
 }
 
 void vfs_node_put(struct vfs_node *node)
 {
-    (void)node;
+    struct user_vm_test_node *tn = test_node_of(node);
+    if (tn) {
+        __atomic_add_fetch(&tn->puts, 1, __ATOMIC_RELAXED);
+        if (__sync_sub_and_fetch(&tn->hdr.refcount, 1) == 0)
+            __atomic_store_n((int *)&tn->freed, 1, __ATOMIC_RELAXED);
+    }
 }
 
 /* Device-window leaf: same fake store, VM_DEVICE word, window
@@ -706,3 +897,54 @@ int arch_vmm_map_user_io_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
     return arch_vmm_map_4k_new(pgdir, phys, virt,
                                vm_flags | VM_NOCACHE);
 }
+
+/* ══════════════════════════════════════════════════════════════
+ * Reset + log stubs
+ * ══════════════════════════════════════════════════════════════ */
+
+void user_vm_test_reset(void)
+{
+    memset(g_leaves, 0, sizeof(g_leaves));
+    g_leaf_count = 0;
+    g_replace_cow_calls = 0;
+    g_cow_n = 0;
+    g_node_budget = -1;
+    g_page_budget = -1;
+    g_map_budget  = -1;
+    g_node_allocs = 0;
+    g_page_allocs = 0;
+    g_map_calls   = 0;
+    g_free_count  = 0;
+    g_double_frees = 0;
+    g_node_alloc_fails = 0;
+    g_page_alloc_fails = 0;
+    for (int i = 0; i < g_live_count; i++)
+        free(g_live_raw[i]);
+    g_live_count = 0;
+
+    g_current_mm   = NULL;
+    g_frame_valid  = 0;
+    g_ttbr0        = 0;
+    g_published    = 0;
+    g_irq_masked   = 1;
+    g_root_switches = 0;
+    g_root_installs = 0;
+    g_installed_root = 0;
+    g_tls_live[0]  = 0;
+    g_tls_live[1]  = 0;
+    g_tls_restores = 0;
+    g_quiesce_error = 0;
+    memset(g_mock_tasks, 0, sizeof(g_mock_tasks));
+    current = &g_mock_tasks[0];
+
+    /* Shared-backing fixtures: mounts, nodes, injected read, lock
+     * discipline counters. */
+    memset(g_test_mounts, 0, sizeof(g_test_mounts));
+    memset(g_test_nodes, 0, sizeof(g_test_nodes));
+    g_injected_read = NULL;
+    g_lock_violations = 0;
+    g_kmalloc_count = 0;
+    g_kfree_count = 0;
+    spin_init(&g_alloc_lock);
+}
+

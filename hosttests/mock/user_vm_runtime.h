@@ -15,6 +15,50 @@
 
 #include "test_platform.h"
 
+/* ── Host spinlock that actually serializes threads ──────────
+ * The suite is compiled with -DOS01_HOST_SPINLOCK_T_PROVIDED so the
+ * single-threaded no-op stub in test_platform.h stays out.  This
+ * declaration replaces it with an atomic CAS lock carrying the
+ * production field convention (1 = unlocked, 0 = locked) so the
+ * shared-backing race tests run two real threads against one
+ * registry lock. */
+typedef struct { unsigned long lock; } spinlock_T;
+
+static inline void spin_init(spinlock_T *l)
+{
+    __atomic_store_n(&l->lock, 1UL, __ATOMIC_RELAXED);
+}
+
+static inline void spin_lock(spinlock_T *l)
+{
+    unsigned long expected;
+    for (;;) {
+        expected = __atomic_load_n(&l->lock, __ATOMIC_RELAXED);
+        if (expected == 1 &&
+            __atomic_compare_exchange_n(&l->lock, &expected, 0UL,
+                                        false,
+                                        __ATOMIC_ACQUIRE, __ATOMIC_RELAXED))
+            return;
+    }
+}
+
+static inline void spin_unlock(spinlock_T *l)
+{
+    __atomic_store_n(&l->lock, 1UL, __ATOMIC_RELEASE);
+}
+
+static inline uint64_t spin_lock_irqsave(spinlock_T *l)
+{
+    spin_lock(l);
+    return 0;
+}
+
+static inline void spin_unlock_irqrestore(spinlock_T *l, uint64_t flags)
+{
+    (void)flags;
+    spin_unlock(l);
+}
+
 /* ── AArch64 register frame for the host-compiled VM adapter ────
  * user_task.h and intr/dispatch.h include <arch/regs.h>; on an x86
  * host that facade would select the x86 pt_regs and the aarch64
@@ -167,6 +211,55 @@ struct vfs_node_test {
 };
 int vfs_read(struct vfs_node *node, uint64_t offset, uint64_t size,
              void *buffer);
+
+/* ── Shared-backing suite fixtures (Task: inode MAP_SHARED) ─────
+ * Real-layout vfs_mount_t / vfs_node_t registry with per-node byte
+ * sources, injectable backend read and node get/put accounting.  The
+ * older single-node file surface above keeps its exact behavior for
+ * the private-file tests. */
+
+/* Mount fixture: fs_type->name carries the registered filesystem
+ * identity the shared backing checks admission against. */
+struct vfs_mount *user_vm_test_make_mount(const char *fs_name);
+
+/* File-node fixture: REAL vfs_node_t (VFS_FILE, real mount pointer,
+ * caller-owned initial reference).  bytes/size are the per-node
+ * backend content the default read serves. */
+struct vfs_node *user_vm_test_make_mount_node(struct vfs_mount *mount,
+                                              uint64_t ino,
+                                              const unsigned char *bytes,
+                                              uint64_t size);
+struct vfs_node *user_vm_test_make_mount_dir(struct vfs_mount *mount,
+                                             uint64_t ino);
+
+/* Inject the backend read implementation (NULL restores the default
+ * per-node/global behavior). */
+typedef int (*user_vm_test_read_fn)(struct vfs_node *node, uint64_t offset,
+                                    uint64_t size, void *buffer);
+void user_vm_test_set_vfs_read(user_vm_test_read_fn fn);
+
+/* Per-node backend read error injection: nonzero makes the default
+ * read return this value. */
+void user_vm_test_set_node_read_err(struct vfs_node *node, int err);
+
+/* Node reference accounting (registry nodes only). */
+int  user_vm_test_node_gets(struct vfs_node *node);
+int  user_vm_test_node_puts(struct vfs_node *node);
+bool user_vm_test_node_freed(struct vfs_node *node);
+
+/* Registry-lock discipline: the runtime counts allocations, reads and
+ * reclaims that happen while the shared-backing registry lock is held
+ * (production forbids all three inside the lock). */
+int user_vm_test_lock_violations(void);
+
+/* kmalloc/kfree balance for the same baseline assertions. */
+int user_vm_test_kmallocs(void);
+int user_vm_test_kfrees(void);
+
+/* Failed (injected) allocation attempts — the alloc counters count
+ * calls, so net-baseline assertions subtract these. */
+int user_vm_test_node_alloc_fails(void);
+int user_vm_test_page_alloc_fails(void);
 
 /* Device-window leaf primitive (production: vmm_backend.c).  The mock
  * records the same fake-leaf store with the VM_DEVICE word. */

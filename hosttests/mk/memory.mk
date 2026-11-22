@@ -733,6 +733,7 @@ test_aarch64_backend_4k: $(TEST_BLD)/test_aarch64_backend_4k.elf
 USER_VM_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
                        -I$(TEST_MOCK)/page_table_aarch64_include \
                        -I$(TESTS_DIR)/kernel/include \
+                       -DOS01_HOST_SPINLOCK_T_PROVIDED \
                        -include $(TEST_MOCK)/user_vm_runtime.h \
                        -I$(TEST_MOCK) -I$(TEST_INC)
 
@@ -797,14 +798,24 @@ $(TEST_BLD)/user_vm_fork_production.o: \
 $(TEST_BLD)/user_vm_runtime.o: $(TEST_MOCK)/user_vm_runtime.c \
 		$(TEST_MOCK)/user_vm_runtime.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(USER_VM_HOST_CFLAGS) -c $< -o $@
+	$(HOST_CC) $(USER_VM_HOST_CFLAGS) -pthread -c $< -o $@
+
+# The REAL architecture-neutral shared backing registry.  The mock
+# runtime replaces the allocators and the VFS read; -pthread carries
+# the two-thread fill-race case.
+$(TEST_BLD)/shared_backing_production.o: $(TESTS_DIR)/kernel/memory/shared_backing.c \
+		$(TESTS_DIR)/kernel/include/memory/shared_backing.h \
+		$(TEST_MOCK)/user_vm_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(USER_VM_HOST_CFLAGS) -pthread -c $< -o $@
 
 $(TEST_BLD)/test_user_vm.o: $(TEST_CASES)/test_user_vm.c \
 		$(TESTS_DIR)/kernel/include/arch/aarch64/user_vm_leaf.h \
 		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TESTS_DIR)/kernel/include/memory/shared_backing.h \
 		$(TEST_MOCK)/user_vm_runtime.h
 	@mkdir -p $(TEST_BLD)
-	$(HOST_CC) $(USER_VM_HOST_CFLAGS) \
+	$(HOST_CC) $(USER_VM_HOST_CFLAGS) -pthread \
 		-DOS01_KERNEL_SRC=\"$(TESTS_DIR)\" \
 		$(FRAMEWORK_INC) -c $< -o $@
 
@@ -815,8 +826,9 @@ $(TEST_BLD)/test_user_vm.elf: \
 		$(TEST_BLD)/vm_area_user_vm_production.o \
 		$(TEST_BLD)/user_vm_transaction_production.o \
 		$(TEST_BLD)/user_vm_leaf_production.o \
+		$(TEST_BLD)/shared_backing_production.o \
 		$(TEST_BLD)/user_vm_runtime.o
-	$(HOST_CC) -o $@ $^
+	$(HOST_CC) -pthread -o $@ $^
 
 .PHONY: test-user-vm
 test-user-vm: $(TEST_BLD)/test_user_vm.elf

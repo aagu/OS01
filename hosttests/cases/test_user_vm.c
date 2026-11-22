@@ -31,7 +31,15 @@
 #include <memory/vm_area.h>
 #include <memory/vma.h>
 #include <memory/vmm.h>
+#include <memory/shared_backing.h>
 #include <uapi/syscall.h>
+
+/* Host pthread prototypes (avoiding the libc pthread.h shadow) — same
+ * pattern as test_usb_msc.c. */
+typedef unsigned long host_pthread_t;
+extern int pthread_create(host_pthread_t *thread, const void *attr,
+                          void *(*start_routine)(void *), void *arg);
+extern int pthread_join(host_pthread_t thread, void **retval);
 
 #ifndef OS01_KERNEL_SRC
 #error "Define OS01_KERNEL_SRC to the kernel source root"
@@ -2413,6 +2421,369 @@ TEST_FUNC(test_mmap_device_read_only_leaf_is_ro)
     user_vm_test_set_files(NULL);
 }
 
+/* ══════════════════════════════════════════════════════════════
+ * Shared backing registry (inode MAP_SHARED plan, Task 2)
+ * ══════════════════════════════════════════════════════════════ */
+
+static const unsigned char sb_bytes3[8] = { 0xD1, 0xD2, 0xD3 };
+
+TEST_FUNC(test_shared_backing_identity)
+{
+    user_vm_test_reset();
+    struct vfs_mount *m1 = user_vm_test_make_mount("tmpfs");
+    struct vfs_mount *m2 = user_vm_test_make_mount("ext2");
+    struct vfs_mount *m3 = user_vm_test_make_mount("procfs");
+
+    struct vfs_node *a = user_vm_test_make_mount_node(m1, 42, sb_bytes3, 3);
+    struct vfs_node *b = user_vm_test_make_mount_node(m1, 42, sb_bytes3, 3);
+    struct vfs_node *c = user_vm_test_make_mount_node(m1, 43, sb_bytes3, 3);
+    struct vfs_node *d = user_vm_test_make_mount_node(m2, 42, sb_bytes3, 3);
+    struct vfs_node *dir = user_vm_test_make_mount_dir(m1, 50);
+    struct vfs_node *other_fs = user_vm_test_make_mount_node(m3, 60, sb_bytes3, 3);
+    struct vfs_node *zero_ino = user_vm_test_make_mount_node(m1, 0, sb_bytes3, 3);
+
+    /* Admission: directories, unregistered filesystems and zero inode
+     * numbers are not eligible. */
+    struct shared_backing *bad = NULL;
+    assert_eq(-EISDIR, shared_backing_open_file(dir, &bad));
+    assert_eq(-EOPNOTSUPP, shared_backing_open_file(other_fs, &bad));
+    assert_eq(-EOPNOTSUPP, shared_backing_open_file(zero_ino, &bad));
+    assert_null(bad);
+
+    /* Two independent nodes with the same (mount, ino) rendezvous on
+     * ONE object and see the same page PA. */
+    struct shared_backing *o1 = NULL, *o2 = NULL;
+    assert_eq(0, shared_backing_open_file(a, &o1));
+    assert_eq(0, shared_backing_open_file(b, &o2));
+    assert_not_null(o1);
+    assert_true(o1 == o2);
+
+    uint64_t pa1 = 0, pa2 = 0;
+    assert_eq(0, shared_backing_page(o1, 0, &pa1));
+    assert_eq(0, shared_backing_page(o2, 0, &pa2));
+    assert_true(pa1 != 0);
+    assert_true(pa1 == pa2);
+
+    /* Backend content flows in, short read leaves the tail zero. */
+    const unsigned char *pg = (const unsigned char *)Phy_To_Virt(pa1);
+    assert_eq(0xD1, pg[0]);
+    assert_eq(0xD3, pg[2]);
+    assert_eq(0x00, pg[3]);
+
+    /* Different ino → different object and page (same index 0). */
+    struct shared_backing *o3 = NULL;
+    assert_eq(0, shared_backing_open_file(c, &o3));
+    uint64_t pa3 = 0;
+    assert_eq(0, shared_backing_page(o3, 0, &pa3));
+    assert_true(o3 != o1);
+    assert_true(pa3 != pa1);
+
+    /* Different mount instance with the same ino → isolated. */
+    struct shared_backing *o4 = NULL;
+    assert_eq(0, shared_backing_open_file(d, &o4));
+    uint64_t pa4 = 0;
+    assert_eq(0, shared_backing_page(o4, 0, &pa4));
+    assert_true(o4 != o1 && o4 != o3);
+    assert_true(pa4 != pa1 && pa4 != pa3);
+
+    /* Different page index inside one object → different page. */
+    uint64_t pa1b = 0;
+    assert_eq(0, shared_backing_page(o1, 6, &pa1b));
+    assert_true(pa1b != pa1);
+
+    /* Anonymous objects are always separate, even at index 0. */
+    struct shared_backing *an1 = NULL, *an2 = NULL;
+    assert_eq(0, shared_backing_create_anon(&an1));
+    assert_eq(0, shared_backing_create_anon(&an2));
+    assert_true(an1 != an2);
+    uint64_t paA = 0, paB = 0;
+    assert_eq(0, shared_backing_page(an1, 0, &paA));
+    assert_eq(0, shared_backing_page(an2, 0, &paB));
+    assert_true(paA != paB && paA != 0 && paB != 0);
+    assert_eq(0x00, ((const unsigned char *)Phy_To_Virt(paA))[0]);
+
+    shared_backing_put(an2);
+    shared_backing_put(an1);
+    shared_backing_put(o4);
+    shared_backing_put(o3);
+    shared_backing_put(o2);
+    shared_backing_put(o1);
+
+    /* Baselines: pages reclaimed, node refs balanced, allocations
+     * balanced, registry lock discipline respected. */
+    assert_eq(user_vm_test_page_allocs(), user_vm_test_free_count());
+    assert_eq(user_vm_test_kmallocs(), user_vm_test_kfrees());
+    assert_eq(user_vm_test_node_gets(a), user_vm_test_node_puts(a));
+    assert_eq(user_vm_test_node_gets(b), user_vm_test_node_puts(b));
+    assert_eq(user_vm_test_node_gets(c), user_vm_test_node_puts(c));
+    assert_eq(user_vm_test_node_gets(d), user_vm_test_node_puts(d));
+    assert_eq(user_vm_test_lock_violations(), 0);
+    assert_eq(user_vm_test_double_frees(), 0);
+}
+
+/* ── Race fixtures: two threads, one key, deterministic winner ── */
+
+static volatile int g_race_in_read;
+static volatile int g_race_go_a;
+static volatile int g_race_go_b;
+static volatile int g_race_timeout;
+static _Thread_local int g_race_role;   /* 1 = winner, 2 = loser */
+static uint64_t g_race_pa_a, g_race_pa_b;
+static int g_race_rc_a, g_race_rc_b;
+
+#define RACE_SPIN_LIMIT 200000000ULL
+
+static int race_wait(volatile int *go)
+{
+    for (uint64_t i = 0; i < RACE_SPIN_LIMIT; i++) {
+        if (__atomic_load_n(go, __ATOMIC_ACQUIRE))
+            return 0;
+    }
+    __atomic_store_n(&g_race_timeout, 1, __ATOMIC_RELAXED);
+    return -1;
+}
+
+static int race_read(struct vfs_node *node, uint64_t offset,
+                     uint64_t size, void *buffer)
+{
+    (void)node; (void)offset;
+    __atomic_add_fetch(&g_race_in_read, 1, __ATOMIC_SEQ_CST);
+    volatile int *go = (g_race_role == 1) ? &g_race_go_a : &g_race_go_b;
+    if (race_wait(go) != 0)
+        return -EIO;
+    uint64_t n = (size < 3) ? size : 3;
+    memcpy(buffer, sb_bytes3, (size_t)n);
+    return (int)n;
+}
+
+static void *race_thread_winner(void *arg)
+{
+    struct shared_backing *obj = arg;
+    g_race_role = 1;
+    uint64_t pa = 0;
+    int rc = shared_backing_page(obj, 0, &pa);
+    __atomic_store_n(&g_race_rc_a, rc, __ATOMIC_RELAXED);
+    if (rc == 0) {
+        g_race_pa_a = pa;
+        /* Winner publishes, then modifies the published page before
+         * the loser is released. */
+        ((unsigned char *)Phy_To_Virt(pa))[3] = 0x5A;
+        __atomic_store_n(&g_race_go_b, 1, __ATOMIC_RELEASE);
+    }
+    return NULL;
+}
+
+static void *race_thread_loser(void *arg)
+{
+    struct shared_backing *obj = arg;
+    g_race_role = 2;
+    uint64_t pa = 0;
+    int rc = shared_backing_page(obj, 0, &pa);
+    __atomic_store_n(&g_race_rc_b, rc, __ATOMIC_RELAXED);
+    g_race_pa_b = pa;
+    return NULL;
+}
+
+TEST_FUNC(test_shared_backing_fill_race)
+{
+    user_vm_test_reset();
+    struct vfs_mount *m = user_vm_test_make_mount("tmpfs");
+    struct vfs_node *na = user_vm_test_make_mount_node(m, 77, sb_bytes3, 3);
+    struct vfs_node *nb = user_vm_test_make_mount_node(m, 77, sb_bytes3, 3);
+
+    struct shared_backing *obj = NULL;
+    assert_eq(0, shared_backing_open_file(na, &obj));
+    assert_eq(0, shared_backing_open_file(nb, &obj));
+    assert_not_null(obj);
+    user_vm_test_set_vfs_read(race_read);
+
+    host_pthread_t ta, tb;
+    assert_eq(0, pthread_create(&ta, NULL, race_thread_winner, obj));
+    assert_eq(0, pthread_create(&tb, NULL, race_thread_loser, obj));
+
+    /* Both candidates must be inside the backend read before either
+     * proceeds. */
+    for (uint64_t i = 0; i < RACE_SPIN_LIMIT; i++) {
+        if (__atomic_load_n(&g_race_in_read, __ATOMIC_SEQ_CST) == 2)
+            break;
+    }
+    assert_eq(2, __atomic_load_n(&g_race_in_read, __ATOMIC_SEQ_CST));
+    __atomic_store_n(&g_race_go_a, 1, __ATOMIC_RELEASE);
+
+    pthread_join(ta, NULL);
+    pthread_join(tb, NULL);
+    user_vm_test_set_vfs_read(NULL);
+
+    assert_eq(0, g_race_timeout);
+    assert_eq(0, g_race_rc_a);
+    assert_eq(0, g_race_rc_b);
+    assert_true(g_race_pa_a != 0);
+    assert_true(g_race_pa_a == g_race_pa_b);
+
+    /* Fully initialized page, backend content and the winner's
+     * post-publish modification are both visible to the loser. */
+    const unsigned char *pg = (const unsigned char *)Phy_To_Virt(g_race_pa_a);
+    assert_eq(0xD1, pg[0]);
+    assert_eq(0xD2, pg[1]);
+    assert_eq(0xD3, pg[2]);
+    assert_eq(0x5A, pg[3]);
+    assert_eq(0x00, pg[4]);
+
+    /* The loser's candidate page was released; the winner's stays with
+     * the object. */
+    assert_eq(1, user_vm_test_free_count());
+    assert_true(user_vm_test_free_pa_at(0) != g_race_pa_a);
+
+    shared_backing_put(obj);
+    shared_backing_put(obj);
+
+    /* Final baseline: every page freed, node refs balanced. */
+    assert_eq(user_vm_test_page_allocs(), user_vm_test_free_count());
+    assert_eq(user_vm_test_kmallocs(), user_vm_test_kfrees());
+    assert_eq(user_vm_test_node_gets(na), user_vm_test_node_puts(na));
+    assert_eq(user_vm_test_node_gets(nb), user_vm_test_node_puts(nb));
+    assert_eq(user_vm_test_lock_violations(), 0);
+    assert_eq(user_vm_test_double_frees(), 0);
+}
+
+/* ── Failure/retry fixtures ──────────────────────────────────── */
+
+static struct shared_backing *g_retry_obj;
+static uint64_t g_retry_inner_pa;
+static int g_retry_depth;
+
+static int retry_read_publish_then_fail(struct vfs_node *node,
+                                        uint64_t offset, uint64_t size,
+                                        void *buffer)
+{
+    (void)node; (void)offset; (void)size;
+    if (g_retry_depth == 0) {
+        g_retry_depth++;
+        int rc = shared_backing_page(g_retry_obj, 0, &g_retry_inner_pa);
+        g_retry_depth--;
+        if (rc == 0) {
+            /* The concurrent winner published while this backend read
+             * is in flight — the outer read now fails. */
+            return -EIO;
+        }
+    }
+    memcpy(buffer, sb_bytes3, 3);
+    return 3;
+}
+
+TEST_FUNC(test_shared_backing_fill_retry)
+{
+    user_vm_test_reset();
+    struct vfs_mount *m = user_vm_test_make_mount("tmpfs");
+
+    /* Object metadata allocation failure → -ENOMEM, node reference
+     * returned, nothing published. */
+    struct vfs_node *n1 = user_vm_test_make_mount_node(m, 11, sb_bytes3, 3);
+    user_vm_test_fail_node_after(0);
+    struct shared_backing *o1 = (struct shared_backing *)(uintptr_t)0x1;
+    assert_eq(-ENOMEM, shared_backing_open_file(n1, &o1));
+    assert_true(o1 == (struct shared_backing *)(uintptr_t)0x1);
+    assert_eq(user_vm_test_node_gets(n1), user_vm_test_node_puts(n1));
+    user_vm_test_fail_node_after(-1);
+
+    /* PA allocation failure → -ENOMEM; retry after disarming
+     * succeeds and fills from the backend. */
+    struct vfs_node *n2 = user_vm_test_make_mount_node(m, 12, sb_bytes3, 3);
+    struct shared_backing *o2 = NULL;
+    assert_eq(0, shared_backing_open_file(n2, &o2));
+    user_vm_test_fail_page_after(0);
+    uint64_t pa = 0x1234;
+    assert_eq(-ENOMEM, shared_backing_page(o2, 0, &pa));
+    assert_eq((uint64_t)0x1234, pa);
+    user_vm_test_fail_page_after(-1);
+    pa = 0;
+    assert_eq(0, shared_backing_page(o2, 0, &pa));
+    assert_eq(0xD1, ((const unsigned char *)Phy_To_Virt(pa))[0]);
+    shared_backing_put(o2);
+
+    /* Page-node allocation failure (PA already taken) → -ENOMEM, the
+     * PA is released, retry succeeds. */
+    struct vfs_node *n3 = user_vm_test_make_mount_node(m, 13, sb_bytes3, 3);
+    struct shared_backing *o3 = NULL;
+    assert_eq(0, shared_backing_open_file(n3, &o3));
+    user_vm_test_fail_node_after(0);
+    pa = 0x5678;
+    assert_eq(-ENOMEM, shared_backing_page(o3, 0, &pa));
+    assert_eq((uint64_t)0x5678, pa);
+    user_vm_test_fail_node_after(-1);
+    pa = 0;
+    assert_eq(0, shared_backing_page(o3, 0, &pa));
+    shared_backing_put(o3);
+
+    /* Backend -ENOMEM is preserved, other backend errors map to
+     * -EFAULT, and both recover once the backend succeeds again. */
+    struct vfs_node *n4 = user_vm_test_make_mount_node(m, 14, sb_bytes3, 3);
+    struct shared_backing *o4 = NULL;
+    assert_eq(0, shared_backing_open_file(n4, &o4));
+    user_vm_test_set_node_read_err(n4, -ENOMEM);
+    pa = 0;
+    assert_eq(-ENOMEM, shared_backing_page(o4, 0, &pa));
+    assert_eq(0, pa);
+    user_vm_test_set_node_read_err(n4, -EIO);
+    assert_eq(-EFAULT, shared_backing_page(o4, 0, &pa));
+    user_vm_test_set_node_read_err(n4, 0);
+    assert_eq(0, shared_backing_page(o4, 0, &pa));
+    assert_eq(0xD2, ((const unsigned char *)Phy_To_Virt(pa))[1]);
+    shared_backing_put(o4);
+
+    /* Backend failure with a page published concurrently: the second
+     * lookup takes the already-published page and reports success. */
+    struct vfs_node *n6 = user_vm_test_make_mount_node(m, 16, sb_bytes3, 3);
+    struct shared_backing *o6 = NULL;
+    assert_eq(0, shared_backing_open_file(n6, &o6));
+    g_retry_obj = o6;
+    g_retry_inner_pa = 0;
+    g_retry_depth = 0;
+    user_vm_test_set_vfs_read(retry_read_publish_then_fail);
+    pa = 0;
+    assert_eq(0, shared_backing_page(o6, 0, &pa));
+    user_vm_test_set_vfs_read(NULL);
+    assert_true(g_retry_inner_pa != 0);
+    assert_true(pa == g_retry_inner_pa);
+    assert_eq(0xD3, ((const unsigned char *)Phy_To_Virt(pa))[2]);
+    shared_backing_put(o6);
+
+    /* Tail zero-fill: a 3-byte backend leaves [3, 4096) zero; an index
+     * past EOF fills the whole page with zeros. */
+    struct vfs_node *n7 = user_vm_test_make_mount_node(m, 17, sb_bytes3, 3);
+    struct shared_backing *o7 = NULL;
+    assert_eq(0, shared_backing_open_file(n7, &o7));
+    pa = 0;
+    assert_eq(0, shared_backing_page(o7, 0, &pa));
+    const unsigned char *pg = (const unsigned char *)Phy_To_Virt(pa);
+    assert_eq(0xD1, pg[0]);
+    assert_eq(0xD3, pg[2]);
+    assert_eq(0x00, pg[3]);
+    assert_eq(0x00, pg[4095]);
+    uint64_t pa_eof = 0;
+    assert_eq(0, shared_backing_page(o7, 4, &pa_eof));
+    assert_true(pa_eof != pa);
+    for (int i = 0; i < 4096; i += 512)
+        assert_eq(0x00, ((const unsigned char *)Phy_To_Virt(pa_eof))[i]);
+    shared_backing_put(o7);
+
+    /* Global baselines across every phase: the alloc counters count
+     * calls, so subtract the injected failures before comparing to
+     * the reclaim records. */
+    assert_eq(user_vm_test_page_allocs() - user_vm_test_page_alloc_fails(),
+              user_vm_test_free_count());
+    assert_eq(user_vm_test_kmallocs() - user_vm_test_node_alloc_fails(),
+              user_vm_test_kfrees());
+    assert_eq(user_vm_test_node_gets(n1), user_vm_test_node_puts(n1));
+    assert_eq(user_vm_test_node_gets(n2), user_vm_test_node_puts(n2));
+    assert_eq(user_vm_test_node_gets(n3), user_vm_test_node_puts(n3));
+    assert_eq(user_vm_test_node_gets(n4), user_vm_test_node_puts(n4));
+    assert_eq(user_vm_test_node_gets(n6), user_vm_test_node_puts(n6));
+    assert_eq(user_vm_test_node_gets(n7), user_vm_test_node_puts(n7));
+    assert_eq(user_vm_test_lock_violations(), 0);
+    assert_eq(user_vm_test_double_frees(), 0);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_mmap_and_brk_growth_allocate_no_pages),
     TEST_ENTRY(test_mprotect_split_node_failure_changes_nothing),
@@ -2471,6 +2842,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_mmap_device_occupied_range_rejected),
     TEST_ENTRY(test_mmap_fixed_guard_across_hole_rejects_device_overlap),
     TEST_ENTRY(test_mmap_device_read_only_leaf_is_ro),
+    TEST_ENTRY(test_shared_backing_identity),
+    TEST_ENTRY(test_shared_backing_fill_race),
+    TEST_ENTRY(test_shared_backing_fill_retry),
 TEST_LIST_END
 
 int main(void)
