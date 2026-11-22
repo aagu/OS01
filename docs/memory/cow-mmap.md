@@ -426,6 +426,20 @@ static inline uint64_t elf_pte_flags(uint32_t p_flags)
 
 ---
 
+## x86_64 `mmap_base` ASLR (ASLR-A)
+
+On x86_64 user address spaces (`spawn_user_task()` and `sys_exec()`), `mm->mmap_base` is randomized per image build via `x86_aslr_init_mmap_base()` (`kernel/arch/x86_64/memory/aslr.c`):
+
+- **Window & entropy width (`kernel/include/arch/x86_64/user_layout.h`)**: 28-bit page-granular window `[X86_USER_MMAP_RND_BASE, X86_USER_MMAP_RND_END)` = `[0x0000400000000000, 0x0000410000000000)` (64 TiB..65 TiB, 1 TiB span, `2^28` 4 KiB slots).
+- **STRONG-only fail-closed**: `x86_aslr_init_mmap_base()` calls `kernel_random_get_strong()` independently of `AT_RANDOM` and wipes the 32-byte stack buffer on both success and failure paths. When STRONG entropy is unavailable, it preserves `mm->mmap_base` and returns `-EAGAIN` (no silent fallback to `0x40000000` or WEAK entropy).
+- **`fork()` inheritance**: `mm_alloc()` keeps the deterministic `0x40000000` default for dual-arch parity; `fork_mm_copy()` inherits `parent_mm->mmap_base` without consuming entropy.
+- **Window, gap-search & ceiling (`kernel/arch/x86_64/memory/mmap.c`)**:
+  - `mmap_effective_limit(addr_limit)` clamps `addr_limit & PAGE_4K_MASK` to `X86_USER_MMAP_MAX_ADDR` (`0x00007FFFFFFFF000ULL`), reserving the top canonical guard page `[0x00007FFFFFFFF000, 0x0000800000000000)` and rejecting non-canonical ranges (`do_mmap` returns `-ENOMEM`, `do_munmap`/`do_mprotect` return `-EINVAL`).
+  - `MAP_FIXED` at `addr == 0` (or below `X86_USER_MIN_ADDR`) is rejected with `-EINVAL`.
+  - `mmap_find_gap_locked(mm, length, upper_limit, &out_addr)` performs overflow-safe, non-wrapping first-fit scanning within `[max(mmap_base, X86_USER_STACK_END), upper_limit)`, unconditionally advancing past any VMA whose preceding gap is smaller than `length` and returning `-ENOMEM` without wrapping below `mmap_base`.
+
+---
+
 ## Key files
 
 | File | Role |
@@ -433,7 +447,8 @@ static inline uint64_t elf_pte_flags(uint32_t p_flags)
 | `kernel/memory/pmm.c` | `subpage_pool`, `alloc_4k_page`, `free_4k_page`, `page_cow_get/put/refs`, `pmm_cow_acquire/release` |
 | `kernel/arch/x86_64/memory/vma.c` | x86 VMA 节点销毁（`x86_vma_destroy_node`）、fork 元数据复制（`fork_vma_copy`）、退休/未安装根清理（`vma_free_all`） |
 | `kernel/arch/x86_64/memory/brk.c` | `mm_init_user_heap`、`mm_set_brk`（成功安装 VA 日志；失败两轮撤销：就地取旧描述符 → 本地同步 → 释放） |
-| `kernel/arch/x86_64/memory/mmap.c` | `do_mmap`, `do_munmap`, `do_mprotect`, `mm_user_range_protected` 及其预检/分裂/文件偏移 helper |
+| `kernel/arch/x86_64/memory/mmap.c` | `do_mmap`, `do_munmap`, `do_mprotect`, `mmap_effective_limit`, `mmap_find_gap_locked`, `mm_user_range_protected` |
+| `kernel/arch/x86_64/memory/aslr.c` | `x86_aslr_derive_mmap_base`, `x86_aslr_init_mmap_base` (x86_64 STRONG-only fail-closed `mmap_base` ASLR) |
 | `kernel/arch/x86_64/memory/vmm.c` | x86 raw 页表 API + COW-aware teardown + 双 walker（`arch_virt_to_phys` / `arch_user_range_accessible`） |
 | `kernel/arch/aarch64/memory/user_vm_policy.c` | aarch64 匿名 VM 策略：按需缺页、stash、`user_vm_clone_fork`、`user_vm_cow_fault`、`prepare_copy` |
 | `kernel/memory/vm_area.c` | 双架构共享的 VMA 列表原语 |
@@ -453,7 +468,8 @@ static inline uint64_t elf_pte_flags(uint32_t p_flags)
 | `kernel/include/arch/x86_64/vmm.h` / `arch/x86_64/mmu.h` | x86 raw 页表 API、`ptbl_t/kernel_map`、根与单页原语、walker 声明 |
 | `kernel/include/memory/uaccess.h` | 公共容错拷贝 `copy_*_ft(_res)` 与 `syscall_check_user_range` |
 | `kernel/include/arch/x86_64/uaccess.h` | x86 `os01_jmp_buf`、`strnlen_user`、写入预备对 |
-| `kernel/include/arch/x86_64/user_layout.h` | x86 用户布局常量（`X86_USER_MIN_ADDR`、栈窗口、`X86_USER_HEAP_LIMIT`） |
+| `kernel/include/arch/x86_64/user_layout.h` | x86 用户布局常量（`X86_USER_MIN_ADDR`、栈窗口、`X86_USER_HEAP_LIMIT`、`X86_USER_ADDR_LIMIT`、`X86_USER_MMAP_MAX_ADDR`、`X86_USER_MMAP_RND_*`） |
+| `kernel/include/arch/x86_64/aslr.h` | x86_64 ASLR 私有接口声明（`x86_aslr_derive_mmap_base`、`x86_aslr_init_mmap_base`） |
 | `kernel/include/arch/aarch64/user_vm_policy.h` | 匿名 VM 策略接口（按需缺页 / clone / COW 故障 / copy 预备） |
 | `kernel/include/arch/aarch64/user_vm_leaf.h` | aarch64 叶适配器声明（`arch_user_vm_*` 三态） |
 | `kernel/include/arch/aarch64/user_vm.h` | aarch64 用户 VM 事务层：授权、切离、恢复 |
