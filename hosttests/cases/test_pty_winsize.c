@@ -175,8 +175,61 @@ int serial_printk(const char *fmt, ...) { (void)fmt; return 0; }
 void log_debug(const char *fmt, ...) { (void)fmt; }
 void frame_buffer_init(void) {}
 void frame_buffer_early_init(void) {}
-int devfs_register_chrdev(const char *n, void *p, const struct devfs_ops *o) { (void)n; (void)p; (void)o; return 0; }
+/* devfs registry mock: devfs has no unregister API, so a name that is
+ * registered twice fails with -EEXIST.  The mock models that contract
+ * so the PTY slave-node lifetime is observable from the host tests. */
+#define MOCK_DEVFS_MAX_NAMES 16
+static char g_devfs_names[MOCK_DEVFS_MAX_NAMES][16];
+static const struct devfs_ops *g_devfs_ops[MOCK_DEVFS_MAX_NAMES];
+static int g_devfs_name_count;
+
+static void mock_devfs_reset(void)
+{
+    memset(g_devfs_names, 0, sizeof(g_devfs_names));
+    memset(g_devfs_ops, 0, sizeof(g_devfs_ops));
+    g_devfs_name_count = 0;
+}
+
+static const struct devfs_ops *mock_devfs_find(const char *name)
+{
+    for (int i = 0; i < g_devfs_name_count; i++) {
+        if (strcmp(g_devfs_names[i], name) == 0) return g_devfs_ops[i];
+    }
+    return NULL;
+}
+
+int devfs_register_chrdev(const char *n, void *p, const struct devfs_ops *o)
+{
+    (void)p;
+    if (!n) return -EINVAL;
+    if (mock_devfs_find(n)) return -EEXIST;
+    if (g_devfs_name_count >= MOCK_DEVFS_MAX_NAMES) return -ENOSPC;
+    snprintf(g_devfs_names[g_devfs_name_count], 16, "%s", n);
+    g_devfs_ops[g_devfs_name_count] = o;
+    g_devfs_name_count++;
+    return 0;
+}
+
 int devfs_ioctl_file(file_t *f, int cmd, void *arg) { (void)f; (void)cmd; (void)arg; return -ENOTTY; }
+
+/* ── Stubs pulled in by file_free() ────────────────────────────
+ * The PTY reopen regression releases a master through the production
+ * file_put() path, so kernel/fs/file.c's release sections stay alive
+ * in the link.  Those sections reference the devfs release hook and
+ * the lwIP socket teardown; neither is reached by this test. */
+void devfs_release_file(file_t *f) { (void)f; }
+
+struct netconn;
+struct netbuf;
+void netconn_delete(struct netconn *conn) { (void)conn; }
+void netbuf_delete(struct netbuf *nb) { (void)nb; }
+
+/* Log sink: pty_init reports a failed device registration. */
+int g_log_level = 0;
+void _log_err_impl(const char *f, ...) { (void)f; }
+void _log_warn_impl(const char *f, ...) { (void)f; }
+void _log_info_impl(const char *f, ...) { (void)f; }
+
 void wait_queue_init(wait_queue_t *wq) { (void)wq; }
 void wait_queue_sleep(wait_queue_t *wq) { (void)wq; }
 void wait_queue_wake_one(wait_queue_t *wq) { (void)wq; }
@@ -795,6 +848,59 @@ TEST_FUNC(test_pty_struct_pgrp_field)
     assert_eq(42, pty.pgrp);
 }
 
+/* ═══════════════════════════════════════════════════════════════
+ *  TEST: the PTY slave node must survive the PTY it was created for
+ *
+ *  devfs has no unregister API: a device node lives until the system
+ *  reboots.  "/dev/pts{N}" is a permanent binding to &pty_table[N],
+ *  so it is registered ONCE by pty_init.  Registering it again on
+ *  every master open made the second master fail with -EEXIST, and
+ *  every later open("/dev/ptmx") failed — a terminal that restarted
+ *  could never get its PTY back.
+ * ═══════════════════════════════════════════════════════════════ */
+TEST_FUNC(test_ptmx_reopen_after_master_release)
+{
+    mock_devfs_reset();
+
+    int rc = pty_init();
+    assert_eq(0, rc);
+    if (rc != 0) return;
+
+    /* pty_init registers /dev/ptmx plus one node per PTY slot. */
+    assert_eq(PTY_MAX + 1, g_devfs_name_count);
+    const struct devfs_ops *ptmx_ops = mock_devfs_find("ptmx");
+    assert_not_null(ptmx_ops);
+    if (!ptmx_ops) return;
+
+    file_t *master = NULL;
+    rc = ptmx_ops->open("/dev/ptmx", &master);
+    assert_eq(0, rc);
+    assert_not_null(master);
+    if (!master) return;
+    assert_eq(FD_PTY_MASTER, master->type);
+    assert_true(pty_table[0].allocated);
+
+    /* A master open must not register a device node: the slave node
+     * is already bound to this slot. */
+    assert_eq(PTY_MAX + 1, g_devfs_name_count);
+
+    /* The master is released without ever opening the slave, so the
+     * PTY slot goes back to the pool. */
+    file_put(master);
+    assert_false(pty_table[0].allocated);
+
+    /* The next master must get the PTY again — this is the terminal
+     * restart path that used to fail with -EEXIST. */
+    file_t *master2 = NULL;
+    rc = ptmx_ops->open("/dev/ptmx", &master2);
+    assert_eq(0, rc);
+    assert_not_null(master2);
+    if (!master2) return;
+    assert_eq(FD_PTY_MASTER, master2->type);
+    assert_true(pty_table[0].allocated);
+    file_put(master2);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_master_slave_winsize),
     TEST_ENTRY(test_winsize_no_signal_when_unchanged),
@@ -808,6 +914,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_termios_get_uses_stable_snapshot),
     TEST_ENTRY(test_termios_faults_preserve_state),
     TEST_ENTRY(test_pty_struct_pgrp_field),
+    TEST_ENTRY(test_ptmx_reopen_after_master_release),
 TEST_LIST_END
 
 int main(void)

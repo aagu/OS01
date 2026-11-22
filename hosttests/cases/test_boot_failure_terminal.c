@@ -56,6 +56,7 @@ static int mock_register_ptmx_rc = 0;
 static int registered_tty_calls = 0;
 static int registered_tty0_calls = 0;
 static int registered_ptmx_calls = 0;
+static int registered_pts_calls = 0;
 static void *registered_tty_private = NULL;
 static void *registered_tty0_private = NULL;
 
@@ -76,6 +77,14 @@ int devfs_register_chrdev(const char *name, void *private_data,
     if (strcmp(name, "ptmx") == 0) {
         registered_ptmx_calls++;
         return mock_register_ptmx_rc;
+    }
+    // The PTY slave nodes ("pts0" … "pts7") are registered once by
+    // pty_init: devfs has no unregister API, so they are permanent
+    // bindings to &pty_table[N].
+    if (strncmp(name, "pts", 3) == 0 && name[3] >= '0' && name[3] <= '7' &&
+        name[4] == '\0') {
+        registered_pts_calls++;
+        return 0;
     }
     return -EINVAL;
 }
@@ -204,6 +213,10 @@ static void test_pty_init_success(void)
 
     assert_eq(0, rc);
     assert_eq(1, registered_ptmx_calls);
+    // The slave nodes are registered exactly once: they are permanent
+    // bindings, so a second registration would fail with -EEXIST and
+    // break every later open("/dev/ptmx").
+    assert_eq(PTY_MAX, registered_pts_calls);
 }
 
 int main(void)

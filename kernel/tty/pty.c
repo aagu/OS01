@@ -29,6 +29,18 @@ static int ptmx_open(const char *name, file_t **out_file);
 static int ptsN_open(const char *name, file_t **out_file);
 static const struct devfs_ops pty_slave_ops;
 
+// ── The slave device name for a slot index: "pts0" … "pts7" ────
+//
+// The name IS the binding: "/dev/pts{N}" always refers to
+// &pty_table[N].  The nodes are registered once (pty_init) and never
+// re-created, because devfs has no unregister API.
+static void pty_slave_name(char *buf, int index)
+{
+    buf[0] = 'p'; buf[1] = 't'; buf[2] = 's';
+    buf[3] = '0' + index;
+    buf[4] = '\0';
+}
+
 // ═══════════════════════════════════════════════════════════════
 //  PTY table
 // ═══════════════════════════════════════════════════════════════
@@ -264,24 +276,11 @@ static int ptmx_open(const char *name, file_t **out_file)
         return -ENOMEM;
     }
 
-    // Register the slave device node: "/dev/pts{N}"
-    char slave_name[16];
-    slave_name[0] = 'p'; slave_name[1] = 't'; slave_name[2] = 's';
-    slave_name[3] = '0' + pty->index;
-    slave_name[4] = '\0';
-    int rc = devfs_register_chrdev(slave_name, pty, &pty_slave_ops);
-    if (rc < 0) {
-        // Rollback: free pipes and release slot
-        if (pty->master_to_slave) pipe_free(pty->master_to_slave);
-        if (pty->slave_to_master) pipe_free(pty->slave_to_master);
-        pty->master_to_slave = NULL;
-        pty->slave_to_master = NULL;
-        uint64_t fl = spin_lock_irqsave(&pty_lock);
-        pty->allocated = false;
-        spin_unlock_irqrestore(&pty_lock, fl);
-        file_free(f);
-        return rc;
-    }
+    // The slave node "/dev/pts{N}" is already registered (pty_init) and
+    // stays bound to &pty_table[N] for the lifetime of the system, so
+    // this open does not touch devfs.  Re-registering it here would
+    // fail with -EEXIST on the second master and permanently break
+    // every later open("/dev/ptmx").
 
     f->type = FD_PTY_MASTER;
     f->pty = pty;
@@ -312,9 +311,7 @@ static int ptsN_open(const char *name, file_t **out_file)
         if (!pty_table[i].allocated) continue;
         // Build expected suffix "pts0" … "pts7"
         char expected[6];
-        expected[0] = 'p'; expected[1] = 't'; expected[2] = 's';
-        expected[3] = '0' + i;
-        expected[4] = '\0';
+        pty_slave_name(expected, i);
         int elen = 4;
         if (name_len >= elen &&
             strcmp(name + name_len - elen, expected) == 0) {
@@ -354,7 +351,7 @@ static const struct devfs_ops ptmx_ops = {
 };
 
 // ═══════════════════════════════════════════════════════════════
-//  pty_init: initialise table, register /dev/ptmx
+//  pty_init: initialise table, register /dev/ptmx and the slave nodes
 // ═══════════════════════════════════════════════════════════════
 
 int pty_init(void)
@@ -368,6 +365,29 @@ int pty_init(void)
     if (rc != 0) {
         log_err("pty: failed to register /dev/ptmx (%d)\n", rc);
         return rc;
+    }
+
+    // The slave nodes are PERMANENT bindings: "/dev/pts{N}" always
+    // refers to &pty_table[N], and the slot index never changes for a
+    // given node.  They are registered ONCE, here, because devfs has no
+    // unregister API: a node created on the first master open outlived
+    // that PTY, so the next master open for the same index failed with
+    // -EEXIST and every later open("/dev/ptmx") failed — a terminal that
+    // restarted could never get its PTY back.
+    //
+    // Opening a slave whose slot is not allocated still fails with
+    // -ENOENT (see ptsN_open), so the user-visible behaviour is
+    // unchanged: only the node's lifetime changed.
+    for (int i = 0; i < PTY_MAX; i++) {
+        char slave_name[8];
+        pty_slave_name(slave_name, i);
+        rc = devfs_register_chrdev(slave_name, &pty_table[i],
+                                   &pty_slave_ops);
+        if (rc != 0) {
+            log_err("pty: failed to register /dev/%s (%d)\n",
+                    slave_name, rc);
+            return rc;
+        }
     }
     return 0;
 }
