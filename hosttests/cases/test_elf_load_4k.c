@@ -1402,6 +1402,55 @@ TEST_FUNC(test_pie_reject_before_mapping)
         assert_eq(0, elf_load_state.total_allocs);
         teardown_fixture();
     }
+
+    /* 8. Eager-binding flags: lld -z now links emit DT_FLAGS=DF_BIND_NOW and
+     *    DT_FLAGS_1=NOW|PIE (lld-22 shape); binding is eager here anyway, so
+     *    exactly those bits must load.  Missing DF_1_PIE, other DF_1 bits,
+     *    other DT_FLAGS bits, or duplicates are rejected. */
+    {
+        elf64_dyn_t ok[] = {
+            { DT_FLAGS, DF_BIND_NOW },
+            { DT_FLAGS_1, DF_1_NOW | DF_1_PIE },
+            { DT_NULL, 0 }
+        };
+        setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                      ok, 3, NULL, 0, NULL, NULL), 0x100000ULL);
+        stubs_rng_push(true, 0);
+        x86_elf_image_t img;
+        memset(&img, 0, sizeof(img));
+        assert_eq(0, elf_load(&fixture_node, &fixture_mm, &img));
+        assert_true(img.is_pie);
+        teardown_fixture();
+
+        struct { elf64_dyn_t dyns[3]; } cases[] = {
+            { { { DT_FLAGS_1, DF_1_NOW | DF_1_PIE }, { DT_NULL, 0 }, { 0, 0 } } }, /* no DT_FLAGS: fine */
+            { { { DT_FLAGS_1, DF_1_NOW }, { DT_NULL, 0 }, { 0, 0 } } },             /* PIE missing */
+            { { { DT_FLAGS_1, 0x8ULL /* NODELETE */ | DF_1_PIE }, { DT_NULL, 0 }, { 0, 0 } } },
+            { { { DT_FLAGS, 0x4ULL /* DF_TEXTREL */ },
+                { DT_FLAGS_1, DF_1_NOW | DF_1_PIE }, { DT_NULL, 0 } } },
+            { { { DT_FLAGS, DF_BIND_NOW }, { DT_FLAGS, DF_BIND_NOW },
+                { DT_FLAGS_1, DF_1_NOW | DF_1_PIE } } }, /* duplicate + no NULL */
+        };
+        /* case 0 must also load (DT_FLAGS absent is legal); cases 1..4 reject */
+        setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                      cases[0].dyns, 2, NULL, 0, NULL, NULL), 0x100000ULL);
+        stubs_rng_push(true, 0);
+        memset(&img, 0, sizeof(img));
+        assert_eq(0, elf_load(&fixture_node, &fixture_mm, &img));
+        assert_true(img.is_pie);
+        teardown_fixture();
+
+        size_t dyn_counts[] = { 0, 2, 2, 3, 3 };
+        for (size_t c = 1; c < sizeof(cases) / sizeof(cases[0]); c++) {
+            setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                          cases[c].dyns, dyn_counts[c],
+                                          NULL, 0, NULL, NULL), 0x100000ULL);
+            assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+            assert_eq(0, elf_load_state.total_rng_calls);
+            assert_eq(0, elf_load_state.total_allocs);
+            teardown_fixture();
+        }
+    }
 }
 
 TEST_FUNC(test_pie_failure_unwinds)

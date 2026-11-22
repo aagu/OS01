@@ -100,12 +100,15 @@ typedef struct {
 #define DT_DEBUG     21
 #define DT_TEXTREL   22
 #define DT_JMPREL    23
+#define DT_FLAGS     30
 #define DT_RELR      36
 #define DT_FLAGS_1   0x6ffffffbLL
 #define DT_RELACOUNT 0x6ffffff9LL
 #define DT_GNU_HASH  0x6ffffef5LL
 
 #define DF_1_PIE     0x08000000U
+#define DF_1_NOW     0x00000001U
+#define DF_BIND_NOW  0x08U
 
 #define R_X86_64_RELATIVE 8U
 #define ELF64_R_SYM(info)  ((uint32_t)((info) >> 32))

@@ -226,6 +226,7 @@ int x86_elf_pie_prepare(vfs_node_t *node,
         return -ENOEXEC;
 
     bool seen_null = false;
+    bool has_flags = false;
     bool has_flags_1 = false;
     bool has_rela = false, has_relasz = false, has_relaent = false, has_relacount = false;
     bool has_strtab = false, has_strsz = false, has_symtab = false, has_syment = false;
@@ -252,8 +253,24 @@ int x86_elf_pie_prepare(vfs_node_t *node,
                 break;
             }
             switch (tag) {
+            case DT_FLAGS:
+                /* lld emits DT_FLAGS with DF_BIND_NOW alongside DT_FLAGS_1's
+                 * DF_1_NOW for -z now links; binding is eager either way
+                 * because every relocation here is R_X86_64_RELATIVE.  Any
+                 * other flag bit (TEXTREL, SYMBOLIC, STATIC_TLS, ...) names
+                 * semantics this loader does not implement. */
+                if (has_flags || (val & ~DF_BIND_NOW) != 0)
+                    return -ENOEXEC;
+                has_flags = true;
+                break;
             case DT_FLAGS_1:
-                if (has_flags_1 || val != DF_1_PIE) return -ENOEXEC;
+                /* DF_1_NOW rides along with DF_1_PIE on -z now links
+                 * (lld-22 emits it; binding is eager here regardless).
+                 * DF_1_PIE must be set; any other bit names behaviour
+                 * this loader does not implement. */
+                if (has_flags_1 || !(val & DF_1_PIE) ||
+                    (val & ~(DF_1_PIE | DF_1_NOW)))
+                    return -ENOEXEC;
                 has_flags_1 = true;
                 break;
             case DT_RELA:
