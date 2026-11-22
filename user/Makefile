@@ -68,10 +68,6 @@ else
 USER_ARCH := x86_64
 endif
 
-CFLAGS := --sysroot=$(SYSROOT_DIR) \
-          -ffreestanding -fstack-protector-strong -fno-asynchronous-unwind-tables \
-          -I$(TARGET_INCDIR) \
-          -Icommon -Wall -Wextra -O2
 # Startup object ships with the sysroot; the sigreturn trampoline is a
 # libc.a member pulled by sigaction()/signal() (or explicit sa_restorer users).
 CRT0_OBJ := $(TARGET_LIBDIR_LOCAL)/crt0.o
@@ -133,7 +129,7 @@ $(RUNTIME_PROBE_OBJ): $(OS01_ROOT)/runtime/selftest/$(RUNTIME_PROBE_NAME).c \
 	$(EFFECTIVE_CC) $(CFLAGS) -I$(OS01_ROOT)/runtime/selftest \
 		-MD -MP -c $< -o $@
 
-$(RUNTIME_PROBE_ELF): $(RUNTIME_PROBE_OBJ) $(CRT0_OBJ) $(LINKER_SCRIPT) \
+$(RUNTIME_PROBE_ELF): $(RUNTIME_PROBE_OBJ) $(CRT0_OBJ) $(LINKER_SCRIPT) $(USER_LINK_KEY) \
                       $(USER_RUNTIME_ARCHIVE) $(TARGET_LIBC)
 	@mkdir -p $(dir $@)
 	$(TARGET_LD) $(USER_RAW_LDFLAGS) -o $@ $(CRT0_OBJ) \

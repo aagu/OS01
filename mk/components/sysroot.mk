@@ -142,6 +142,7 @@ MBEDTLS_BUILD_DIR := $(BUILD_DIR)/thirdparty/mbedtls-build
 MBEDTLS_STAGING   := $(STAGING_DIR)/mbedtls
 MBEDTLS_CC_FLAGS  := --sysroot=$(STAGING_DIR)/libc -isystem $(STAGING_DIR)/libc/usr/include \
                      -g -ffreestanding -fno-stack-protector \
+                     $(if $(filter aarch64-none-elf,$(RUNTIME_TARGET_user)),-fno-pic -fno-pie,-fPIE -mcmodel=small -mno-red-zone) \
                      -I$(MBEDTLS_PRIVATE)/include -I$(MBEDTLS_PRIVATE)/library \
                      -DMBEDTLS_USER_CONFIG_FILE='<mbedtls/os01_mbedtls_config.h>'
 

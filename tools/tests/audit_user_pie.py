@@ -123,6 +123,8 @@ def audit_elf_bytes(data: bytes, expect_pie: bool = True, machine: int = EM_X86_
                 errs.append(f"PT_LOAD[{i}] has W+X")
             if (p_off & 0xFFF) != (p_va & 0xFFF):
                 errs.append(f"PT_LOAD[{i}] p_offset/p_vaddr congruence mismatch")
+            if p_align != 0 and (p_align & (p_align - 1)) != 0:
+                errs.append(f"PT_LOAD[{i}] non-power-of-2 p_align {p_align:#x}")
             plo = p_va & ~0xFFF
             phi = (p_va + p_msz + 0xFFF) & ~0xFFF
             if phi > X86_PIE_LINK_END:
@@ -149,11 +151,23 @@ def audit_elf_bytes(data: bytes, expect_pie: bool = True, machine: int = EM_X86_
         return errs
 
     _df, dyn_off, dyn_va, dyn_fsz, dyn_msz = dyn_ph
-    if dyn_fsz != dyn_msz or dyn_fsz < 16 or (dyn_fsz % 16) != 0 or dyn_fsz > 64 * 16:
-        errs.append("invalid PT_DYNAMIC size")
+    if (dyn_va & 7) != 0 or dyn_fsz != dyn_msz or dyn_fsz < 16 or (dyn_fsz % 16) != 0 or dyn_fsz > 64 * 16:
+        errs.append("invalid PT_DYNAMIC alignment or size")
         return errs
     if dyn_off + dyn_fsz > len(data):
         errs.append("PT_DYNAMIC exceeds file size")
+        return errs
+    dyn_seg_ok = False
+    for i in range(e_phnum):
+        p_type, p_flags, p_off, p_va, _pa, p_fsz, _msz, _al = struct.unpack_from(
+            PHDR_FMT, data, e_phoff + i * 56
+        )
+        if p_type == PT_LOAD and p_va <= dyn_va and dyn_va + dyn_fsz <= p_va + p_fsz:
+            if (p_flags & PF_W) and not (p_flags & PF_X) and (p_off + (dyn_va - p_va)) == dyn_off:
+                dyn_seg_ok = True
+            break
+    if not dyn_seg_ok:
+        errs.append("PT_DYNAMIC not in RW NX file-backed PT_LOAD")
         return errs
 
     seen_null = False
@@ -188,11 +202,17 @@ def audit_elf_bytes(data: bytes, expect_pie: bool = True, machine: int = EM_X86_
         if tags[DT_RELAENT] != 24 or (tags[DT_RELASZ] % 24) != 0:
             errs.append("bad DT_RELAENT/DT_RELASZ")
         n_rela = tags[DT_RELASZ] // 24
+        if n_rela > 65536:
+            errs.append(f"DT_RELASZ exceeds 65536 entries ({n_rela})")
         if DT_RELACOUNT in tags and tags[DT_RELACOUNT] != n_rela:
             errs.append("DT_RELACOUNT mismatch")
         if n_rela > 0:
             rela_va = tags[DT_RELA]
             rela_sz = tags[DT_RELASZ]
+            if (rela_va & 7) != 0:
+                errs.append("DT_RELA unaligned")
+            if rela_va < dyn_va + dyn_fsz and dyn_va < rela_va + rela_sz:
+                errs.append("DT_RELA overlaps PT_DYNAMIC")
             # Find file offset of rela_va in PHDRs
             rela_off = None
             rw_segs = []
@@ -217,6 +237,8 @@ def audit_elf_bytes(data: bytes, expect_pie: bool = True, machine: int = EM_X86_
                     errs.append(f"RELA[{r_idx}] unaligned r_offset")
                 if r_add < 0 or r_add > max_page_end:
                     errs.append(f"RELA[{r_idx}] out-of-range addend {r_add}")
+                if (r_off < dyn_va + dyn_fsz and dyn_va < r_off + 8) or (r_off < rela_va + rela_sz and rela_va < r_off + 8):
+                    errs.append(f"RELA[{r_idx}] target {r_off:#x} overlaps PT_DYNAMIC/DT_RELA")
                 if not any(lo <= r_off and r_off + 8 <= hi for lo, hi in rw_segs):
                     errs.append(f"RELA[{r_idx}] target {r_off:#x} not in RW NX PT_LOAD")
 
