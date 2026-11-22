@@ -5,6 +5,7 @@
  * timing: strict
  * tier: nightly
  * link: sched-aarch64-migration
+ * scenarios: [sched.aarch64_migration.unit]
  */
 
 #define SCHED_NOTIFY_TEST_COMMON_SPIES 1

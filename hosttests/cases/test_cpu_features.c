@@ -5,7 +5,7 @@
  * timing: strict
  * tier: pr
  * link: cpu-features
- * scenarios: [arch.cpu_features]
+ * scenarios: [arch.cpu_features.unit]
  */
 /* hosttests/cases/test_cpu_features.c — Unit tests for the unified
  * arch_cpu_features() facade and x86_64 / aarch64 register decoders.

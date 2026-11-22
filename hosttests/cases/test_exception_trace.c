@@ -4,7 +4,7 @@
  * subsystem: intr
  * timing: strict
  * tier: pr
- * scenarios: []
+ * scenarios: [intr.exception_trace.unit]
  */
 #include <test_framework.h>
 #include <stdbool.h>

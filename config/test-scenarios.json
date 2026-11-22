@@ -8454,6 +8454,208 @@
    }
   },
   {
+   "id": "arch.cpu_features.unit",
+   "owner": "host",
+   "component": "arch",
+   "behavior": "cpu_features",
+   "trigger": "host runner invokes test_cpu_features.elf",
+   "assertions": [
+    "the unified arch_cpu_features() bit layout keeps ARCH_CPU_FEAT_FPU, ARCH_CPU_FEAT_VIRT and ARCH_CPU_FEAT_CACHE_COHERENCY distinct and non-zero",
+    "the x86_64 CPUID decoder maps the queried feature bits onto the unified facade",
+    "the aarch64 ID register decoder maps PFR0_EL2/PFR0_FP onto the unified facade",
+    "the live arch_cpu_features() query publishes the facade's own feature bits"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_cpu_features: a decoder maps a register bit onto the wrong unified feature flag"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_cpu_features.c",
+    "selector": "test_cpu_features",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying the unified arch_cpu_features() facade and its x86_64 / aarch64 decoders"
+   }
+  },
+  {
+   "id": "intr.exception_trace.unit",
+   "owner": "host",
+   "component": "intr",
+   "behavior": "exception_trace",
+   "trigger": "host runner invokes test_exception_trace.elf",
+   "assertions": [
+    "a four-frame trace publishes the frame chain and the END marker in order",
+    "the PC-only mode still walks the frame chain and the user-origin read path returns zero for an unmapped source"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_exception_trace: the trace walker drops a frame or loses the END marker"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_exception_trace.c",
+    "selector": "test_exception_trace",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying the shared exception-trace frame walker"
+   }
+  },
+  {
+   "id": "intr.trace_symbols.unit",
+   "owner": "host",
+   "component": "intr",
+   "behavior": "trace_symbols",
+   "trigger": "host runner invokes test_trace_symbols.elf",
+   "assertions": [
+    "an empty symbol fixture leaves the trace symbol lookup unresolved",
+    "a missing symbol fixture leaves the trace symbol lookup unresolved"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_trace_symbols: the symbol lookup resolves a name it must not resolve"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_trace_symbols.c",
+    "selector": "test_trace_symbols",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying the kallsyms-backed trace symbol lookup against empty and missing fixtures"
+   }
+  },
+  {
+   "id": "intr.unwind_aarch64.unit",
+   "owner": "host",
+   "component": "intr",
+   "behavior": "unwind_aarch64",
+   "trigger": "host runner invokes test_unwind_aarch64.elf",
+   "assertions": [
+    "a valid frame-pointer read is accepted and an aborted read stops the unwind",
+    "an invalid frame pointer and a non-matching fault are rejected"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_unwind_aarch64: the AArch64 fixup accepts a corrupt frame chain"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_unwind_aarch64.c",
+    "selector": "test_unwind_aarch64",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying the AArch64 unwind fixup"
+   }
+  },
+  {
+   "id": "intr.unwind_fixup_x86.unit",
+   "owner": "host",
+   "component": "intr",
+   "behavior": "unwind_fixup_x86",
+   "trigger": "host runner invokes test_unwind_fixup_x86.elf",
+   "assertions": [
+    "a CPL0 read fault is accepted by the x86_64 fixup on both load paths",
+    "a non-matching fault is rejected by the fixup"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_unwind_fixup_x86: the x86_64 fixup accepts a fault it must reject"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_unwind_fixup_x86.c",
+    "selector": "test_unwind_fixup_x86",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying the x86_64 unwind fixup fault filter"
+   }
+  },
+  {
+   "id": "intr.unwind_x86_stack.unit",
+   "owner": "host",
+   "component": "intr",
+   "behavior": "unwind_x86_stack",
+   "trigger": "host runner invokes test_unwind_x86_stack.elf",
+   "assertions": [
+    "an unpublished BSP or AP stack is rejected by the x86_64 stack resolver",
+    "a published AP stack, the IST stack and an invalid TSS are classified as the resolver expects"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_unwind_x86_stack: the x86_64 stack resolver publishes an unpublished stack"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_unwind_x86_stack.c",
+    "selector": "test_unwind_x86_stack",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying the x86_64 published-stack resolution used by the unwinder"
+   }
+  },
+  {
+   "id": "libc.math.unit",
+   "owner": "host",
+   "component": "libc",
+   "behavior": "math",
+   "trigger": "host runner invokes test_libc_math.elf",
+   "assertions": [
+    "the published math.h contract keeps its declared prototypes and the implicit-conversion and isfinite/signbit call sites valid",
+    "the sixteen published libm symbols return the documented results, including a NaN and the infinities"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_libc_math: a published libm symbol returns a wrong result"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_libc_math.c",
+    "selector": "test_libc_math",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying the published libm archive against the math.h contract"
+   }
+  },
+  {
+   "id": "sched.aarch64_migration.unit",
+   "owner": "host",
+   "component": "sched",
+   "behavior": "aarch64_migration",
+   "trigger": "host runner invokes test_sched_aarch64_migration.elf",
+   "assertions": [
+    "the positive path pulls a user task onto the least-loaded eligible CPU",
+    "the negative gates reject a pull that no ready CPU or scheduler state allows"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_sched_aarch64_migration: a pull that must be gated is accepted"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_sched_aarch64_migration.c",
+    "selector": "test_sched_aarch64_migration",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying the AArch64 user-task pull migration path"
+   }
+  },
+  {
    "id": "boot.lma.configure",
    "owner": "static",
    "component": "boot",
@@ -8659,7 +8861,7 @@
   },
   {
    "id": "sanitizers.build.contract",
-   "owner": "kernel",
+   "owner": "contract",
    "component": "kernel",
    "behavior": "sanitizer-instrumentation",
    "trigger": "make PROFILE=x86_64-clang test-kernel-sanitizers-contract",
@@ -8676,7 +8878,7 @@
     "Runtime re-entering its own instrumentation, or low-VA accesses #GP in instrumented builds"
    ],
    "primary": {
-    "layer": "build-contract",
+    "layer": "contract",
     "source": "qemutests/test_kernel_sanitizers.py",
     "selector": "SanitizerBuildContract",
     "evidence": "UNITTEST_OK"
@@ -8689,7 +8891,7 @@
   },
   {
    "id": "sanitizers.probe.live_qemu",
-   "owner": "kernel",
+   "owner": "qemu_e2e",
    "component": "kernel",
    "behavior": "sanitizer-violation-detection",
    "trigger": "make PROFILE=x86_64-clang test-kernel-sanitizers",
@@ -8702,7 +8904,7 @@
     "Instrumentation silently absent (no report), report without armed marker, or panic path losing the serial evidence"
    ],
    "primary": {
-    "layer": "qemu-e2e",
+    "layer": "qemu_e2e",
     "source": "qemutests/test_kernel_sanitizers.py",
     "selector": "SanitizerLiveProbe.test_probe_reports_and_panics",
     "evidence": "UNITTEST_OK"

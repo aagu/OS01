@@ -5,7 +5,7 @@
  * timing: strict
  * tier: nightly
  * link: libc-math
- * scenarios: []
+ * scenarios: [libc.math.unit]
  */
 /*
  * test_libc_math.c — the public math.h contract.

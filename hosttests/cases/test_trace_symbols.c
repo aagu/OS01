@@ -4,7 +4,7 @@
  * subsystem: intr
  * timing: strict
  * tier: pr
- * scenarios: []
+ * scenarios: [intr.trace_symbols.unit]
  */
 #include <test_framework.h>
 #include <core/trace_symbols.h>

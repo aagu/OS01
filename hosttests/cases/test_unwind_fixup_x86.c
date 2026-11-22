@@ -4,7 +4,7 @@
  * subsystem: intr
  * timing: strict
  * tier: pr
- * scenarios: []
+ * scenarios: [intr.unwind_fixup_x86.unit]
  */
 #include <test_framework.h>
 #include <stdint.h>

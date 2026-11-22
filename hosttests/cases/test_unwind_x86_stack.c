@@ -4,7 +4,7 @@
  * subsystem: intr
  * timing: strict
  * tier: pr
- * scenarios: []
+ * scenarios: [intr.unwind_x86_stack.unit]
  */
 #include <test_framework.h>
 #include <stdbool.h>
