@@ -228,7 +228,12 @@ int main(void)
         gfx_close(disp.gfx);
         dup2(slave, 0); dup2(slave, 1); dup2(slave, 2);
         close(slave); close(pty_fd); close(tty_fd); close(fb_fd);
-        exec(shell_path, ash_argv, environ);
+        int erc = exec(shell_path, ash_argv, environ);
+        char ebuf[112];
+        snprintf(ebuf, sizeof ebuf,
+                 "[terminal] ERROR: exec %s failed rc=%d errno=%d\r\n",
+                 shell_path, erc, errno);
+        serial_msg(serial_fd, ebuf);
         exit(1);
     }
     close(slave);
@@ -540,7 +545,23 @@ int main(void)
         term_render_clear(&disp.render);
         gfx_present(disp.gfx);
     }
-    if (ash_pid > 0) waitpid(ash_pid, NULL, 0);
+    if (ash_pid > 0) {
+        int wst = 0;
+        waitpid(ash_pid, &wst, 0);
+        char wbuf[112];
+        if (WIFEXITED(wst))
+            snprintf(wbuf, sizeof wbuf,
+                     "[terminal] WARN: ash exited code=%d\r\n",
+                     WEXITSTATUS(wst));
+        else if (WIFSIGNALED(wst))
+            snprintf(wbuf, sizeof wbuf,
+                     "[terminal] WARN: ash killed by signal %d\r\n",
+                     WTERMSIG(wst));
+        else
+            snprintf(wbuf, sizeof wbuf,
+                     "[terminal] WARN: ash wait status=%#x\r\n", wst);
+        serial_msg(serial_fd, wbuf);
+    }
     term_core_free(&core);
     terminal_display_close(&disp);
     close(fb_fd);
