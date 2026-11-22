@@ -1439,12 +1439,16 @@ struct copy_cow_stage {
     uint64_t        new_pa;   /* 0: unique-reference same-PA upgrade */
 };
 
-int user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len, bool write)
+static int user_vm_validate_copy_range(mm_t *mm, uint64_t addr, size_t len,
+                                       bool write, size_t *cow_count_out)
 {
     if (!mm)
         return -EFAULT;
-    if (len == 0)
+    if (len == 0) {
+        if (cow_count_out)
+            *cow_count_out = 0;
         return 0;
+    }
     if (addr < AARCH64_USER_MIN || addr >= AARCH64_USER_LIMIT)
         return -EFAULT;
     if ((uint64_t)len > AARCH64_USER_LIMIT - addr)
@@ -1453,13 +1457,12 @@ int user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len, bool write)
     uint64_t start = addr & ~((uint64_t)PAGE_4K_SIZE - 1);
     uint64_t end   = page_align_up(addr + (uint64_t)len);
     uint64_t *root = aarch64_user_vm_root_va(mm);
-    int rc;
 
-    /* Pass 1 — complete read-only validation.  A write range accepts
-     * a writable leaf, a legal absent page, or a shared logically-RW
-     * page whose hardware leaf is RO/NX (the COW target).  Logical RO
-     * and every non-leaf-level shape are rejected before anything is
-     * allocated or changed. */
+    /* Complete read-only validation.  A write range accepts a writable
+     * leaf, a legal absent page, or a shared logically-RW page whose
+     * hardware leaf is RO/NX (the COW target).  Logical RO and every
+     * non-leaf-level shape are rejected before anything is allocated
+     * or changed. */
     size_t cow_count = 0;
     for (uint64_t va = start; va < end; va += PAGE_4K_SIZE) {
         struct user_vm_leaf leaf;
@@ -1487,6 +1490,33 @@ int user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len, bool write)
             return -EFAULT;
         }
     }
+
+    if (cow_count_out)
+        *cow_count_out = cow_count;
+    return 0;
+}
+
+bool user_vm_range_accessible(mm_t *mm, uint64_t addr, size_t len, bool write)
+{
+    return user_vm_validate_copy_range(mm, addr, len, write, NULL) == 0;
+}
+
+int user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len, bool write)
+{
+    if (!mm)
+        return -EFAULT;
+    if (len == 0)
+        return 0;
+
+    /* Pass 1 — complete read-only validation. */
+    size_t cow_count = 0;
+    int rc = user_vm_validate_copy_range(mm, addr, len, write, &cow_count);
+    if (rc != 0)
+        return rc;
+
+    uint64_t start = addr & ~((uint64_t)PAGE_4K_SIZE - 1);
+    uint64_t end   = page_align_up(addr + (uint64_t)len);
+    uint64_t *root = aarch64_user_vm_root_va(mm);
 
     if (cow_count > SIZE_MAX / sizeof(struct copy_cow_stage))
         return -ENOMEM;

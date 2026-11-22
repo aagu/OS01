@@ -3340,6 +3340,78 @@ TEST_FUNC(test_shared_file_protect_ceiling)
     assert_eq(user_vm_test_double_frees(), 0);
 }
 
+/* Pure read-only range check (used by aarch64 syscall_check_user_range):
+ * accepts eligible COW-downgraded stack/anon leaves and authorised absent
+ * VMA pages without allocating or mutating leaves/refs, and rejects
+ * logical-RO, PROT_NONE stashed, holes, and VMA_IO. */
+TEST_FUNC(test_range_accessible_cow_and_absent)
+{
+    user_vm_test_reset();
+    mm_t *parent = new_mm(HEAP_BASE);
+    mm_t *child  = new_child_mm(0x9000);
+
+    /* Stack page (RW/NX) and RO ELF page, plus an untouched RW anon VMA
+     * and a PROT_NONE stashed page. */
+    uint64_t stack_va = AARCH64_USER_STACK_BASE;
+    uint64_t stack_pa = alloc_4k_page();
+    assert_true(stack_pa != 0);
+    assert_eq(0, user_vm_map_image_page(parent, stack_va, stack_pa,
+                                        VM_USER_RW | VM_NO_EXEC));
+
+    uint64_t ro_va = BASE;
+    assert_eq((int64_t)ro_va,
+              test_mmap_call(parent, ro_va, 0x1000, PROT_READ,
+                             MAP_ANON_PRIVATE | MAP_FIXED));
+    assert_eq(0, user_vm_fault(parent, ro_va, false));
+
+    uint64_t absent_va = BASE + 0x2000;
+    assert_eq((int64_t)absent_va,
+              test_mmap_call(parent, absent_va, 0x1000, PROT_RW,
+                             MAP_ANON_PRIVATE | MAP_FIXED));
+
+    uint64_t none_va = BASE + 0x4000;
+    assert_eq((int64_t)none_va,
+              test_mmap_call(parent, none_va, 0x1000, PROT_RW,
+                             MAP_ANON_PRIVATE | MAP_FIXED));
+    assert_eq(0, user_vm_fault(parent, none_va, true));
+    assert_eq(0, user_vm_mprotect(parent, none_va, 0x1000, PROT_NONE));
+
+    /* Fork downgrades the stack page to hardware RO/NX (COW). */
+    struct clone_publish_probe probe = { 0, 0 };
+    assert_eq(0, user_vm_clone_fork(parent, child, clone_publish_ok, &probe));
+    assert_eq(VM_USER_RO | VM_NO_EXEC, user_vm_test_leaf_vm(stack_va));
+    assert_eq(2, page_cow_refs(stack_pa));
+
+    /* Pure check accepts the COW stack page for write without breaking COW
+     * or changing refcounts. */
+    assert_true(user_vm_range_accessible(parent, stack_va + 0x100, 8, true));
+    assert_true(user_vm_range_accessible(parent, stack_va + 0x100, 8, false));
+    assert_eq(VM_USER_RO | VM_NO_EXEC, user_vm_test_leaf_vm(stack_va));
+    assert_eq(2, page_cow_refs(stack_pa));
+
+    /* Absent RW VMA is accepted for both read and write without faulting
+     * it in; unmapped hole is rejected. */
+    assert_true(user_vm_range_accessible(parent, absent_va, 0x1000, true));
+    assert_true(user_vm_range_accessible(parent, absent_va, 0x1000, false));
+    assert_eq(0, user_vm_test_leaf_state(absent_va));
+    assert_false(user_vm_range_accessible(parent, BASE + 0x1000, 8, false));
+    assert_false(user_vm_range_accessible(parent, BASE + 0x1000, 8, true));
+
+    /* Logical-RO is accepted for read, rejected for write. */
+    assert_true(user_vm_range_accessible(parent, ro_va, 8, false));
+    assert_false(user_vm_range_accessible(parent, ro_va, 8, true));
+
+    /* Stashed PROT_NONE is rejected for both read and write. */
+    assert_false(user_vm_range_accessible(parent, none_va, 8, false));
+    assert_false(user_vm_range_accessible(parent, none_va, 8, true));
+
+    destroy_mm(child);
+    destroy_mm(parent);
+    assert_eq(user_vm_test_page_allocs() - user_vm_test_page_alloc_fails(),
+              user_vm_test_free_count());
+    assert_eq(user_vm_test_double_frees(), 0);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_mmap_and_brk_growth_allocate_no_pages),
     TEST_ENTRY(test_mprotect_split_node_failure_changes_nothing),
@@ -3406,6 +3478,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_shared_anon_fork_backing_publish_fail),
     TEST_ENTRY(test_shared_vma_retire),
     TEST_ENTRY(test_shared_file_protect_ceiling),
+    TEST_ENTRY(test_range_accessible_cow_and_absent),
 TEST_LIST_END
 
 int main(void)

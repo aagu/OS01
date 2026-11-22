@@ -185,6 +185,14 @@ int user_vm_fault(mm_t *mm, uint64_t far, bool write);
  * failure. */
 int user_vm_cow_fault(mm_t *mm, uint64_t far);
 
+/* Pure read-only snapshot of whether [addr, addr+len) is accessible
+ * for read or write — matching user_vm_prepare_copy() Pass 1: accepts
+ * present leaves with the requested permission, eligible COW leaves
+ * (shared logically-writable RO/NX), and absent pages authorised by a
+ * heap or mmap VMA.  Never allocates, mutates PTEs or changes COW
+ * references; safe on a live published root with local IRQs masked. */
+bool user_vm_range_accessible(mm_t *mm, uint64_t addr, size_t len, bool write);
+
 /* Pre-instantiate every absent page of [addr, addr+len) that is
  * authorised by a heap or anonymous VMA.  Validation is a complete
  * read-only pass first: any hole, PROT_NONE page or insufficient

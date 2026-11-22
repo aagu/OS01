@@ -24,6 +24,7 @@
 #include <arch/aarch64/user_task.h>
 #include <arch/aarch64/user_mm.h>
 #include <arch/aarch64/user_vm.h>
+#include <arch/aarch64/user_vm_policy.h>
 #include <arch/aarch64/vmm_gate.h>
 #ifdef AARCH64_USER_RUNTIME_CASE_MIGRATION
 #include <selftest/aarch64_user_runtime.h>
@@ -302,11 +303,22 @@ bool syscall_check_user_range(uint64_t addr, uint64_t len, bool writable)
 {
     if (len == 0)
         return true;
+    if (len > (uint64_t)SSIZE_MAX)
+        return false;
 
+    arch_irq_state_t state = arch_local_irq_save();
     struct mm_struct *mm = NULL;
     uint64_t root_pa = 0;
-    return aarch64_user_range_precheck(addr, (size_t)len, writable, false,
-                                       &mm, &root_pa) == AARCH64_RANGE_OK;
+    enum aarch64_range_result r =
+        aarch64_user_range_precheck(addr, (size_t)len, writable, false,
+                                    &mm, &root_pa);
+    bool ok = false;
+    if (r == AARCH64_RANGE_OK)
+        ok = true;
+    else if (r == AARCH64_RANGE_PERMISSION)
+        ok = user_vm_range_accessible(mm, addr, (size_t)len, writable);
+    arch_local_irq_restore(state);
+    return ok;
 }
 
 #if AARCH64_EL0_TEST
