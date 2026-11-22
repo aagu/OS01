@@ -285,6 +285,14 @@ static void release_retired_vmas(list_t *retired)
     }
 }
 
+static inline uint64_t mmap_effective_limit(uint64_t addr_limit)
+{
+    uint64_t limit = addr_limit & PAGE_4K_MASK;
+    if (limit > X86_USER_MMAP_MAX_ADDR)
+        limit = X86_USER_MMAP_MAX_ADDR;
+    return limit;
+}
+
 // do_munmap — half-open [addr, addr+length).  Holes inside the range
 // are allowed; only existing VMAs are edited.
 int64_t do_munmap(uint64_t addr, uint64_t length)
@@ -304,7 +312,8 @@ int64_t do_munmap(uint64_t addr, uint64_t length)
         return -EINVAL;
     if (!current->mm)
         return -EINVAL;
-    if (end > current->addr_limit)
+    uint64_t limit = mmap_effective_limit(current->addr_limit);
+    if (end > limit)
         return -EINVAL;
     if (mm_user_range_protected(current->mm, addr, end))
         return -EINVAL;
@@ -445,35 +454,55 @@ static int mmap_dev_commit(void *ctxp, uint64_t first_pa,
     return 0;
 }
 // ── do_mmap ───────────────────────────────────────────────────
-// First-fit gap search above mmap_base.  Callers hold mm->lock when
-// using the result for a commit.
-static uint64_t mmap_find_gap(mm_t *mm, uint64_t length)
+// First-fit gap search above mmap_base within [search, upper_limit).
+// Callers hold mm->lock and pass a nonzero 4 KiB-aligned length.
+static int mmap_find_gap_locked(mm_t *mm, uint64_t length,
+                                uint64_t upper_limit, uint64_t *out_addr)
 {
     uint64_t search = mm->mmap_base;
-    vma_t *prev = NULL;
-    list_t *pos = mm->vma_list.next;
-    while (pos != &mm->vma_list) {
-        vma_t *v = container_of(pos, vma_t, list);
-        uint64_t gap_start = prev ? prev->vm_end : search;
-        if (gap_start < search) gap_start = search;
-        if (gap_start <= UINT64_MAX - length &&
-            gap_start + length <= v->vm_start)
-            return gap_start;
-        prev = v;
-        pos = pos->next;
+    if (search < X86_USER_STACK_END)
+        search = X86_USER_STACK_END;
+    if ((search & (PAGE_4K_SIZE - 1)) != 0) {
+        if (search > UINT64_MAX - (PAGE_4K_SIZE - 1))
+            return -ENOMEM;
+        search = PAGE_4K_ALIGN(search);
     }
-    uint64_t cand = prev ? prev->vm_end : search;
-    if (cand < search) cand = search;
-    return cand;
+    if (search >= upper_limit || length > upper_limit - search)
+        return -ENOMEM;
+
+    uint64_t cand = search;
+    for (list_t *pos = mm->vma_list.next; pos != &mm->vma_list; pos = pos->next) {
+        vma_t *v = container_of(pos, vma_t, list);
+        if (v->vm_end <= cand)
+            continue;
+        if (v->vm_start > cand) {
+            uint64_t gap_end = (v->vm_start < upper_limit) ? v->vm_start : upper_limit;
+            if (gap_end > cand && length <= gap_end - cand) {
+                *out_addr = cand;
+                return 0;
+            }
+        }
+        /* Unconditionally advance past v when no gap matched above. */
+        if (v->vm_start >= upper_limit || v->vm_end >= upper_limit)
+            return -ENOMEM;
+        if (v->vm_end > cand)
+            cand = v->vm_end;
+        if (length > upper_limit - cand)
+            return -ENOMEM;
+    }
+
+    if (cand < upper_limit && length <= upper_limit - cand) {
+        *out_addr = cand;
+        return 0;
+    }
+    return -ENOMEM;
 }
 
 // do_mmap — MAP_FIXED validates the whole request and preallocates
 // before any mutation; the ordinary path selects and commits inside
 // ONE mm->lock region.  The descriptor is pinned with files_get_file()
 // before the node reference, so fd_close cannot free the node between
-// resolution and installation.  The device branch keeps its existing
-// two-phase shape in this task (the device transaction takes over in
-// the next task); final reference drops still happen after unlock.
+// resolution and installation.  Final reference drops happen after unlock.
 int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
                 uint64_t flags, uint64_t fd, uint64_t offset)
 {
@@ -481,15 +510,21 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     if (length == 0)
         return -EINVAL;
 
-    // Keep the "nothing below X86_USER_MIN_ADDR mapped" invariant: any explicit
-    // address (MAP_FIXED or otherwise) below X86_USER_MIN_ADDR is rejected
-    // here.  addr == 0 (let the kernel pick) is unaffected.
-    if (addr != 0 && addr < X86_USER_MIN_ADDR)
+    uint64_t rounded = PAGE_4K_ALIGN(length);
+    if (rounded < length)                   // rounding overflow
         return -EINVAL;
 
-    uint64_t raw_end = PAGE_4K_ALIGN(addr + length);
-    if (raw_end < addr)                     // addr+length overflow
-        return -EINVAL;
+    // Keep the "nothing below X86_USER_MIN_ADDR mapped" invariant: any explicit
+    // address (MAP_FIXED or otherwise) below X86_USER_MIN_ADDR is rejected
+    // here.  addr == 0 (let the kernel pick) is handled below.
+    if (addr != 0) {
+        if (addr < X86_USER_MIN_ADDR)
+            return -EINVAL;
+        if (addr > UINT64_MAX - rounded)    // addr+rounded overflow
+            return -EINVAL;
+    }
+
+    length = rounded;
 
     if (offset & (PAGE_4K_SIZE - 1))
         return -EINVAL;
@@ -498,9 +533,6 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         if ((int64_t)fd != -1)
             return -EINVAL;
     }
-
-    length = PAGE_4K_ALIGN(length);
-    if (!length) return -EINVAL;
 
     // The page-aligned file window must stay representable in
     // uint64_t: the demand-fault path (and a split) computes file
@@ -517,13 +549,15 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     if (!current->mm)
         return -EINVAL;
 
+    uint64_t limit = mmap_effective_limit(current->addr_limit);
+
     // ── 3. MAP_FIXED bounds / reserved window ───────────
     if (flags & MAP_FIXED) {
+        if (addr < X86_USER_MIN_ADDR)
+            return -EINVAL;
         if (addr & (PAGE_4K_SIZE - 1))
             return -EINVAL;
-        if (addr >= current->addr_limit ||
-            addr > UINT64_MAX - length ||
-            addr + length > current->addr_limit)
+        if (addr >= limit || length > limit - addr)
             return -ENOMEM;
         if (mm_user_range_protected(current->mm, addr, addr + length))
             return -EINVAL;
@@ -569,24 +603,18 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
             // Select the target under mm->lock; the callback commits
             // it under display_mutex → mm->lock (single-owner mm).
             spin_lock(&current->mm->lock);
-            addr = mmap_find_gap(current->mm, length);
+            int gap_rc = mmap_find_gap_locked(current->mm, length, limit, &addr);
             spin_unlock(&current->mm->lock);
-            if (mm_user_range_protected(current->mm, addr,
-                                        addr + length))
-                addr = X86_USER_STACK_END;
-        }
-
-        if (addr >= current->addr_limit ||
-            addr > UINT64_MAX - length ||
-            addr + length > current->addr_limit) {
-            vfs_node_put(file_node);
-            files_put_file(file);
-            return -ENOMEM;
-        }
-        if (mm_user_range_protected(current->mm, addr, addr + length)) {
-            vfs_node_put(file_node);
-            files_put_file(file);
-            return -EINVAL;
+            if (gap_rc != 0) {
+                vfs_node_put(file_node);
+                files_put_file(file);
+                return gap_rc;
+            }
+            if (mm_user_range_protected(current->mm, addr, addr + length)) {
+                vfs_node_put(file_node);
+                files_put_file(file);
+                return -ENOMEM;
+            }
         }
 
         // Template VMA: the MM transaction fills it and inserts it.
@@ -632,18 +660,13 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     spin_lock(&mm->lock);
 
     if (!(flags & MAP_FIXED)) {
-        addr = mmap_find_gap(mm, length);
-        if (mm_user_range_protected(mm, addr, addr + length))
-            addr = X86_USER_STACK_END;
-    }
-
-    if (addr >= current->addr_limit ||
-        addr > UINT64_MAX - length ||
-        addr + length > current->addr_limit) {
-        spin_unlock(&mm->lock);
-        if (file_node) vfs_node_put(file_node);
-        if (file) files_put_file(file);
-        return -ENOMEM;
+        int gap_rc = mmap_find_gap_locked(mm, length, limit, &addr);
+        if (gap_rc != 0 || mm_user_range_protected(mm, addr, addr + length)) {
+            spin_unlock(&mm->lock);
+            if (file_node) vfs_node_put(file_node);
+            if (file) files_put_file(file);
+            return -ENOMEM;
+        }
     }
 
     vma_t *right = NULL;
@@ -754,7 +777,8 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
         return -EINVAL;
     if (!current->mm)
         return -EINVAL;
-    if (end > current->addr_limit)
+    uint64_t limit = mmap_effective_limit(current->addr_limit);
+    if (end > limit)
         return -EINVAL;
 
     // Task 5: reject before any VMA flag / prot / PTE change —

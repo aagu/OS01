@@ -1130,5 +1130,10 @@ $(TEST_BLD)/test_x86_aslr_mmap.o: $(TEST_CASES)/test_x86_aslr_mmap.c \
 
 $(TEST_BLD)/test_x86_aslr_mmap.elf: $(TEST_BLD)/test_x86_aslr_mmap.o \
 		$(TEST_BLD)/aslr_mmap_aslr_production.o \
+		$(TEST_BLD)/mmap_lifecycle_production.o \
+		$(TEST_BLD)/brk_lifecycle_production.o \
+		$(TEST_BLD)/vma_production.o \
+		$(TEST_BLD)/vm_area_lifecycle_production.o \
+		$(TEST_BLD)/mm_production.o \
 		$(TEST_BLD)/lifecycle_stubs.o
 	$(HOST_CC) -o $@ $^
