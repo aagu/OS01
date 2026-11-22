@@ -160,6 +160,25 @@ static void startup_probe(int argc, char **argv)
     exit(10 + argc * 2 + envc);
 }
 
+/* Re-exec ASLR probe: maps 1 anonymous RW page, verifies demand fault,
+ * prints "MMAP %016lx\n", and exits 0 without running the test table. */
+static void aslr_probe(int argc, char **argv)
+{
+    if (argc < 1 || !argv || !argv[0] || strcmp(argv[0], "aslr-probe") != 0)
+        return;
+
+    volatile unsigned char *p = (volatile unsigned char *)mmap(
+        NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED)
+        _exit(99);
+    p[0] = 0xA5;
+    if (p[0] != 0xA5)
+        _exit(99);
+    printf("MMAP %016lx\n", (unsigned long)(uintptr_t)p);
+    fflush(stdout);
+    _exit(0);
+}
+
 
 /* Parent side: fork + execve actual install path + waitpid.
  * status is the raw waitpid status (exit code << 8). */
@@ -456,6 +475,9 @@ static const test_case_t tests[] = {
     {"mmap_exec_protection",   "mmap execute protection", test_mmap_execute_protection, 1, 0},
     {"fixed_file_replace",     "munmap hole + MAP_FIXED file", test_fixed_file_replace, 1, 0},
     {"fb_fixed_replace",       "framebuffer MAP_FIXED replace", test_fb_fixed_replace, 1, 0},
+    {"aslr_mmap_exec_randomized", "aslr mmap exec randomized", test_aslr_mmap_exec_randomized, 1, 0},
+    {"aslr_mmap_fork_inherit",    "aslr mmap fork inherit",    test_aslr_mmap_fork_inherit,    1, 0},
+    {"aslr_mmap_fixed_and_bounds","aslr mmap fixed and bounds",test_aslr_mmap_fixed_and_bounds,1, 0},
 };
 
 // ── CLI: --list ────────────────────────────────────────────
@@ -477,6 +499,7 @@ int main(int argc, char **argv, char **envp)
 {
     (void)envp;
     startup_probe(argc, argv);
+    aslr_probe(argc, argv);
     g_argc = argc;
     g_argv = argv;
 

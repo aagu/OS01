@@ -102,9 +102,10 @@ static int hexval(int c)
 }
 
 
-/* fork → dup2(pipe写端,1) → exec(path) → 父读全部输出 → waitpid。
+/* fork → dup2(pipe写端,1) → exec(path, argv, NULL) → 父读全部输出 → waitpid。
  * 返回读到的字节数（<0 失败）；*out_status 收原始 waitpid status。 */
-static int exec_capture(const char *path, char *out, size_t outsz, int *out_status)
+static int exec_capture_argv(const char *path, char *const argv[],
+                             char *out, size_t outsz, int *out_status)
 {
     int fds[2];
     if (pipe(fds) < 0) return -1;
@@ -114,8 +115,7 @@ static int exec_capture(const char *path, char *out, size_t outsz, int *out_stat
         close(fds[0]);
         dup2(fds[1], 1);
         close(fds[1]);
-        char *argv[] = { (char *)path, NULL };
-        exec(path, argv, NULL);
+        exec(path, (char *const *)argv, NULL);
         _exit(126);                          /* exec 返回即失败 */
     }
     close(fds[1]);
@@ -131,6 +131,12 @@ static int exec_capture(const char *path, char *out, size_t outsz, int *out_stat
     waitpid(pid, &st, 0);
     if (out_status) *out_status = st;
     return (int)n;
+}
+
+static int exec_capture(const char *path, char *out, size_t outsz, int *out_status)
+{
+    char *argv[] = { (char *)path, NULL };
+    return exec_capture_argv(path, argv, out, outsz, out_status);
 }
 
 
@@ -1188,4 +1194,229 @@ void test_mmap_execute_protection(void)
     memcpy(stack_code, exec_probe_code, sizeof(exec_probe_code));
     exec_probe_fork_wait((exec_probe_fn)stack_code,
                          "mmap_exec_stack_fetch_sigsegv", 1);
+}
+
+#define ASLR_RND_BASE 0x0000400000000000UL
+#define ASLR_RND_END  0x0000410000000000UL
+
+static int aslr_in_window(uint64_t addr)
+{
+    return (addr & 0xFFFUL) == 0 && addr >= ASLR_RND_BASE && addr < ASLR_RND_END;
+}
+
+void test_aslr_mmap_exec_randomized(void)
+{
+    uint64_t addrs[10];
+    int unique = 0;
+    char *argv[] = { (char *)"aslr-probe", NULL };
+
+    for (int i = 0; i < 10; i++) {
+        char buf[128];
+        int st = 0;
+        int n = exec_capture_argv("/bin/systest", argv, buf, sizeof(buf), &st);
+        uint64_t addr = 0;
+        if (n <= 0 || !WIFEXITED(st) || WEXITSTATUS(st) != 0 ||
+            parse_hex16_line(buf, "MMAP", &addr) != 0) {
+            FAIL("aslr_mmap_exec_randomized",
+                 "iter %d probe failed n=%d st=%#x buf='%s'", i, n, st, buf);
+            return;
+        }
+        if (!aslr_in_window(addr) || addr == 0x40000000UL) {
+            FAIL("aslr_mmap_exec_randomized",
+                 "iter %d addr %016lx out of ASLR window", i, (unsigned long)addr);
+            return;
+        }
+        addrs[i] = addr;
+        int seen = 0;
+        for (int j = 0; j < i; j++) {
+            if (addrs[j] == addr) {
+                seen = 1;
+                break;
+            }
+        }
+        if (!seen)
+            unique++;
+    }
+
+    CHECKF(unique >= 9, "aslr_mmap_exec_randomized",
+           "unique=%d/10", "expected >=9 unique addresses, got %d/10", unique);
+}
+
+void test_aslr_mmap_fork_inherit(void)
+{
+    volatile unsigned char *p0 = (volatile unsigned char *)mmap(
+        NULL, 4096, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p0 == MAP_FAILED || !aslr_in_window((uint64_t)(uintptr_t)p0)) {
+        FAIL("aslr_mmap_fork_inherit", "initial mmap failed or out of window: %p", (void *)p0);
+        if (p0 != MAP_FAILED) munmap((void *)p0, 4096);
+        return;
+    }
+    p0[0] = 0x5A;
+
+    int fds[2];
+    if (pipe(fds) < 0) {
+        FAIL("aslr_mmap_fork_inherit", "pipe failed errno=%d", errno);
+        munmap((void *)p0, 4096);
+        return;
+    }
+
+    int64_t pid = fork();
+    if (pid < 0) {
+        FAIL("aslr_mmap_fork_inherit", "fork failed errno=%d", errno);
+        close(fds[0]);
+        close(fds[1]);
+        munmap((void *)p0, 4096);
+        return;
+    }
+
+    if (pid == 0) {
+        close(fds[0]);
+        if (p0[0] != 0x5A) {
+            close(fds[1]);
+            _exit(2);
+        }
+        p0[0] = 0xC3; /* COW write */
+        void *c1 = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                        MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        uint64_t c1_val = (c1 == MAP_FAILED) ? 0 : (uint64_t)(uintptr_t)c1;
+        write(fds[1], &c1_val, sizeof(c1_val));
+        close(fds[1]);
+        _exit(c1 == MAP_FAILED ? 3 : 0);
+    }
+
+    close(fds[1]);
+    void *p1 = mmap(NULL, 4096, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    uint64_t c1_val = 0;
+    ssize_t r = read(fds[0], &c1_val, sizeof(c1_val));
+    close(fds[0]);
+    int st = 0;
+    waitpid(pid, &st, 0);
+
+    int ok_fork = (r == (ssize_t)sizeof(c1_val)) && WIFEXITED(st) &&
+                  WEXITSTATUS(st) == 0 && p1 != MAP_FAILED &&
+                  p0[0] == 0x5A && c1_val == (uint64_t)(uintptr_t)p1;
+    CHECKF(ok_fork, "aslr_mmap_fork_inherit_layout",
+           "c1=p1=%016lx", "fork inherit mismatch c1=%016lx p1=%p p0[0]=%02x st=%#x",
+           (unsigned long)c1_val, p1, p0[0], st);
+
+    char buf[128];
+    int est = 0;
+    char *argv[] = { (char *)"aslr-probe", NULL };
+    int en = exec_capture_argv("/bin/systest", argv, buf, sizeof(buf), &est);
+    uint64_t e1 = 0;
+    int ok_exec = (en > 0) && WIFEXITED(est) && WEXITSTATUS(est) == 0 &&
+                  parse_hex16_line(buf, "MMAP", &e1) == 0 &&
+                  aslr_in_window(e1) &&
+                  e1 != (uint64_t)(uintptr_t)p0 &&
+                  e1 != (uint64_t)(uintptr_t)p1;
+    CHECKF(ok_exec, "aslr_mmap_fork_then_exec_rerandomized",
+           "e1=%016lx", "post-fork exec probe failed e1=%016lx st=%#x",
+           (unsigned long)e1, est);
+
+    if (p1 != MAP_FAILED) munmap(p1, 4096);
+    munmap((void *)p0, 4096);
+}
+
+void test_aslr_mmap_fixed_and_bounds(void)
+{
+    /* 1. MAP_FIXED at 0x40000000 */
+    volatile unsigned char *low = (volatile unsigned char *)mmap(
+        (void *)0x40000000UL, 4096, PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    int ok_low = (low == (volatile unsigned char *)0x40000000UL);
+    if (ok_low) {
+        low[0] = 0x77;
+        ok_low = (low[0] == 0x77) &&
+                 (mprotect((void *)low, 4096, PROT_READ) == 0) &&
+                 (munmap((void *)low, 4096) == 0);
+    }
+    CHECK3(ok_low, "aslr_fixed_low_40000000", "ok");
+
+    /* 2. MAP_FIXED at 0x0 -> EINVAL */
+    errno = 0;
+    void *z = mmap((void *)0x0UL, 4096, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    CHECKF(z == MAP_FAILED && errno == EINVAL, "aslr_fixed_zero_rejected",
+           "EINVAL", "got z=%p errno=%d", z, errno);
+
+    /* 3. Top valid canonical page 0x00007FFFFFFFE000 */
+    void *top_va = (void *)0x00007FFFFFFFE000UL;
+    volatile unsigned char *top = (volatile unsigned char *)mmap(
+        top_va, 4096, PROT_READ | PROT_WRITE,
+        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    int ok_top = (top == (volatile unsigned char *)top_va);
+    if (ok_top) {
+        top[0] = 0x55;
+        ok_top = (top[0] == 0x55) &&
+                 (mprotect(top_va, 4096, PROT_READ) == 0) &&
+                 (munmap(top_va, 4096) == 0);
+    }
+    CHECK3(ok_top, "aslr_fixed_top_valid_page", "ok");
+
+    /* 4. Top guard 0x00007FFFFFFFF000 and non-canonical 0x0000800000000000 */
+    void *bad_addrs[2] = {
+        (void *)0x00007FFFFFFFF000UL,
+        (void *)0x0000800000000000UL
+    };
+    for (int i = 0; i < 2; i++) {
+        errno = 0;
+        void *r = mmap(bad_addrs[i], 4096, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        int ok_m = (r == MAP_FAILED && errno == ENOMEM);
+        errno = 0;
+        int u = munmap(bad_addrs[i], 4096);
+        int ok_u = (u == -1 && errno == EINVAL);
+        errno = 0;
+        int mp = mprotect(bad_addrs[i], 4096, PROT_READ);
+        int ok_p = (mp == -1 && errno == EINVAL);
+        CHECKF(ok_m && ok_u && ok_p, "aslr_ceiling_rejected",
+               "idx=%d", "idx=%d mmap=%p/%d munmap=%d mprotect=%d",
+               i, r, errno, u, mp);
+    }
+
+    /* 5. High 3-page mapping, /proc/self/maps check before split, then middle MAP_FIXED replace */
+    unsigned char *q = (unsigned char *)mmap(
+        NULL, 0x3000, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (q == MAP_FAILED || !aslr_in_window((uint64_t)(uintptr_t)q)) {
+        FAIL("aslr_high_3page_and_proc_maps", "3-page mmap failed: %p", (void *)q);
+        if (q != MAP_FAILED) munmap(q, 0x3000);
+        return;
+    }
+
+    char expected_range[48];
+    snprintf(expected_range, sizeof(expected_range), "%012lx-%012lx",
+             (unsigned long)(uintptr_t)q,
+             (unsigned long)((uintptr_t)q + 0x3000UL));
+    int maps_fd = open("/proc/self/maps", O_RDONLY);
+    int found_maps = 0;
+    if (maps_fd >= 0) {
+        char maps_buf[4096];
+        ssize_t mn = read(maps_fd, maps_buf, sizeof(maps_buf) - 1);
+        close(maps_fd);
+        if (mn > 0) {
+            maps_buf[mn] = '\0';
+            if (strstr(maps_buf, expected_range) != NULL)
+                found_maps = 1;
+        }
+    }
+    CHECKF(found_maps, "aslr_proc_self_maps_12hex",
+           "%s", "missing '%s' in /proc/self/maps", expected_range);
+
+    q[0] = 0x11;
+    q[0x1000] = 0x22;
+    q[0x2000] = 0x33;
+    void *mid = mmap(q + 0x1000, 0x1000, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    int ok_split = (mid == q + 0x1000) && (q[0] == 0x11) &&
+                   (q[0x1000] == 0x00) && (q[0x2000] == 0x33);
+    CHECK3(ok_split, "aslr_high_fixed_subpage_replace", "ok");
+    munmap(q, 0x3000);
+
+    /* 6. Non-fixed 64 TiB request returns MAP_FAILED / ENOMEM (no wrap-around) */
+    errno = 0;
+    void *huge = mmap(NULL, 0x0000400000000000UL, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    CHECKF(huge == MAP_FAILED && errno == ENOMEM, "aslr_64t_exhaustion_no_wrap",
+           "ENOMEM", "got huge=%p errno=%d", huge, errno);
 }

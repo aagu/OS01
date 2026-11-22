@@ -8733,7 +8733,22 @@
     "selector": "test_x86_aslr_mmap",
     "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
    },
-   "supporting": [],
+   "supporting": [
+    {
+     "layer": "kernel_selftest",
+     "source": "kernel/selftest/test_aslr_mmap.c",
+     "selector": "aslr_mmap",
+     "evidence": "SELFTEST_PASS",
+     "distinct_risk": "Drives real kernel ChaCha20 entropy pool and arch_random_get_strong fallback, closing host RNG stub blind spots"
+    },
+    {
+     "layer": "systest",
+     "source": "user/systest/test_mem.c",
+     "selector": "aslr_mmap_fixed_and_bounds",
+     "evidence": "SYSTEST_PASS",
+     "distinct_risk": "Verifies high randomized mmap window, canonical ceiling, demand fault, TLB, and /proc/self/maps on real 4-level hardware page tables"
+    }
+   ],
    "overlap_decision": {
     "action": "unique",
     "reason": "Host unit and sparse-PTE boundary verification of x86_64 mmap ASLR derivation and gap/ceiling invariants"
@@ -8758,10 +8773,133 @@
     "selector": "test_x86_aslr_exec",
     "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
    },
-   "supporting": [],
+   "supporting": [
+    {
+     "layer": "systest",
+     "source": "user/systest/test_mem.c",
+     "selector": "aslr_mmap_exec_randomized",
+     "evidence": "SYSTEST_PASS",
+     "distinct_risk": "Verifies real syscall fork+exec re-randomizes mmap_base across independent user processes"
+    },
+    {
+     "layer": "systest",
+     "source": "user/systest/test_mem.c",
+     "selector": "aslr_mmap_fork_inherit",
+     "evidence": "SYSTEST_PASS",
+     "distinct_risk": "Verifies real fork page-table copy and COW isolation preserve parent mmap_base while subsequent exec re-randomizes"
+    },
+    {
+     "layer": "qemu_e2e",
+     "source": "qemutests/test_entropy_facade.sh",
+     "selector": "tier1-default",
+     "evidence": "PASS_MARKER",
+     "distinct_risk": "Verifies real QEMU boot chain: PID 1 init fails closed without virtio-rng and boots normally with virtio-rng"
+    }
+   ],
    "overlap_decision": {
     "action": "unique",
     "reason": "Host integration test verifying spawn_user_task and sys_exec ASLR wiring, rollback ledger, and old_mm preservation"
+   }
+  },
+  {
+   "id": "memory.aslr.x86_selftest",
+   "owner": "kernel_selftest",
+   "component": "memory",
+   "behavior": "aslr",
+   "trigger": "make PROFILE=x86_64-clang KERNEL_SELFTEST=1 test-kernel-selftest",
+   "assertions": [
+    "x86_aslr_init_mmap_base rejects NULL mm with -EINVAL",
+    "STRONG pool yields varied 4 KiB-aligned bases in [64 TiB, 65 TiB)",
+    "WEAK and NONE pools fail closed with -EAGAIN preserving mmap_base when hardware STRONG is absent, or fall back to hardware STRONG when present"
+   ],
+   "failure_modes": [
+    "Pool quality filter accepting WEAK entropy or mutating mmap_base on -EAGAIN"
+   ],
+   "primary": {
+    "layer": "kernel_selftest",
+    "source": "kernel/selftest/test_aslr_mmap.c",
+    "selector": "aslr_mmap",
+    "evidence": "SELFTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Only kernel-mode test exercising real ChaCha20 pool quality states with x86_aslr_init_mmap_base"
+   }
+  },
+  {
+   "id": "memory.aslr.exec_randomized",
+   "owner": "systest",
+   "component": "memory",
+   "behavior": "aslr",
+   "trigger": "make PROFILE=x86_64-clang OS01_SYSTEST=1 test-syscall",
+   "assertions": [
+    "10 sequential fork+exec runs of aslr-probe return 4 KiB-aligned mmap addresses in [64 TiB, 65 TiB) != 0x40000000 with >= 9 unique values"
+   ],
+   "failure_modes": [
+    "exec failing to randomize mmap_base, low-half fallback, or repeated addresses across exec"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_mem.c",
+    "selector": "aslr_mmap_exec_randomized",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Userspace E2E verification of per-exec mmap_base randomization via syscall"
+   }
+  },
+  {
+   "id": "memory.aslr.fork_inherit",
+   "owner": "systest",
+   "component": "memory",
+   "behavior": "aslr",
+   "trigger": "make PROFILE=x86_64-clang OS01_SYSTEST=1 test-syscall",
+   "assertions": [
+    "fork preserves parent mmap_base and COW-isolates existing high-window pages so child and parent allocate the same next VA",
+    "subsequent exec from the forked child re-randomizes mmap_base to a distinct address in [64 TiB, 65 TiB)"
+   ],
+   "failure_modes": [
+    "fork re-randomizing mmap_base or corrupting high-VA COW, or post-fork exec failing to re-randomize"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_mem.c",
+    "selector": "aslr_mmap_fork_inherit",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Userspace E2E verification of fork mmap_base inheritance and post-fork exec re-randomization"
+   }
+  },
+  {
+   "id": "memory.aslr.fixed_and_bounds",
+   "owner": "systest",
+   "component": "memory",
+   "behavior": "aslr",
+   "trigger": "make PROFILE=x86_64-clang OS01_SYSTEST=1 test-syscall",
+   "assertions": [
+    "MAP_FIXED succeeds at 0x40000000 and 0x00007FFFFFFFE000, rejects 0x0 with EINVAL and 0x00007FFFFFFFF000/0x0000800000000000 with ENOMEM",
+    "munmap/mprotect reject top guard and non-canonical addresses with EINVAL",
+    "/proc/self/maps reports 12-hex high randomized range, middle MAP_FIXED subpage replace preserves neighbors, and 64 TiB non-fixed mmap returns ENOMEM without wrap-around"
+   ],
+   "failure_modes": [
+    "MAP_FIXED(0) zero-page mapping, canonical ceiling bypass, /proc/self/maps formatting mismatch, or non-fixed wrap-around"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_mem.c",
+    "selector": "aslr_mmap_fixed_and_bounds",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Userspace E2E verification of MAP_FIXED, canonical ceiling, /proc/self/maps, and non-wrap bounds"
    }
   }
  ]

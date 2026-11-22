@@ -164,6 +164,7 @@ int at_random_selftest_layout(void);
 int at_random_selftest_layout_even(void);
 int at_random_selftest_entropy(void);
 int test_at_random_strong_only(void);
+int test_aslr_mmap(void);
 int test_canary_single_source(void);
 int test_arch_atomic_u64_or_and(void);
 int entropy_quality_selftest_current_mode(void);
@@ -314,6 +315,7 @@ void selftest_register_builtin_tests(void)
     selftest_register("at_random_layout_even",  at_random_selftest_layout_even);
     selftest_register("at_random_entropy",      at_random_selftest_entropy);
     selftest_register("at_random_strong_only",  test_at_random_strong_only);
+    selftest_register("aslr_mmap",              test_aslr_mmap);
     selftest_register("canary_single_source",   test_canary_single_source);
     selftest_register("arch_atomic_u64_or_and", test_arch_atomic_u64_or_and);
     selftest_register("entropy_quality_selftest_current_mode",
