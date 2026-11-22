@@ -1,44 +1,52 @@
-// kernel/arch/aarch64/driver/virtio_blk.c — virtio-blk over virtio-mmio.
+// kernel/driver/virtio_blk.c — architecture-neutral virtio-blk over virtio-mmio.
 //
-// The aarch64 BLOCK_DISK transport: QEMU virt exposes virtio,mmio slots at
-// 0x0a000000 + i*0x200 (SPI 48 + i), above the early Device window (the
-// loader-derived window ends at 0x09200000 on QEMU virt; the compile-time
-// fallback ended at 0x0a000000).  The runtime direct map covers only the
-// device window plus RAM, so this driver maps the first 2 MiB of the
-// virtio window into TTBR1 as Device memory — the same
-// hand-rolled approach the framebuffer backend uses (printk_fb.c) — and
-// keeps the PA↔VA identity of the direct-map convention so Phy_To_Virt()
-// reaches the registers.
+// Platform slot discovery and early MMIO window mapping go through the
+// <arch/virtio_mmio.h> facade (e.g. aarch64 DTB + TTBR1 2 MiB Device
+// block; architectures without virtio-mmio use the weak no-op defaults).
 //
-// Device discovery comes from the DTB (dtb_virtio_mmio_* accessors): each
-// slot is probed for MAGIC 'virt' / VersionID 2 / DeviceID 2 (block).
 // Queue setup and transfers follow virtio 1.0 split-virtqueue semantics
-// with modern (non-legacy) virtio-mmio register layout; completion is
-// polled on the used ring, so no GIC IRQ is armed yet.
+// with modern (v2) and legacy (v1) virtio-mmio register layouts;
+// completion is polled on the used ring.
 //
 // Logging policy: operational paths use log_info/log_warn/log_err
 // (docs/log/log.md).
 
-#include <arch/aarch64/virtio_blk.h>
-#include <arch/aarch64/dtb.h>
-#include <arch/aarch64/page_table.h>
-#include <arch/aarch64/boot_direct_map.h>  // aarch64_read_ttbr1
-#include <arch/mmu.h>
-#include <arch/mmu.h>
+#include <driver/virtio_blk.h>
+#include <arch/virtio_mmio.h>
+#include <arch/cpu.h>          // arch_cpu_pause
 #include <arch/spinlock.h>
 #include <block/blockdev.h>
 #include <memory/pmm.h>
-#include <memory/memory.h>     // Phy_To_Virt, PAGE_* constants
+#include <memory/memory.h>     // Phy_To_Virt, Virt_To_Phy, PAGE_*
 #include <subsys/subsys.h>
 #include <log/log.h>
-#include <core/debug.h>          // debug_vfs (empty-slot probe trace)
-#include <stdlib.h>          // calloc/free
+#include <core/debug.h>        // debug_vfs
+#include <stdlib.h>            // calloc/free
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>
 #include <string.h>
 
-// ── virtio-mmio v2 register map (Linux drivers/virtio/virtio_mmio.h layout)
+// ── Weak defaults for architectures without virtio-mmio ──────────────────
+__attribute__((weak)) int arch_virtio_mmio_map_early(void)
+{
+    return 0;
+}
+
+__attribute__((weak)) uint32_t arch_virtio_mmio_slot_count(void)
+{
+    return 0;
+}
+
+__attribute__((weak)) int arch_virtio_mmio_slot_get(
+    uint32_t index, struct arch_virtio_mmio_slot *out)
+{
+    (void)index;
+    (void)out;
+    return -ENOENT;
+}
+
+// ── virtio-mmio v2/v1 register map ───────────────────────────────────────
 #define VMMIO_MAGIC              0x000
 #define VMMIO_VERSION            0x004
 #define VMMIO_DEVICE_ID          0x008
@@ -64,7 +72,7 @@
 #define VMMIO_QUEUE_USED_HIGH    0x0a4
 #define VMMIO_CONFIG             0x100   // blk config: capacity (u64 LE)
 
-// ── virtio status / feature / request constants
+// ── virtio status / feature / request constants ──────────────────────────
 #define VIRTIO_S_ACKNOWLEDGE     1u
 #define VIRTIO_S_DRIVER          2u
 #define VIRTIO_S_DRIVER_OK       4u
@@ -79,36 +87,25 @@
 #define VRING_DESC_F_WRITE       2u
 
 // Descriptor chains need 3 descriptors each (hdr|data|status), so the
-// queue must hold 3x the in-flight chains: 64 descriptors = 21 chains
-// (one transfer in flight at a time under d->lock, but the desc table
-// must still cover every chain index the free-rotation can hand out).
+// queue must hold 3x the in-flight chains: 64 descriptors = 21 chains.
 #define VIRTIO_BLK_QUEUE_SIZE    64u
 #define VIRTIO_BLK_SECTOR        512u
-// Poll budget: a QEMU virtio-blk request completes in microseconds; this
-// budget only bounds a wedged device, so it is generous.
 #define VIRTIO_BLK_POLL_LIMIT    20000000u
-
-// Maximum transfer this driver accepts per request (sector-terminated 4 KiB
-// page copies from FAT/ext2 stay far below this).
 #define VIRTIO_BLK_MAX_SECTORS   64u
 
 struct virtio_blk_dev {
     volatile uint32_t *regs;         // Phy_To_Virt(slot->base)
     uint64_t           base;         // slot PA (diagnostics)
-    // Split-virtqueue ring buffers (all 4 KiB PMM pages, PA stored for the
-    // device, VA for the kernel).
     uint64_t           desc_pa, avail_pa, used_pa;
     volatile void     *desc, *avail, *used;
     uint32_t           queue_size;
-    // Free-list of descriptor chains: chain i owns descriptors
-    // [i*3, i*3+2] and its private scratch buffers.
     uint8_t           *hdr;          // [chains][16]
     uint8_t           *status;       // [chains][1]  (device-writable byte)
     uint64_t           hdr_pa, status_pa;
     spinlock_T         lock;
     uint16_t           last_used_idx;
     bool               ready;
-    struct Page       *legacy_pages;  // legacy v1: 2-page ring region owner
+    struct Page       *legacy_pages; // legacy v1: 2-page ring region owner
 };
 
 #define VIRTIO_BLK_MAX_DEVS 4
@@ -124,12 +121,6 @@ static inline void w32(struct virtio_blk_dev *d, uint32_t off, uint32_t v)
     d->regs[off / 4] = v;
 }
 
-static inline uint16_t vring_load16(const volatile void *p)
-{
-    uint16_t v;
-    __builtin_memcpy(&v, (const void *)p, sizeof(v));
-    return v;
-}
 static inline void vring_store16(volatile void *p, uint16_t v)
 {
     __builtin_memcpy((void *)p, &v, sizeof(v));
@@ -140,47 +131,11 @@ static inline uint32_t vring_load32(const volatile void *p)
     __builtin_memcpy(&v, (const void *)p, sizeof(v));
     return v;
 }
-static inline void vring_store32(volatile void *p, uint32_t v)
-{
-    __builtin_memcpy((void *)p, &v, sizeof(v));
-}
 static inline uint64_t vring_load64(const volatile void *p)
 {
     uint64_t v;
     __builtin_memcpy(&v, (const void *)p, sizeof(v));
     return v;
-}
-
-// Map [0x0a000000, 0x0a200000) into TTBR1 as Device memory (one 2 MiB
-// block) at the direct-map VA so Phy_To_Virt reaches it.  The runtime
-// direct map covers only the device window plus RAM and nothing else
-// claims this VA, so an occupied slot here is a real conflict.
-//
-// MUST run before SMP bring-up starts (vmm_gate_check rejects TTBR1
-// changes once smp_starting is set and APs have not reached IPI-ready
-// yet).  The aarch64 boot orchestrator therefore calls
-// virtio_mmio_map_early() from arch_boot_memory, right after
-// arch_vmm_init — the same window the framebuffer mapping uses.
-static bool s_window_mapped;
-static int map_virtio_window(void)
-{
-    if (s_window_mapped) return 0;
-    uint64_t pa  = 0x0a000000UL;
-    uint64_t va  = ARCH_PAGE_OFFSET + pa;
-    uint32_t perm = AARCH64_PT_KERNEL_RW | AARCH64_PT_DEVICE;
-
-    uint64_t ttbr_raw = aarch64_read_ttbr1();
-    uint64_t root_pa  = ttbr_raw & AARCH64_TTBR_BASE_MASK;
-    uint64_t *root    = (uint64_t *)(uintptr_t)(root_pa + ARCH_PAGE_OFFSET);
-
-    int rc = aarch64_pt_map_2m_block(root, va, pa, perm);
-    if (rc == 0) s_window_mapped = true;
-    return rc;
-}
-
-int virtio_mmio_map_early(void)
-{
-    return map_virtio_window();
 }
 
 // Allocate one zeroed 4 KiB page; returns the VA and records the PA.
@@ -215,10 +170,8 @@ static int virtio_blk_transfer(struct virtio_blk_dev *d, uint32_t type,
     if (!d->ready) return -ENODEV;
     if (bytes > VIRTIO_BLK_MAX_SECTORS * VIRTIO_BLK_SECTOR) return -EINVAL;
 
-    // Scratch buffers: header + status live in their own pages so the
-    // device sees stable physical addresses (no stack DMA).
     static uint32_t chain_seq;
-    uint32_t chains = d->queue_size / 3;   // 3 descriptors per chain
+    uint32_t chains = d->queue_size / 3;
     uint32_t chain = chain_seq++ % chains;
     uint16_t d0 = (uint16_t)(chain * 3), d1 = (uint16_t)(d0 + 1),
              d2 = (uint16_t)(d0 + 2);
@@ -247,7 +200,6 @@ static int virtio_blk_transfer(struct virtio_blk_dev *d, uint32_t type,
     desc[d2].flags = VRING_DESC_F_WRITE;
     desc[d2].next  = 0;
 
-    // avail ring: flags, idx, ring[]
     volatile struct { uint16_t flags, idx, ring[]; } *avail =
         (volatile void *)d->avail;
     uint16_t aidx = avail->idx;
@@ -255,7 +207,6 @@ static int virtio_blk_transfer(struct virtio_blk_dev *d, uint32_t type,
     __atomic_store_n(&avail->idx, (uint16_t)(aidx + 1), __ATOMIC_RELEASE);
     w32(d, VMMIO_QUEUE_NOTIFY, 0);
 
-    // Poll the used ring.
     volatile struct { uint16_t flags, idx; struct { uint32_t id, len; } elem[]; } *used =
         (volatile void *)d->used;
     uint32_t spins = 0;
@@ -264,20 +215,17 @@ static int virtio_blk_transfer(struct virtio_blk_dev *d, uint32_t type,
         if (++spins > VIRTIO_BLK_POLL_LIMIT) {
             volatile struct { uint16_t flags, idx, ring[]; } *av =
                 (volatile void *)d->avail;
-            volatile struct { uint64_t addr; uint32_t len; uint16_t flags; uint16_t next; } *desc =
-                (volatile void *)d->desc;
             log_err("virtio-blk: TIMEOUT avail.idx=%u used.idx=%u "
                     "last=%u chain=%u data_pa=%lx intstatus=%x\n",
                     (unsigned)av->idx, (unsigned)used->idx,
                     (unsigned)d->last_used_idx, (unsigned)chain,
                     (unsigned long)desc[chain * 3 + 1].addr,
-                    r32(d, 0x060));
+                    r32(d, VMMIO_INTERRUPT_STATUS));
             return -ETIMEDOUT;
         }
-        __asm__ volatile("yield");
+        arch_cpu_pause();
     }
-    // Drain (one chain in flight at a time in practice; loop covers the
-    // device batching several completions).
+
     int rc = -EIO;
     while (used->idx != d->last_used_idx) {
         uint16_t u = d->last_used_idx;
@@ -287,11 +235,7 @@ static int virtio_blk_transfer(struct virtio_blk_dev *d, uint32_t type,
         rc = (d->status[chain] == VIRTIO_BLK_S_OK) ? 0 : -EIO;
     }
 
-    // Acknowledge the device interrupt.  We complete requests by polling,
-    // but the transport raises its IRQ line on every completion and the
-    // line stays asserted until InterruptACK — leaving it pending turns
-    // every later GIC dispatch into a spurious "unexpected IRQ" and
-    // perturbs the interrupt order for other drivers.
+    // Acknowledge the device interrupt so the line does not stay asserted.
     uint32_t ist = r32(d, VMMIO_INTERRUPT_STATUS);
     if (ist)
         w32(d, VMMIO_INTERRUPT_ACK, ist);
@@ -307,8 +251,6 @@ static int virtio_blk_read(block_device_t *dev, uint64_t lba, uint32_t count,
     if (lba + count > dev->sector_count) return -EINVAL;
 
     uint64_t flags = spin_lock_irqsave(&d->lock);
-    // Header/status scratch pages are shared across chains, so only one
-    // chain may be in flight at a time under this lock.
     int rc = virtio_blk_transfer(d, VIRTIO_BLK_T_IN, lba, buffer,
                                  count * VIRTIO_BLK_SECTOR);
     spin_unlock_irqrestore(&d->lock, flags);
@@ -334,12 +276,9 @@ static int virtio_blk_write(block_device_t *dev, uint64_t lba, uint32_t count,
 static int virtio_blk_flush(block_device_t *dev)
 {
     (void)dev;
-    // No VIRTIO_BLK_F_FLUSH negotiated: QEMU's virtio-blk-device writes go
-    // straight to the host image, so there is no device-side write cache.
     return 0;
 }
 
-// Reset a slot's queue registers and start queue 0 with our ring buffers.
 static int virtio_blk_setup_queue(struct virtio_blk_dev *d)
 {
     uint64_t desc_pa = 0, avail_pa = 0, used_pa = 0, hdr_pa = 0, status_pa = 0;
@@ -347,49 +286,44 @@ static int virtio_blk_setup_queue(struct virtio_blk_dev *d)
 
     w32(d, VMMIO_QUEUE_SEL, 0);
     uint32_t num_max = r32(d, VMMIO_QUEUE_NUM_MAX);
-    if (num_max == 0 || num_max == UINT32_MAX) { return -ENODEV; }
+    if (num_max == 0 || num_max == UINT32_MAX) return -ENODEV;
     uint32_t qsz = num_max < VIRTIO_BLK_QUEUE_SIZE ? num_max : VIRTIO_BLK_QUEUE_SIZE;
-    if (qsz < 3) { return -ENODEV; }
+    if (qsz < 3) return -ENODEV;
 
-    desc  = alloc_ring_page(&desc_pa);
-    avail = alloc_ring_page(&avail_pa);
-    used  = alloc_ring_page(&used_pa);
-    hdr   = alloc_ring_page(&hdr_pa);
+    desc   = alloc_ring_page(&desc_pa);
+    avail  = alloc_ring_page(&avail_pa);
+    used   = alloc_ring_page(&used_pa);
+    hdr    = alloc_ring_page(&hdr_pa);
     status = alloc_ring_page(&status_pa);
     if (!desc || !avail || !used || !hdr || !status) goto fail;
 
     w32(d, VMMIO_QUEUE_NUM, qsz);
-    w32(d, VMMIO_QUEUE_DESC_LOW,  (uint32_t)(desc_pa & 0xffffffffu));
-    w32(d, VMMIO_QUEUE_DESC_HIGH, (uint32_t)(desc_pa >> 32));
+    w32(d, VMMIO_QUEUE_DESC_LOW,   (uint32_t)(desc_pa & 0xffffffffu));
+    w32(d, VMMIO_QUEUE_DESC_HIGH,  (uint32_t)(desc_pa >> 32));
     w32(d, VMMIO_QUEUE_AVAIL_LOW,  (uint32_t)(avail_pa & 0xffffffffu));
     w32(d, VMMIO_QUEUE_AVAIL_HIGH, (uint32_t)(avail_pa >> 32));
-    w32(d, VMMIO_QUEUE_USED_LOW,  (uint32_t)(used_pa & 0xffffffffu));
-    w32(d, VMMIO_QUEUE_USED_HIGH, (uint32_t)(used_pa >> 32));
+    w32(d, VMMIO_QUEUE_USED_LOW,   (uint32_t)(used_pa & 0xffffffffu));
+    w32(d, VMMIO_QUEUE_USED_HIGH,  (uint32_t)(used_pa >> 32));
     w32(d, VMMIO_QUEUE_READY, 1);
 
     d->queue_size = qsz;
-    d->desc = desc;  d->desc_pa  = desc_pa;
-    d->avail = avail; d->avail_pa = avail_pa;
-    d->used = used;  d->used_pa  = used_pa;
-    d->hdr = hdr;    d->hdr_pa   = hdr_pa;
+    d->desc = desc;     d->desc_pa   = desc_pa;
+    d->avail = avail;   d->avail_pa  = avail_pa;
+    d->used = used;     d->used_pa   = used_pa;
+    d->hdr = hdr;       d->hdr_pa    = hdr_pa;
     d->status = status; d->status_pa = status_pa;
     d->last_used_idx = 0;
     return 0;
 
 fail:
-    if (desc_pa)  free_4k_page(desc_pa);
-    if (avail_pa) free_4k_page(avail_pa);
-    if (used_pa)  free_4k_page(used_pa);
-    if (hdr_pa)   free_4k_page(hdr_pa);
+    if (desc_pa)   free_4k_page(desc_pa);
+    if (avail_pa)  free_4k_page(avail_pa);
+    if (used_pa)   free_4k_page(used_pa);
+    if (hdr_pa)    free_4k_page(hdr_pa);
     if (status_pa) free_4k_page(status_pa);
     return -ENOMEM;
 }
 
-// Legacy (v1) queue bring-up: one contiguous region whose layout is
-// desc table | avail ring | (aligned to QueueAlign) used ring.  We
-// request QueueAlign = 4096, so a 2-page contiguous allocation places
-// the used ring at region+4096 — exactly what QEMU's legacy
-// virtio_queue_set_addr expects from a single PFN.
 static int virtio_blk_setup_queue_legacy(struct virtio_blk_dev *d)
 {
     w32(d, VMMIO_QUEUE_SEL, 0);
@@ -408,9 +342,9 @@ static int virtio_blk_setup_queue_legacy(struct virtio_blk_dev *d)
     }
     memset(region, 0, 2 * PAGE_4K_SIZE);
 
-    size_t desc_bytes  = (size_t)qsz * 16;
-    size_t avail_off   = (desc_bytes + 1u) & ~(size_t)1u;   // avail: flags+idx+ring
-    size_t used_off    = PAGE_4K_SIZE;   // ALIGN(desc+avail, QueueAlign=4096)
+    size_t desc_bytes = (size_t)qsz * 16;
+    size_t avail_off  = (desc_bytes + 1u) & ~(size_t)1u;
+    size_t used_off   = PAGE_4K_SIZE;
 
     w32(d, VMMIO_QUEUE_NUM, qsz);
     w32(d, VMMIO_QUEUE_ALIGN, PAGE_4K_SIZE);
@@ -423,29 +357,27 @@ static int virtio_blk_setup_queue_legacy(struct virtio_blk_dev *d)
     d->avail_pa   = region_pa + avail_off;
     d->used       = (volatile void *)((uint8_t *)region + used_off);
     d->used_pa    = region_pa + used_off;
-    // Legacy keeps pg alive for free_pages at teardown; stash via hdr page reuse:
-    d->hdr        = NULL; d->hdr_pa = 0;
+    d->hdr        = NULL; d->hdr_pa    = 0;
     d->status     = NULL; d->status_pa = 0;
 
-    // Scratch pages for request headers/status (device-visible PAs).
     uint64_t hdr_pa = 0, status_pa = 0;
-    void *hdr = alloc_ring_page(&hdr_pa);
+    void *hdr    = alloc_ring_page(&hdr_pa);
     void *status = alloc_ring_page(&status_pa);
     if (!hdr || !status) {
-        if (hdr_pa) free_4k_page(hdr_pa);
+        if (hdr_pa)    free_4k_page(hdr_pa);
         if (status_pa) free_4k_page(status_pa);
         w32(d, VMMIO_QUEUE_PFN, 0);
         free_pages(pg, 2);
         return -ENOMEM;
     }
-    d->hdr = hdr; d->hdr_pa = hdr_pa;
+    d->hdr = hdr;       d->hdr_pa    = hdr_pa;
     d->status = status; d->status_pa = status_pa;
     d->legacy_pages = pg;
     d->last_used_idx = 0;
     return 0;
 }
 
-static int virtio_blk_probe_slot(uint64_t base, uint32_t spi)
+static int virtio_blk_probe_slot(uint64_t base, uint32_t irq)
 {
     if (s_dev_count >= VIRTIO_BLK_MAX_DEVS) return 0;
     struct virtio_blk_dev *d = (struct virtio_blk_dev *)
@@ -459,33 +391,23 @@ static int virtio_blk_probe_slot(uint64_t base, uint32_t spi)
     uint32_t magic   = r32(d, VMMIO_MAGIC);
     uint32_t version = r32(d, VMMIO_VERSION);
     uint32_t devid   = r32(d, VMMIO_DEVICE_ID);
-    if (magic != 0x74726976u /* 'virt' */) { free(d); return 0; }   // empty slot
-    // DeviceID 2 = block.  VersionID 1 = legacy transport (QEMU virt's
-    // default, force-legacy=on); VersionID 2 = modern.  Empty slots keep
-    // the 'virt' magic but answer DeviceID 0.
+    if (magic != 0x74726976u /* 'virt' */) { free(d); return 0; }
     if (devid != 2 /* block */ || (version != 1 && version != 2)) {
-        /* Empty slot or non-block device: not boot-visible noise — only
-         * a debug line (QEMU virt exposes 31 empty slots per boot). */
         debug_vfs("virtio-blk: slot %lx version=%u devid=%u — skipped\n",
                   (unsigned long)base, version, devid);
         free(d);
         return 0;
     }
 
-    // Reset + acknowledge.
     w32(d, VMMIO_STATUS, 0);
     w32(d, VMMIO_STATUS, VIRTIO_S_ACKNOWLEDGE | VIRTIO_S_DRIVER);
 
     if (version == 1) {
-        // Legacy (v1) transport — what QEMU virt exposes by default
-        // (force-legacy=on).  No FEATURES_OK handshake; feature words
-        // still go through the SEL registers, we accept no features.
         w32(d, VMMIO_DEVICE_FEATURES_SEL, 0);
         (void)r32(d, VMMIO_DEVICE_FEATURES);
         w32(d, VMMIO_DRIVER_FEATURES_SEL, 0);
         w32(d, VMMIO_DRIVER_FEATURES, 0);
     } else {
-        // Modern (v2): accept only VIRTIO_F_VERSION_1 (word 1, bit 0).
         w32(d, VMMIO_DEVICE_FEATURES_SEL, 1);
         uint32_t hi = r32(d, VMMIO_DEVICE_FEATURES);
         if (!(hi & 1u)) {
@@ -495,11 +417,11 @@ static int virtio_blk_probe_slot(uint64_t base, uint32_t spi)
             return 0;
         }
         w32(d, VMMIO_DEVICE_FEATURES_SEL, 0);
-        (void)r32(d, VMMIO_DEVICE_FEATURES);        // lo: none accepted
+        (void)r32(d, VMMIO_DEVICE_FEATURES);
         w32(d, VMMIO_DRIVER_FEATURES_SEL, 0);
         w32(d, VMMIO_DRIVER_FEATURES, 0);
         w32(d, VMMIO_DRIVER_FEATURES_SEL, 1);
-        w32(d, VMMIO_DRIVER_FEATURES, 1u);          // VERSION_1
+        w32(d, VMMIO_DRIVER_FEATURES, 1u);
         w32(d, VMMIO_STATUS, r32(d, VMMIO_STATUS) | VIRTIO_S_FEATURES_OK);
         if (!(r32(d, VMMIO_STATUS) & VIRTIO_S_FEATURES_OK)) {
             log_err("virtio-blk: %lx FEATURES_OK refused\n",
@@ -521,11 +443,8 @@ static int virtio_blk_probe_slot(uint64_t base, uint32_t spi)
     w32(d, VMMIO_STATUS, r32(d, VMMIO_STATUS) | VIRTIO_S_DRIVER_OK);
     d->ready = true;
 
-    // Config: capacity in 512-byte sectors at config offset 0.
     uint64_t capacity = vring_load64((volatile uint8_t *)d->regs + VMMIO_CONFIG);
 
-    // Stable storage for the registry-visible name (desc.name is not
-    // copied by block_device_register).
     static char dev_name[VIRTIO_BLK_MAX_DEVS][8];
     dev_name[s_dev_count][0] = 'h';
     dev_name[s_dev_count][1] = 'd';
@@ -551,9 +470,9 @@ static int virtio_blk_probe_slot(uint64_t base, uint32_t spi)
         return rc;
     }
     s_devs[s_dev_count++] = d;
-    log_info("virtio-blk: %s @ %lx sectors=%lu spi=%u\n",
+    log_info("virtio-blk: %s @ %lx sectors=%lu irq=%u\n",
              dev_name[s_dev_count - 1], (unsigned long)base,
-             (unsigned long)capacity, spi);
+             (unsigned long)capacity, irq);
     return 0;
 }
 
@@ -563,27 +482,31 @@ int virtio_blk_init(void)
     if (initialized) return 0;
     initialized = true;
 
-    block_device_init();    // idempotent registry + bcache bring-up
+    uint32_t n = arch_virtio_mmio_slot_count();
+    if (n == 0)
+        return 0;
 
-    int rc = map_virtio_window();
+    block_device_init();
+
+    int rc = arch_virtio_mmio_map_early();
     if (rc != 0) {
         log_err("virtio-blk: MMIO window map failed (%d)\n", rc);
         return rc;
     }
 
-    uint32_t n = dtb_virtio_mmio_count();
     for (uint32_t i = 0; i < n; i++) {
-        const struct aarch64_virtio_mmio_slot *slot = dtb_virtio_mmio_get(i);
-        if (!slot) break;
-        int prc = virtio_blk_probe_slot(slot->base, slot->spi);
+        struct arch_virtio_mmio_slot slot;
+        if (arch_virtio_mmio_slot_get(i, &slot) != 0)
+            break;
+        int prc = virtio_blk_probe_slot(slot.base, slot.irq);
         if (prc < 0) return prc;
     }
     if (s_dev_count == 0)
-        log_warn("virtio-blk: no block device found in %u DTB slots\n", n);
+        log_warn("virtio-blk: no block device found in %u MMIO slots\n", n);
     return 0;
 }
 
-// ── Subsys registration (SUBSYS_PHASE_STORAGE, same phase as x86 device-boot)
+// ── Subsys registration (SUBSYS_PHASE_STORAGE) ───────────────────────────
 #ifndef OS01_HOST_TEST
 static int virtio_blk_subsys_init(void)
 {

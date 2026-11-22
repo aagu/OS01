@@ -331,14 +331,18 @@ rtc_write_datetime(&new_dt);
 
 ### virtio-blk-mmio 驱动（aarch64，2026-11-18）
 
-位于 `kernel/arch/aarch64/driver/virtio_blk.c`——aarch64 的**第一个块设备驱动**，
-随 VFS 门一并接入产品内核：
+位于 `kernel/driver/virtio_blk.c`（公开头 `kernel/include/driver/virtio_blk.h`）——架构中立的
+virtio-mmio 块设备驱动，通过架构门面 `kernel/include/arch/virtio_mmio.h`
+（aarch64 实现位于 `kernel/arch/aarch64/driver/virtio_mmio.c`）接入，是 aarch64 的
+**第一个块设备驱动**，随 VFS 门一并接入产品内核：
 
-* **DTB 节点收集**：消费 `virtio,mmio` 节点；**可选节点**，消费端在运行时探测
+* **DTB 节点收集**：由 `arch_virtio_mmio_slot_count()` / `arch_virtio_mmio_slot_get()`
+  提供槽位（aarch64 上消费 DTB `virtio,mmio` 节点）；**可选节点**，驱动在运行时探测
   MAGIC/VERSION/DEVICEID，**不做地址白名单**（与 x86 侧的 QEMU 静态地址兜底策略相反，
   见本文件 §QEMU 静态地址兜底）。
 * **传输**：legacy v1 与 modern v2 两种传输都支持。
-* **MMIO 窗口**：`[0x0a000000, 0x0a200000)` 经 TTBR1 2 MiB Device 块映射，
+* **MMIO 窗口**：由 `arch_virtio_mmio_map_early()` 完成早期映射（aarch64 上将
+  `[0x0a000000, 0x0a200000)` 经 TTBR1 2 MiB Device 块映射），
   映射发生在 `arch_boot_memory`（pre-SMP 阶段）——`SUBSYS_PHASE_STORAGE` 在
   `vmm_gate_check` 的 SMP 门之后，故必须提前完成。
 * **注册**：以 `SUBSYS_PHASE_STORAGE` 相位注册（与 x86 的 device-boot 同相位），

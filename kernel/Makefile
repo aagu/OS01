@@ -154,6 +154,7 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_boot.c \
                    driver/fb.c \
                    driver/fb_state.c \
                    driver/gfx.c \
+                   driver/virtio_blk.c \
                    subsys/subsys.c \
                    random/random.c \
                    ../libc/random/chacha20.c \
@@ -300,7 +301,7 @@ endif
 # fork/exec/exit, elf/devfs, futex, the x86 syscall handlers and the x86
 # MMIO/display device drivers.  The neutral directories keep only code
 # that compiles for BOTH architectures.
-# aarch64 collects its own driver/ (virtio-blk-mmio); x86's driver/ dir
+# aarch64 collects its own driver/ (virtio_mmio platform facade); x86's driver/ dir
 # owns the x86-only MMIO/display device drivers (see mm-arch-boundaries).
 ARCH_SOURCE_DIRS := boot intr memory smp cpu platform runtime driver sched sync syscall
 ifeq ($(ARCH),x86_64)

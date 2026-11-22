@@ -5,7 +5,7 @@
 #include <arch/boot_memory.h>
 #include <arch/aarch64/boot_direct_map.h>
 #include <arch/aarch64/boot_layout.h>
-#include <arch/aarch64/virtio_blk.h>   // virtio_mmio_map_early (pre-SMP MMIO window)
+#include <arch/virtio_mmio.h>          // arch_virtio_mmio_map_early (pre-SMP MMIO window)
 #include <arch/aarch64/page_table_selftest.h>
 #include <core/bootinfo.h>
 #include <log/log.h>      /* for log_err/log_info macros */
@@ -545,7 +545,7 @@ void arch_boot_memory(const struct boot_context *bootctx)
      * change gate rejects TTBR1 writes once smp_starting is set — the
      * virtio-blk subsys probes in SUBSYS_PHASE_STORAGE, which runs after
      * percpu bring-up but before the APs are IPI-ready. */
-    if (virtio_mmio_map_early() != 0) {
+    if (arch_virtio_mmio_map_early() != 0) {
         kputs("FATAL: virtio-mmio window map failed\n");
         for (;;) arch_cpu_halt();
     }
