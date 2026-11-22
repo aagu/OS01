@@ -147,11 +147,13 @@ static int setup_user_stack_check_capacity(char *const argv[], char *const envp[
      * (kernel/include/sched/task.h) doesn't expose it — keeping the
      * check adjacent to the stack-base / -top defines would require
      * a new public macro, which is out of scope for this fix. */
+#define X86_EXEC_MAX_AUXV_PAIRS 9U
+
     const size_t user_stack_size = 0x200000UL - 16;
     const size_t meta_overhead =
-        (size_t)(argc + envc + 3) * 8 +    /* argc + argv + envp ptrs */
-        96 +                                /* auxv (3 pairs) + AT_RANDOM + pad */
-        16;                                 /* X86_USER_STACK_TOP - 16 anchor */
+        (size_t)(argc + envc + 3) * 8 +           /* argc + argv + envp ptrs */
+        16 + 16 + X86_EXEC_MAX_AUXV_PAIRS * 16 +  /* AT_RANDOM + AT_PLATFORM + auxv + pad */
+        16;                                       /* X86_USER_STACK_TOP - 16 anchor */
     if (str_bytes + meta_overhead > user_stack_size) return -E2BIG;
 
     return 0;
@@ -170,6 +172,7 @@ static int setup_user_stack_check_capacity(char *const argv[], char *const envp[
  * Stack layout itself stays infallible — -1 sources ONLY from AT_RANDOM. */
 static int setup_user_stack(uint8_t *kstack, char *const argv[], char *const envp[],
                             int s_argc, int s_envc,
+                            const x86_elf_image_t *image,
                             uint64_t *out_argv_ptr, uint64_t *out_envp_ptr,
                             uint64_t *out_rsp)
 {
@@ -232,7 +235,8 @@ static int setup_user_stack(uint8_t *kstack, char *const argv[], char *const env
     memcpy(KSTACK(rsp), platform_str, platform_size);
     uint64_t at_platform_addr = rsp;
     /* R9 BLOCKER 修正: 真 fixed + meta 公式(替换 R8 的 total_descending 简化版) */
-    const size_t auxv_pair_count = 3;        /* AT_PLATFORM, AT_RANDOM, AT_NULL */
+    const bool is_pie = (image && image->is_pie);
+    const size_t auxv_pair_count = is_pie ? X86_EXEC_MAX_AUXV_PAIRS : 3U;
     const size_t fixed = 16 + platform_size + auxv_pair_count * 16;
     const size_t meta  = (s_argc + s_envc + 3) * 8;
     const size_t pad   = (16 - ((fixed + meta) & 15)) & 15;
@@ -240,9 +244,10 @@ static int setup_user_stack(uint8_t *kstack, char *const argv[], char *const env
         rsp -= pad;
         memset(KSTACK(rsp), 0, pad);
     }
-    /* auxv 三对（降序压入；内存低→高：AT_PLATFORM, AT_RANDOM, AT_NULL）。
-     * 与 Linux create_elf_tables() 同构：实体在前，AT_NULL 收尾；
-     * __libc_start_main 的 64-pair walk 直接消费。 */
+    /* auxv pairs (pushed descending; low->high in memory):
+     * PIE: AT_PHDR, AT_PHENT, AT_PHNUM, AT_ENTRY, AT_BASE, AT_PAGESZ,
+     *      AT_PLATFORM, AT_RANDOM, AT_NULL.
+     * ET_EXEC: AT_PLATFORM, AT_RANDOM, AT_NULL. */
     rsp -= 16;
     *(uint64_t *)KSTACK(rsp)      = AT_NULL;
     *(uint64_t *)KSTACK(rsp + 8)  = 0;
@@ -252,6 +257,26 @@ static int setup_user_stack(uint8_t *kstack, char *const argv[], char *const env
     rsp -= 16;
     *(uint64_t *)KSTACK(rsp)      = AT_PLATFORM;
     *(uint64_t *)KSTACK(rsp + 8)  = at_platform_addr;
+    if (is_pie) {
+        rsp -= 16;
+        *(uint64_t *)KSTACK(rsp)      = AT_PAGESZ;
+        *(uint64_t *)KSTACK(rsp + 8)  = 4096ULL;
+        rsp -= 16;
+        *(uint64_t *)KSTACK(rsp)      = AT_BASE;
+        *(uint64_t *)KSTACK(rsp + 8)  = 0ULL;
+        rsp -= 16;
+        *(uint64_t *)KSTACK(rsp)      = AT_ENTRY;
+        *(uint64_t *)KSTACK(rsp + 8)  = image->entry;
+        rsp -= 16;
+        *(uint64_t *)KSTACK(rsp)      = AT_PHNUM;
+        *(uint64_t *)KSTACK(rsp + 8)  = image->phnum;
+        rsp -= 16;
+        *(uint64_t *)KSTACK(rsp)      = AT_PHENT;
+        *(uint64_t *)KSTACK(rsp + 8)  = 56ULL;
+        rsp -= 16;
+        *(uint64_t *)KSTACK(rsp)      = AT_PHDR;
+        *(uint64_t *)KSTACK(rsp + 8)  = image->phdr;
+    }
     /* 末尾 ASSERT((rsp & 0xF)==0) 自动成立: fixed + meta + pad 是 16 倍数。 */
     /* envp[] + terminator NULL (pushed descending: terminator first,
      * then entries below it — the array START is rsp after the loop) */
@@ -483,8 +508,9 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 
     // 5. Load ELF segments into the new address space
     x86_elf_image_t elf_img = {0};
-    if (elf_load(node, mm, &elf_img) != 0) {
-        debug_task("spawn: ELF load failed for '%s'\n", path);
+    int load_rc = elf_load(node, mm, &elf_img);
+    if (load_rc != 0) {
+        debug_task("spawn: ELF load failed (%d) for '%s'\n", load_rc, path);
         if (tsk->files) { files_unpin(tsk->files); tsk->files = NULL; }
         if (tsk->fpu_save) kfree(tsk->fpu_save);
         destroy_unpublished_user_mm(mm);
@@ -492,7 +518,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
         kfree(thd);
         kfree(raw_alloc);
         vfs_node_put(node);
-        return -1;
+        return load_rc;
     }
     uint64_t entry_point = elf_img.entry;
     tsk->flags = (tsk->flags & ~PF_LINUX_ABI) | elf_detect_abi(node);
@@ -546,7 +572,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     uint64_t user_rsp = 0, user_arg_ptr = 0, user_env_ptr = 0;
 
     if (setup_user_stack(kstack, (char *const *)argv, NULL, s_argc, s_envc,
-                         &user_arg_ptr, &user_env_ptr, &user_rsp) != 0) {
+                         &elf_img, &user_arg_ptr, &user_env_ptr, &user_rsp) != 0) {
         /* AT_RANDOM STRONG-only 失败 — 清理已分配资源后返回 -EAGAIN。
          * 顺序与现有 elf_load 失败路径一致，**外加** task_list_lock
          * 已不再持锁（我们采用 staged 生命周期，task_list_insert
@@ -698,11 +724,12 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     new_mm->pgdir = (uint64_t *)Virt_To_Phy((uint64_t)new_pgd);
     // 5. Load ELF segments into the new address space
     x86_elf_image_t elf_img = {0};
-    if (elf_load(node, new_mm, &elf_img) != 0) {
+    int load_rc = elf_load(node, new_mm, &elf_img);
+    if (load_rc != 0) {
         destroy_unpublished_user_mm(new_mm);
         kfree(new_mm);
         vfs_node_put(node);
-        return -ENOEXEC;
+        return load_rc;
     }
     uint64_t entry_point = elf_img.entry;
     uint32_t abi_flag = elf_detect_abi(node);
@@ -743,7 +770,8 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     uint64_t user_rsp = 0, user_arg_ptr = 0, user_env_ptr = 0;
 
     if (setup_user_stack(kstack, (char *const *)argv, (char *const *)envp,
-                         s_argc, s_envc, &user_arg_ptr, &user_env_ptr, &user_rsp) != 0) {
+                         s_argc, s_envc, &elf_img,
+                         &user_arg_ptr, &user_env_ptr, &user_rsp) != 0) {
         /* AT_RANDOM STRONG-only 失败 — 走 staged 失败路径：
          * destroy_unpublished_user_mm 释放 stack_page + new_pgd；
          * 我们不需要单独 free_pages(stack_page)（single-owner
@@ -837,9 +865,10 @@ int task_selftest_auxv_probe(char *const argv[], char *const envp[],
         return -1;
 
     uint64_t argp, envpp, rsp;
+    x86_elf_image_t exec_img = {0};
     memset(task_selftest_stack_img, 0, sizeof(task_selftest_stack_img));
     if (setup_user_stack(task_selftest_stack_img, argv, envp, argc, envc,
-                         &argp, &envpp, &rsp) != 0) {
+                         &exec_img, &argp, &envpp, &rsp) != 0) {
         return -1;   /* selftest 中 AT_RANDOM 失败 → probe 失败 */
     }
 

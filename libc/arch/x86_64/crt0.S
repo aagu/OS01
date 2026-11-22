@@ -5,16 +5,8 @@ _start:
     # Clear frame pointer for backtrace termination
     xorq %rbp, %rbp
 
-    # Zero-initialize BSS
-    leaq __bss_start(%rip), %rdi
-    leaq __bss_end(%rip), %rcx
-    subq %rdi, %rcx
-    jz 1f
-    xorb %al, %al
-    rep stosb
-1:
-    # Save entry rsp AFTER BSS clear — xorb %al above clobbers rax, and rsp
-    # is unchanged by rep stosb, so saving here is equivalent (spec §4.2).
+    # Save entry rsp (BSS is already zeroed by the kernel loader so we
+    # never wipe R_X86_64_RELATIVE relocations placed in .bss).
     movq %rsp, %rax
 
     # __libc_start_main(main, argc, argv, init, fini, rtld_fini, stack_end)
