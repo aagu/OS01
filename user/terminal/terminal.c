@@ -428,6 +428,10 @@ int main(void)
         int pr = poll(fds, 2, timeout_ms);
         if (pr < 0) {
             if (errno == EINTR) continue;
+            char perr[96];
+            snprintf(perr, sizeof perr,
+                     "[terminal] WARN: poll failed errno=%d\r\n", errno);
+            serial_msg(serial_fd, perr);
             break;
         }
 
@@ -500,6 +504,8 @@ int main(void)
                     drain_count++;
                 } else if (n == 0) {
                     // Shell died
+                    serial_msg(serial_fd,
+                        "[terminal] WARN: pty master EOF, shell exited\r\n");
                     shell_exited = true;
                     break;
                 } else if (errno == EINTR) {
@@ -507,6 +513,11 @@ int main(void)
                 } else if (errno == EAGAIN) {
                     break;
                 } else {
+                    char rerr[96];
+                    snprintf(rerr, sizeof rerr,
+                             "[terminal] WARN: pty master read n=%d errno=%d\r\n",
+                             n, errno);
+                    serial_msg(serial_fd, rerr);
                     shell_exited = true;
                     break;
                 }
