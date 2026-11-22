@@ -57,11 +57,15 @@ FORBIDDEN_MACROS = [
     "X86_USER_ADDR_LIMIT", "X86_USER_MMAP_MAX_ADDR",
     "X86_USER_MMAP_RND_BASE", "X86_USER_MMAP_RND_BITS",
     "X86_USER_MMAP_RND_SPAN", "X86_USER_MMAP_RND_END",
+    "X86_USER_PIE_LINK_END", "X86_USER_PIE_BIAS_BASE",
+    "X86_USER_PIE_BIAS_BITS", "X86_USER_PIE_BIAS_SPAN",
+    "X86_USER_PIE_BIAS_END", "X86_USER_PIE_MAX_END",
     # private include guards (the arch facade _ARCH_MMU_H is allowed:
     # memory/mmu.h pulls it for ARCH_PAGE_OFFSET)
     "_ARCH_X86_64_MMU_H", "_ARCH_X86_64_VMM_H", "_ARCH_X86_64_PTE_H",
     "_ARCH_X86_64_USER_LAYOUT_H", "_ARCH_X86_64_VMA_H",
     "_ARCH_X86_64_UACCESS_H", "_ARCH_X86_64_ASLR_H",
+    "_ARCH_X86_64_ELF_IMAGE_H", "_ARCH_X86_64_ELF_PIE_H",
     "_ARCH_AARCH64_MMU_H", "_ARCH_AARCH64_VMM_BACKEND_H",
     "_ARCH_AARCH64_USER_VM_LEAF_H",
 ]
@@ -75,7 +79,8 @@ FORBIDDEN_SYMBOLS = [
     # x86 VMA owner API (arch/x86_64/vma.h only)
     "do_mmap", "fork_vma_copy",
     # x86 ASLR private API (arch/x86_64/aslr.h only)
-    "x86_aslr_derive_mmap_base", "x86_aslr_init_mmap_base",
+    "x86_aslr_derive_mmap_base", "x86_aslr_init_mmap_base", "x86_aslr_get_pie_bias",
+    "x86_elf_pie_prepare", "x86_elf_pie_dispose",
     # x86 uaccess ownership (arch/x86_64/uaccess.h only)
     "strnlen_user", "user_write_range_begin",
     # AArch64 leaf adapter (arch/aarch64/user_vm_leaf.h only)

@@ -36,10 +36,11 @@ class UserBuildTest(unittest.TestCase):
         self.lib.mkdir(parents=True)
         crt0_s = self.root / 'sysroot/crt0.S'
         crt0_s.write_text('.text\n.global _start\n_start:\n  jmp _start\n')
-        subprocess.run(['clang', '-c', str(crt0_s), '-o', str(self.lib / 'crt0.o')], check=True)
+        subprocess.run(['clang', '-fPIE', '-c', str(crt0_s), '-o', str(self.lib / 'crt0.o')], check=True)
         libc_arch = self.root / 'libc/arch/x86_64'
         libc_arch.mkdir(parents=True)
         shutil.copy(ROOT / 'libc' / 'arch' / 'x86_64' / 'user.ld', libc_arch / 'user.ld')
+        shutil.copy(ROOT / 'libc' / 'arch' / 'x86_64' / 'user-pie.ld', libc_arch / 'user-pie.ld')
         subprocess.run(['ar', 'rcs', str(self.lib / 'libc.a')], check=True)
         # user/Makefile also links the runtime link probe from
         # $(OS01_ROOT)/runtime/selftest/ and expects the root build to hand it
@@ -54,7 +55,7 @@ class UserBuildTest(unittest.TestCase):
         stub_c = self.root / 'runtime/stub_udivti3.c'
         stub_c.write_text('unsigned __int128 __udivti3(unsigned __int128 a, unsigned __int128 b) { return b ? a : 1; }\n')
         stub_o = self.root / 'runtime/stub_udivti3.o'
-        subprocess.run(['clang', '-c', str(stub_c), '-o', str(stub_o)], check=True)
+        subprocess.run(['clang', '-fPIE', '-c', str(stub_c), '-o', str(stub_o)], check=True)
         self.runtime_archive = self.root / 'runtime/libos01-builtins.a'
         subprocess.run(['ar', 'rcs', str(self.runtime_archive), str(stub_o)], check=True)
         self.profile = self.root / 'profile.mk'
@@ -72,7 +73,7 @@ class UserBuildTest(unittest.TestCase):
                                  f'OS01_PROFILE_FILE={self.profile}',
                                  f'SYSROOT_GENERATION_DIR={self.root}/sysroot',
                                  f'USER_RUNTIME_ARCHIVE={self.runtime_archive}',
-                                 'CFLAGS=-ffreestanding -fno-pie', *args],
+                                 *args],
                                 text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
         if ok:
             self.assertEqual(result.returncode, 0, result.stdout)
@@ -108,7 +109,7 @@ class UserBuildTest(unittest.TestCase):
         app = self.user / 'demo'
         (app / 'main.c').write_text('int helper(void); int extra(void); int resource(void); int main(void) { return helper() + extra() + resource(); }\n')
         (self.root / 'extra.c').write_text('int extra(void) { return 1; }\n')
-        subprocess.run(['clang', '-c', str(self.root / 'extra.c'), '-o', str(self.root / 'extra.o')], check=True)
+        subprocess.run(['clang', '-fPIE', '-c', str(self.root / 'extra.c'), '-o', str(self.root / 'extra.o')], check=True)
         subprocess.run(['ar', 'rcs', str(self.lib / 'libextra.a'), str(self.root / 'extra.o')], check=True)
         (app / 'resource.S').write_text('.text\n.global resource\nresource: mov $2, %eax; ret\n')
         with (app / 'app.mk').open('a') as manifest:
@@ -176,6 +177,27 @@ class UserBuildTest(unittest.TestCase):
         result = self.make('all', ok=False)
         self.assertNotEqual(result.returncode, 0, 'ambiguous program name accepted')
         self.assertIn('duplicate', result.stdout.lower())
+
+    def test_x86_pie_manifest_audit_and_cache(self):
+        import sys
+        sys.path.insert(0, str(ROOT / 'tools/tests'))
+        from audit_user_pie import audit_elf_bytes
+
+        self.make('-j4', 'all')
+        for name in ('hello.elf', 'demo.elf', 'user_udivti3_link_probe.elf'):
+            elf_path = self.root / 'out' / name
+            errs = audit_elf_bytes(elf_path.read_bytes(), expect_pie=True)
+            self.assertEqual(errs, [], f'{name} failed PIE audit: {errs}')
+
+        # Unchanged second build must not recompile or relink
+        second = self.make('all').stdout
+        self.assertNotIn('clang ', second)
+        self.assertNotIn('ld.lld ', second)
+
+        # BusyBox adapter keeps intermediate links free of final static-pie flags
+        user_mk = (ROOT / 'mk/components/user.mk').read_text()
+        self.assertIn('CONFIG_EXTRA_LDFLAGS=\\"\\"', user_mk)
+        self.assertIn('CFLAGS_busybox="-static-pie -nostdlib', user_mk)
 
 
 if __name__ == '__main__':

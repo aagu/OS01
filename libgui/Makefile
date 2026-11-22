@@ -36,9 +36,10 @@ check-version:
 	  echo "ERROR: $(LVGL_SOURCE) revision $$head does not match manifest $(LVGL_REVISION)"; exit 1; \
 	fi
 
+LIBGUI_ARCH_CFLAGS := $(if $(filter aarch64-none-elf,$(RUNTIME_TARGET_user)),-fno-pic -fno-pie,-fPIE -mcmodel=small -mno-red-zone)
 CFLAGS := --sysroot=$(STAGING_DIR)/kernel-headers \
           -ffreestanding -fno-builtin -Wall -Wextra -O2 \
-          -fno-pic -fno-pie -mno-red-zone -fstack-protector-strong \
+          $(LIBGUI_ARCH_CFLAGS) -fstack-protector-strong \
           -I$(STAGING_DIR)/kernel-headers/usr/include \
           -isystem $(STAGING_DIR)/libc/usr/include \
           -I$(STAGING_DIR)/libgfx/usr/include \
@@ -88,7 +89,18 @@ all: $(ARCHIVE)
 print-compile:
 	@printf '%s\n' "$(EFFECTIVE_CC) $(CFLAGS)"
 
+LIBGUI_COMPILE_KEY := $(BUILD_DIR)/.compile.key
+
+.PHONY: LIBGUI_KEY_FORCE
+LIBGUI_KEY_FORCE:
+
+$(LIBGUI_COMPILE_KEY): LIBGUI_KEY_FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' 'compiler=$(EFFECTIVE_CC) toolchain=$(shell $(EFFECTIVE_CC) --version 2>/dev/null | head -1) cflags=$(strip $(CFLAGS))' > $@.new
+	@cmp -s $@.new $@ || mv -f $@.new $@
+
 $(OBJS): | check-version
+$(OBJS): $(LIBGUI_COMPILE_KEY)
 
 $(BUILD_DIR)/obj/lvgl/%.o: $(LVGL_SRC_DIR)/%.c
 	@mkdir -p $(dir $@)

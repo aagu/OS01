@@ -85,6 +85,7 @@ $(STAMPS_DIR)/libc-install.stamp: FORCE
 	  find $(OS01_ROOT)/libc -type f -exec sha256sum {} + | sort; \
 	  printf 'toolchain: %s\n' "$$($(CLANG) --version 2>/dev/null | head -1)"; \
 	  printf 'launcher: %s\n' "$(COMPILER_LAUNCHER)"; \
+	  printf 'user_cflags: %s\n' "$(RUNTIME_CFLAGS_user)"; \
 	} | sha256sum | cut -d' ' -f1 ); \
 	$(call staging_stamp_tail,libc,libc,install,ARCH=$(SYSROOT_ARCH))
 
@@ -107,6 +108,7 @@ $(STAMPS_DIR)/libgfx-install.stamp: $(STAMPS_DIR)/kernel-headers-install.stamp \
 	  if [ -f "$(STAMPS_DIR)/kernel-headers-install.stamp.receipt" ]; then cat "$(STAMPS_DIR)/kernel-headers-install.stamp.receipt"; fi; \
 	  printf 'toolchain: %s\n' "$$($(CLANG) --version 2>/dev/null | head -1)"; \
 	  printf 'launcher: %s\n' "$(COMPILER_LAUNCHER)"; \
+	  printf 'user_cflags: %s\n' "$(RUNTIME_CFLAGS_user)"; \
 	} | sha256sum | cut -d' ' -f1 ); \
 	$(call staging_stamp_tail,libgfx,libgfx,install,)
 
@@ -121,6 +123,7 @@ $(STAMPS_DIR)/gui-install.stamp: $(STAMPS_DIR)/kernel-headers-install.stamp \
 	  if [ -f "$(STAMPS_DIR)/libgfx-install.stamp.receipt" ]; then cat "$(STAMPS_DIR)/libgfx-install.stamp.receipt"; fi; \
 	  printf 'toolchain: %s\n' "$$($(CLANG) --version 2>/dev/null | head -1)"; \
 	  printf 'launcher: %s\n' "$(COMPILER_LAUNCHER)"; \
+	  printf 'user_cflags: %s\n' "$(RUNTIME_CFLAGS_user)"; \
 	} | sha256sum | cut -d' ' -f1 ); \
 	$(call staging_stamp_tail,gui,libgui,install,)
 

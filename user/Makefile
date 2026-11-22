@@ -26,7 +26,6 @@ OBJ_DIR   := $(BUILD_DIR)/obj
 
 CFLAGS   := --sysroot=$(SYSROOT_DIR) \
             -ffreestanding -fstack-protector-strong -fno-asynchronous-unwind-tables \
-            -fno-pic -fno-pie -mno-red-zone \
             -I$(TARGET_INCDIR) \
             -Icommon -Wall -Wextra -O2
 
@@ -71,7 +70,6 @@ endif
 
 CFLAGS := --sysroot=$(SYSROOT_DIR) \
           -ffreestanding -fstack-protector-strong -fno-asynchronous-unwind-tables \
-          -fno-pic -fno-pie \
           -I$(TARGET_INCDIR) \
           -Icommon -Wall -Wextra -O2
 # Startup object ships with the sysroot; the sigreturn trampoline is a
@@ -79,11 +77,14 @@ CFLAGS := --sysroot=$(SYSROOT_DIR) \
 CRT0_OBJ := $(TARGET_LIBDIR_LOCAL)/crt0.o
 ifeq ($(USER_ARCH),aarch64)
 LINKER_SCRIPT  := $(OS01_ROOT)/libc/arch/aarch64/user.ld
+override CFLAGS += -fno-pic -fno-pie
 USER_RAW_LDFLAGS := -static -T $(LINKER_SCRIPT) -L$(TARGET_LIBDIR_LOCAL)
 else
-LINKER_SCRIPT  := $(OS01_ROOT)/libc/arch/x86_64/user.ld
-override CFLAGS += -mno-red-zone
-USER_RAW_LDFLAGS := -m elf_x86_64 -static -no-pie -T $(LINKER_SCRIPT) -L$(TARGET_LIBDIR_LOCAL)
+LINKER_SCRIPT  := $(OS01_ROOT)/libc/arch/x86_64/user-pie.ld
+override CFLAGS += -fPIE -mcmodel=small -mno-red-zone
+USER_RAW_LDFLAGS := -m elf_x86_64 -static -pie --no-dynamic-linker \
+                    -z max-page-size=4096 -z text -z norelro --pack-dyn-relocs=none \
+                    -T $(LINKER_SCRIPT) -L$(TARGET_LIBDIR_LOCAL)
 endif
 
 # ── Compile & link keys ──────────────────────────────────────

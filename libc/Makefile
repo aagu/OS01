@@ -28,8 +28,9 @@ BUILD_DIR := $(LIBC_BUILD_DIR)
 include $(ARCHDIR)/make.config
 
 # ── Compile flags ──────────────────────────────────────────
-CFLAGS := $(CFLAGS) -ffreestanding -Wall -Wextra -D__is_libc -Iinclude -fstack-protector-strong -fomit-frame-pointer $(ARCH_CFLAGS)
-LIBK_CFLAGS := $(CFLAGS) -D__is_libk -mno-red-zone -I../kernel/include -fno-stack-protector $(KERNEL_ARCH_CFLAGS)
+COMMON_CFLAGS := $(CFLAGS) -ffreestanding -Wall -Wextra -Iinclude -fomit-frame-pointer
+CFLAGS        := $(COMMON_CFLAGS) -D__is_libc -fstack-protector-strong $(ARCH_CFLAGS)
+LIBK_CFLAGS   := $(COMMON_CFLAGS) -D__is_libk -mno-red-zone -I../kernel/include -fno-stack-protector $(KERNEL_ARCH_CFLAGS)
 
 # ── Source discovery (wildcard — no manual lists!) ──────────
 # Both x86_64 and aarch64 build the full userland libc.a AND the same

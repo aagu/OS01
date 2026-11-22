@@ -105,8 +105,6 @@ int x86_elf_pie_prepare(vfs_node_t *node,
 
     /* 2. Walk PHDRs: PT_LOAD geometry, forbidden headers, PT_PHDR, PT_DYNAMIC */
     enum { MAX_PIE_LOADS = 32 };
-    uint64_t pg_lo[MAX_PIE_LOADS];
-    uint64_t pg_hi[MAX_PIE_LOADS];
     int load_count = 0;
 
     const elf64_phdr_t *dyn_ph = NULL;
@@ -164,12 +162,15 @@ int x86_elf_pie_prepare(vfs_node_t *node,
             if (phi > X86_USER_PIE_LINK_END)
                 return -ENOEXEC;
 
-            for (int k = 0; k < load_count; k++) {
-                if (intervals_intersect_u64(plo, phi, pg_lo[k], pg_hi[k]))
+            for (uint16_t k = 0; k < i; k++) {
+                const elf64_phdr_t *prev = &phdrs[k];
+                if (prev->p_type != PT_LOAD)
+                    continue;
+                uint64_t prev_lo = prev->p_vaddr & PAGE_4K_MASK;
+                uint64_t prev_hi = (prev->p_vaddr + prev->p_memsz + PAGE_4K_SIZE - 1ULL) & PAGE_4K_MASK;
+                if (intervals_intersect_u64(plo, phi, prev_lo, prev_hi))
                     return -ENOEXEC;
             }
-            pg_lo[load_count] = plo;
-            pg_hi[load_count] = phi;
             load_count++;
 
             if (phi > max_page_end)
@@ -224,11 +225,6 @@ int x86_elf_pie_prepare(vfs_node_t *node,
         !(dyn_seg->p_flags & PF_W) || (dyn_seg->p_flags & PF_X))
         return -ENOEXEC;
 
-    elf64_dyn_t dyn_buf[X86_ELF_PIE_MAX_DYN];
-    int rd = vfs_read(node, dyn_file_off, dyn_ph->p_filesz, dyn_buf);
-    if (rd < 0 || (uint64_t)rd != dyn_ph->p_filesz)
-        return -ENOEXEC;
-
     bool seen_null = false;
     bool has_flags_1 = false;
     bool has_rela = false, has_relasz = false, has_relaent = false, has_relacount = false;
@@ -237,68 +233,80 @@ int x86_elf_pie_prepare(vfs_node_t *node,
 
     uint64_t rela_vaddr = 0, rela_sz = 0, rela_ent = 0, rela_count_tag = 0;
 
-    for (uint64_t i = 0; i < n_dyn; i++) {
-        int64_t tag = dyn_buf[i].d_tag;
-        uint64_t val = dyn_buf[i].d_val;
-        if (tag == DT_NULL) {
-            seen_null = true;
-            break;
-        }
-        switch (tag) {
-        case DT_FLAGS_1:
-            if (has_flags_1 || val != DF_1_PIE) return -ENOEXEC;
-            has_flags_1 = true;
-            break;
-        case DT_RELA:
-            if (has_rela) return -ENOEXEC;
-            has_rela = true;
-            rela_vaddr = val;
-            break;
-        case DT_RELASZ:
-            if (has_relasz) return -ENOEXEC;
-            has_relasz = true;
-            rela_sz = val;
-            break;
-        case DT_RELAENT:
-            if (has_relaent) return -ENOEXEC;
-            has_relaent = true;
-            rela_ent = val;
-            break;
-        case DT_RELACOUNT:
-            if (has_relacount) return -ENOEXEC;
-            has_relacount = true;
-            rela_count_tag = val;
-            break;
-        case DT_STRTAB:
-            if (has_strtab) return -ENOEXEC;
-            has_strtab = true;
-            break;
-        case DT_STRSZ:
-            if (has_strsz) return -ENOEXEC;
-            has_strsz = true;
-            break;
-        case DT_SYMTAB:
-            if (has_symtab) return -ENOEXEC;
-            has_symtab = true;
-            break;
-        case DT_SYMENT:
-            if (has_syment) return -ENOEXEC;
-            has_syment = true;
-            break;
-        case DT_HASH:
-            if (has_hash) return -ENOEXEC;
-            has_hash = true;
-            break;
-        case DT_GNU_HASH:
-            if (has_gnu_hash) return -ENOEXEC;
-            has_gnu_hash = true;
-            break;
-        case DT_DEBUG:
-            if (has_debug || val != 0) return -ENOEXEC;
-            has_debug = true;
-            break;
-        default:
+    for (uint64_t base = 0; base < n_dyn && !seen_null; base += 8) {
+        elf64_dyn_t dyn_chunk[8];
+        uint64_t cnt = n_dyn - base;
+        if (cnt > 8)
+            cnt = 8;
+        uint64_t bytes = cnt * sizeof(elf64_dyn_t);
+        int rd = vfs_read(node, dyn_file_off + base * sizeof(elf64_dyn_t),
+                          bytes, dyn_chunk);
+        if (rd < 0 || (uint64_t)rd != bytes)
             return -ENOEXEC;
+
+        for (uint64_t j = 0; j < cnt; j++) {
+            int64_t tag = dyn_chunk[j].d_tag;
+            uint64_t val = dyn_chunk[j].d_val;
+            if (tag == DT_NULL) {
+                seen_null = true;
+                break;
+            }
+            switch (tag) {
+            case DT_FLAGS_1:
+                if (has_flags_1 || val != DF_1_PIE) return -ENOEXEC;
+                has_flags_1 = true;
+                break;
+            case DT_RELA:
+                if (has_rela) return -ENOEXEC;
+                has_rela = true;
+                rela_vaddr = val;
+                break;
+            case DT_RELASZ:
+                if (has_relasz) return -ENOEXEC;
+                has_relasz = true;
+                rela_sz = val;
+                break;
+            case DT_RELAENT:
+                if (has_relaent) return -ENOEXEC;
+                has_relaent = true;
+                rela_ent = val;
+                break;
+            case DT_RELACOUNT:
+                if (has_relacount) return -ENOEXEC;
+                has_relacount = true;
+                rela_count_tag = val;
+                break;
+            case DT_STRTAB:
+                if (has_strtab) return -ENOEXEC;
+                has_strtab = true;
+                break;
+            case DT_STRSZ:
+                if (has_strsz) return -ENOEXEC;
+                has_strsz = true;
+                break;
+            case DT_SYMTAB:
+                if (has_symtab) return -ENOEXEC;
+                has_symtab = true;
+                break;
+            case DT_SYMENT:
+                if (has_syment) return -ENOEXEC;
+                has_syment = true;
+                break;
+            case DT_HASH:
+                if (has_hash) return -ENOEXEC;
+                has_hash = true;
+                break;
+            case DT_GNU_HASH:
+                if (has_gnu_hash) return -ENOEXEC;
+                has_gnu_hash = true;
+                break;
+            case DT_DEBUG:
+                if (has_debug || val != 0) return -ENOEXEC;
+                has_debug = true;
+                break;
+            default:
+                return -ENOEXEC;
+            }
         }
     }
 

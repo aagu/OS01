@@ -115,12 +115,11 @@ $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)&: $(SYSROOT_STAMP) $(USER_RUNTIME_PREREQ
 #   OS01 EL0 uses a fixed 4K granule, so pin BB_ARCH_FIXED_PAGESIZE=4096.
 BUSYBOX_ARCH_DIR := $(if $(filter aarch64-none-elf,$(RUNTIME_TARGET_user)),aarch64,x86_64)
 BUSYBOX_A64      := $(filter aarch64-none-elf,$(RUNTIME_TARGET_user))
-BUSYBOX_LINK     := $(TARGET_CCLD) $(if $(BUSYBOX_A64),-fuse-ld=lld)
-# Arch-conditional .config patches, resolved at parse time — a multi-line
-# $(if) inside the single-quoted recipe shell string collides with GNU
-# make's recipe backslash-newline handling (the expansion truncates the
-# recipe), so the recipe only references this pre-expanded variable.
+BUSYBOX_LINK     := $(TARGET_CCLD) -fuse-ld=lld
+BUSYBOX_LINKSCRIPT := $(if $(BUSYBOX_A64),$(OS01_ROOT)/libc/arch/aarch64/user.ld,$(OS01_ROOT)/libc/arch/x86_64/user-pie.ld)
 BUSYBOX_SED_A64  := $(if $(BUSYBOX_A64),-e "s|-fstack-protector-strong|-fstack-protector-strong -DBB_ARCH_FIXED_PAGESIZE=4096|" -e "s|-static -nostartfiles|-static -nostdlib -nostartfiles|")
+BUSYBOX_SED_X86  := $(if $(BUSYBOX_A64),,-e "s|-fstack-protector-strong|-fstack-protector-strong -fPIE -mcmodel=small|" -e "s|CONFIG_EXTRA_LDFLAGS=.*|CONFIG_EXTRA_LDFLAGS=\"\"|" -e "s|CONFIG_EXTRA_LDLIBS=.*|CONFIG_EXTRA_LDLIBS=\"c\"|")
+BUSYBOX_MAKE_EXTRA := $(if $(BUSYBOX_A64),,CFLAGS_busybox="-static-pie -nostdlib -L$$genabs/usr/lib $$genabs/usr/lib/crt0.o -Wl,--no-dynamic-linker -Wl,-z,max-page-size=4096 -Wl,-z,text -Wl,-z,norelro -Wl,--pack-dyn-relocs=none -Wl,-T,$(BUSYBOX_LINKSCRIPT)")
 ifneq ($(strip $(RUNTIME_TARGET_user)),)
 
 BUSYBOX_MANIFEST  := $(OS01_ROOT)/thirdpart/busybox.manifest
@@ -157,20 +156,21 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	      find thirdpart/busybox-1.36.1 -type f -exec sha256sum {} + 2>/dev/null | sort; \
 	      sha256sum config/busybox.config.in thirdpart/busybox.manifest; \
 	      find config/busybox.overlay -type f -exec sha256sum {} + 2>/dev/null | sort; \
-	      sha256sum libc/arch/$(BUSYBOX_ARCH_DIR)/crt0.S libc/arch/$(BUSYBOX_ARCH_DIR)/user.ld; \
+	      sha256sum libc/arch/$(BUSYBOX_ARCH_DIR)/crt0.S $(patsubst $(OS01_ROOT)/%,%,$(BUSYBOX_LINKSCRIPT)) mk/components/user.mk; \
 	      printf "toolchain: %s\n" "$$($(CLANG) --version 2>/dev/null | head -1)"; \
+	      printf "pie_adapter: %s | %s\n" "$(BUSYBOX_ARCH_DIR)" "$(BUSYBOX_LINKSCRIPT)"; \
 	      printf "sysroot generation: %s\n" "$$gen"; \
 	    } | sha256sum | cut -d" " -f1 ); \
 	    old=""; \
 	    if [ -f "$(BUSYBOX_RECEIPT)" ]; then old=$$(cat "$(BUSYBOX_RECEIPT)"); fi; \
 	    if [ "$$digest" = "$$old" ] && [ -f "$(BUSYBOX_PRIVATE)/busybox" ]; then \
 	      echo "  [busybox] config unchanged, checking incremental build"; \
-	      if [ -f "$(SYSROOT)/usr/lib/libc.a" ] && [ "$(SYSROOT)/usr/lib/libc.a" -nt "$(BUSYBOX_PRIVATE)/busybox" ]; then \
+	      if [ -f "$$genabs/usr/lib/libc.a" ] && [ "$$genabs/usr/lib/libc.a" -nt "$(BUSYBOX_PRIVATE)/busybox" ]; then \
 	        rm -f "$(BUSYBOX_PRIVATE)/busybox_unstripped" "$(BUSYBOX_PRIVATE)/busybox"; \
 	      fi; \
 	      env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
 	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" SKIP_STRIP=y $(MAKE) MAKEOVERRIDES= \
-	        -C "$(BUSYBOX_PRIVATE)" CC="$(BUSYBOX_LINK)" LD="$(BUSYBOX_LINK)"; \
+	        -C "$(BUSYBOX_PRIVATE)" CC="$(BUSYBOX_LINK)" LD="$(BUSYBOX_LINK)" $(BUSYBOX_MAKE_EXTRA); \
 	    else \
 	      echo "  [busybox] config changed or unbuilt, rebuilding in $(BUSYBOX_PRIVATE)"; \
 	      printf "%s\n" "$$digest" > "$(BUSYBOX_INPUT_DG)"; \
@@ -178,12 +178,12 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	      cp -a "$(OS01_ROOT)/thirdpart/busybox-1.36.1" "$(BUSYBOX_PRIVATE)"; \
 	      [ -f "$(BUSYBOX_PRIVATE)/Makefile" ] || { echo "ERROR: private busybox copy incomplete"; exit 1; }; \
 	      cp "$(BUSYBOX_OVERLAY)/applets/Kbuild.src" "$(BUSYBOX_PRIVATE)/applets/Kbuild.src"; \
-	      sed -e "s|@TARGET_INCLUDEDIR@|$(SYSROOT)/usr/include|g" \
-	          -e "s|@TARGET_LIBDIR@|$(SYSROOT)/usr/lib|g" \
-	          -e "s|@TARGET_LINKERSCRIPT@|$(OS01_ROOT)/libc/arch/$(BUSYBOX_ARCH_DIR)/user.ld|g" \
+	      sed -e "s|@TARGET_INCLUDEDIR@|$$genabs/usr/include|g" \
+	          -e "s|@TARGET_LIBDIR@|$$genabs/usr/lib|g" \
+	          -e "s|@TARGET_LINKERSCRIPT@|$(BUSYBOX_LINKSCRIPT)|g" \
 	          -e "s|@CLANG_RESOURCE_DIR@|$(CLANG_RESOURCE_DIR)|g" \
 	          -e "s|-I../../libc/include -I../../kernel/include ||" \
-	          $(BUSYBOX_SED_A64) \
+	          $(BUSYBOX_SED_A64) $(BUSYBOX_SED_X86) \
 	          "$(OS01_ROOT)/config/busybox.config.in" > "$(BUSYBOX_PRIVATE)/.config"; \
 	      env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
 	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" SKIP_STRIP=y $(MAKE) MAKEOVERRIDES= \
@@ -193,7 +193,7 @@ $(USER_ARTIFACT_DIR)/busybox.elf: $(SYSROOT_STAMP) FORCE
 	        -C "$(BUSYBOX_PRIVATE)" oldconfig CC="$(BUSYBOX_LINK)" LD="$(BUSYBOX_LINK)"; \
 	      env -i PATH="$(PATH)" HOME="$(HOME)" TMPDIR="$(TMPDIR)" \
 	        MAKEFLAGS="$(OS01_SUBMAKEFLAGS)" SKIP_STRIP=y $(MAKE) MAKEOVERRIDES= \
-	        -C "$(BUSYBOX_PRIVATE)" CC="$(BUSYBOX_LINK)" LD="$(BUSYBOX_LINK)"; \
+	        -C "$(BUSYBOX_PRIVATE)" CC="$(BUSYBOX_LINK)" LD="$(BUSYBOX_LINK)" $(BUSYBOX_MAKE_EXTRA); \
 	      [ -f "$(BUSYBOX_PRIVATE)/busybox" ] || { echo "ERROR: busybox build produced no binary"; exit 1; }; \
 	      printf "%s\n" "$$digest" > "$(BUSYBOX_RECEIPT)"; \
 	    fi; \

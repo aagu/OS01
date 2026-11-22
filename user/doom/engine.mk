@@ -77,9 +77,10 @@ endif
 # the profile's target compiler and the project's warning policy.  The
 # third-party warning suppression is not global: it is limited to the
 # engine rules.
+DOOM_ARCH_CFLAGS := $(if $(filter aarch64,$(USER_ARCH)),-fno-pic -fno-pie,-fPIE -mcmodel=small -mno-red-zone)
 DOOM_ENGINE_CFLAGS := --sysroot=$(SYSROOT_DIR) \
     -ffreestanding -fno-builtin -fstack-protector-strong \
-    -fno-asynchronous-unwind-tables -fno-pic -fno-pie -mno-red-zone \
+    -fno-asynchronous-unwind-tables $(DOOM_ARCH_CFLAGS) \
     -I$(DOOM_PRIVATE_DIR)/doomgeneric \
     -I$(TARGET_INCDIR) \
     -Wall -Wextra -O2 \

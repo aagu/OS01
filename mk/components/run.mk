@@ -167,7 +167,7 @@ test-aarch64-audit: $(BUILD_DIR)/artifacts/kernel.elf
 	    echo "AUDIT GATE FAIL: obsolete symbol aarch64_main found in ELF" >&2; exit 1; \
 	fi
 	@echo "  [audit] aarch64 kernel.elf: no vma_*/fork_* or sched-split x86-subsystem T/t symbols"
-	@bad="$$($(AARCH64_NM) $(BUILD_DIR)/artifacts/kernel.elf | awk '$$2 == "T" || $$2 == "t" { print $$3 }' | grep -E '^(vma_|fork_|x86_vma_destroy_node|x86_vmm_map_(2m|4k)|x86_aslr_|mm_(init_user_heap|set_brk|user_range_protected)|do_(mmap|munmap|mprotect)|vmm_free_user_map|do_fork)')"; \
+	@bad="$$($(AARCH64_NM) $(BUILD_DIR)/artifacts/kernel.elf | awk '$$2 == "T" || $$2 == "t" { print $$3 }' | grep -E '^(vma_|fork_|x86_vma_destroy_node|x86_vmm_map_(2m|4k)|x86_aslr_|x86_elf_pie_|mm_(init_user_heap|set_brk|user_range_protected)|do_(mmap|munmap|mprotect)|vmm_free_user_map|do_fork)')"; \
 	  if [ -n "$$bad" ]; then \
 	    echo "AUDIT GATE FAIL: forbidden symbols in aarch64 kernel.elf:" $$bad >&2; exit 1; \
 	  fi
@@ -767,6 +767,15 @@ test-host: $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(SYSROOT_STAMP))
 	python3 tools/tests/test_cursor_icon.py
 test-pmm-boot-reservation:
 	python3 qemutests/pmm_boot_reservation_test.py
+
+.PHONY: test-user-pie
+test-user-pie: $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE) $(USER_ARTIFACT_DIR)/busybox.elf
+	python3 tools/tests/audit_user_pie.py --selftest
+ifeq ($(filter aarch64-none-elf,$(RUNTIME_TARGET_user)),aarch64-none-elf)
+	python3 tools/tests/audit_user_pie.py --expect-exec --machine aarch64 $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE) $(USER_ARTIFACT_DIR)/busybox.elf
+else
+	python3 tools/tests/audit_user_pie.py --machine x86_64 $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE) $(USER_ARTIFACT_DIR)/busybox.elf
+endif
 
 .PHONY: print-host-test-inventory check-registry-unique
 print-host-test-inventory:

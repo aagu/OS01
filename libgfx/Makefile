@@ -46,9 +46,10 @@ LIBGFX_DIR := $(abspath $(dir $(LOCAL_MAKEFILE)))
 # component stamps complete; using it during component install
 # would create a forward dependency that the publish protocol
 # (single-writer sysroot) is designed to forbid.
+LIBGFX_ARCH_CFLAGS := $(if $(filter aarch64-none-elf,$(RUNTIME_TARGET_user)),-fno-pic -fno-pie $(filter -mgeneral-regs-only,$(RUNTIME_CFLAGS_user)),-fPIE -mcmodel=small -mno-red-zone)
 CFLAGS := --sysroot=$(STAGING_DIR)/kernel-headers \
           -ffreestanding -fno-builtin -Wall -Wextra -O2 \
-          $(filter -mgeneral-regs-only,$(RUNTIME_CFLAGS_user)) \
+          $(LIBGFX_ARCH_CFLAGS) \
           -I$(STAGING_DIR)/kernel-headers/usr/include \
           -I$(LIBGFX_DIR) \
           -isystem $(STAGING_DIR)/libc/usr/include
@@ -71,9 +72,20 @@ $(ARCHIVE): $(OBJS)
 	@mkdir -p $(dir $@)
 	$(TARGET_AR) rcs $@ $^
 
+LIBGFX_COMPILE_KEY := $(BUILD_DIR)/.compile.key
+
+.PHONY: LIBGFX_KEY_FORCE
+LIBGFX_KEY_FORCE:
+
+$(LIBGFX_COMPILE_KEY): LIBGFX_KEY_FORCE
+	@mkdir -p $(dir $@)
+	@printf '%s\n' 'compiler=$(EFFECTIVE_CC) toolchain=$(shell $(EFFECTIVE_CC) --version 2>/dev/null | head -1) cflags=$(strip $(CFLAGS))' > $@.new
+	@cmp -s $@.new $@ || mv -f $@.new $@
+
 $(BUILD_DIR)/%.o: $(LIBGFX_DIR)/%.c \
 		$(LIBGFX_DIR)/gfx.h \
-		$(LIBGFX_DIR)/internal.h
+		$(LIBGFX_DIR)/internal.h \
+		$(LIBGFX_COMPILE_KEY)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(CFLAGS) -MMD -MP -c $< -o $@
 
