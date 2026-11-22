@@ -98,7 +98,19 @@ const char *task_basename(const char *path) { return path; }
 
 int elf_detect_abi(vfs_node_t *node) { (void)node; return 0; }
 int elf_validate(vfs_node_t *node) { (void)node; return 0; }
-int elf_load(vfs_node_t *node, uint64_t *out_entry) { (void)node; *out_entry = 0x400000; return 0; }
+#include <arch/x86_64/elf_image.h>
+int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
+{
+    (void)node;
+    (void)mm;
+    if (out_image) {
+        out_image->entry = 0x400000;
+        out_image->phdr = 0;
+        out_image->phnum = 0;
+        out_image->is_pie = false;
+    }
+    return 0;
+}
 struct pt_regs;
 void arch_task_prepare_user_entry(task_t *task, struct pt_regs *frame)
 {

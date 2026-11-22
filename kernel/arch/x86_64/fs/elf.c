@@ -24,6 +24,9 @@
  */
 #include <fs/elf.h>
 #include <fs/elf_layout.h>
+#include <arch/x86_64/elf_image.h>
+#include <arch/x86_64/elf_pie.h>
+#include <arch/x86_64/aslr.h>
 #include <fs/vfs.h>      /* vfs_node_t definition, vfs_read */
 #include <sched/task.h>  /* mm_t definition (dereferenced as mm->pgdir, ...) */
 #include <memory/memory.h>
@@ -121,8 +124,28 @@ int elf_validate(vfs_node_t *node)
     return 0;
 }
 
-int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
+static void write_snapshot_bytes(uint64_t *pgd, uint64_t dst_va,
+                                 const void *src, uint64_t len)
 {
+    const uint8_t *s = (const uint8_t *)src;
+    uint64_t off = 0;
+    while (off < len) {
+        uint64_t cur_va = dst_va + off;
+        uint64_t pg_off = cur_va & (PAGE_4K_SIZE - 1);
+        uint64_t chunk = PAGE_4K_SIZE - pg_off;
+        if (chunk > len - off)
+            chunk = len - off;
+        uint64_t *pte = vmm_pt_walk(pgd, cur_va & PAGE_4K_MASK, 0, 0);
+        uint64_t pa = x86_pte_4k_pa(*pte);
+        memcpy((void *)((uintptr_t)Phy_To_Virt(pa) + pg_off), s + off, chunk);
+        off += chunk;
+    }
+}
+
+int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
+{
+    if (!out_image)
+        return -EINVAL;
     elf64_ehdr_t ehdr;
     int ret;
 
@@ -138,10 +161,13 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
         return -ENOEXEC;
     }
 
-    /* ── 2. Pre-read every program header BEFORE any allocation.
-     *    elf_layout_validate will fail-fast on malformed headers;
-     *    no allocator state has changed yet. */
     uint16_t phnum = ehdr.e_phnum;
+    if (ehdr.e_type == ET_DYN &&
+        (phnum == 0 || phnum > X86_ELF_PIE_MAX_PHDRS)) {
+        return -ENOEXEC;
+    }
+
+    /* ── 2. Pre-read every program header BEFORE any allocation. */
     elf64_phdr_t *phdrs = NULL;
     if (phnum > 0) {
         phdrs = kmalloc(sizeof(elf64_phdr_t) * phnum);
@@ -160,32 +186,39 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
         }
     }
 
-    /* ── 3. Validate layout (single source of truth) ─────────
-     *    After this returns 0, every invariant the validator
-     *    enforces holds: PHDRs are well-formed, PT_LOADs are
-     *    non-overlapping and within the user range, every
-     *    segment fits file_size / heap_limit, entry is inside
-     *    an executable PT_LOAD.  The loader only checks its own
-     *    per-page invariants below. */
+    /* ── 3. Validate layout (ET_DYN static-PIE vs ET_EXEC) ──── */
     uint64_t file_size = vfs_node_live_size(node);
-    elf_layout_t layout;
-    ret = elf_layout_validate(&ehdr, phdrs, file_size, &layout);
-    if (ret != 0) {
-        kfree(phdrs);
-        return -ENOEXEC;
+    bool is_pie = false;
+    uint64_t bias = 0;
+    x86_elf_pie_t pie;
+    memset(&pie, 0, sizeof(pie));
+
+    if (ehdr.e_type == ET_DYN) {
+        int prc = x86_elf_pie_prepare(node, &ehdr, phdrs, file_size, &pie);
+        if (prc != 0) {
+            kfree(phdrs);
+            return prc;
+        }
+        int brc = x86_aslr_get_pie_bias(&bias);
+        if (brc != 0) {
+            x86_elf_pie_dispose(&pie);
+            kfree(phdrs);
+            return brc;
+        }
+        is_pie = true;
+    } else {
+        elf_layout_t layout;
+        ret = elf_layout_validate(&ehdr, phdrs, file_size, &layout);
+        if (ret != 0) {
+            kfree(phdrs);
+            return -ENOEXEC;
+        }
     }
 
     /* ── 4. Resolve PGD virtual address ────────────────────── */
     uint64_t *pgd = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
 
     /* ── 5. Rollback owner (this call's newly mapped leaves) ── */
-    /* These two arrays live on the HEAP, not the stack: at
-     * MAX_LOAD_LEAVES=8192 the stack frame was 2*64 KiB ≈ 128 KiB —
-     * 4x the 32 KiB kernel stack — so every exec silently overflowed
-     * the loader's kernel stack and corrupted adjacent memory
-     * (surfacing as a delayed "Kernel stack smashing detected" in a
-     * later schedule() epilogue).  kmalloc's 64 KiB size class holds
-     * each array. */
     uint64_t *rollback_vaddr =
         (uint64_t *)kmalloc(MAX_LOAD_LEAVES * sizeof(uint64_t));
     uint64_t *rollback_phys =
@@ -194,16 +227,16 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
     if (!rollback_vaddr || !rollback_phys) {
         if (rollback_phys) kfree(rollback_phys);
         if (rollback_vaddr) kfree(rollback_vaddr);
+        if (is_pie) x86_elf_pie_dispose(&pie);
         kfree(phdrs);
         return -ENOMEM;
     }
 
-    /* ── 6. mm code bounds — start at sentinel-high so the
-     *    first segment writes a real value. */
+    /* ── 6. mm code bounds ─────────────────────────────────── */
     uint64_t start_code = UINT64_MAX;
     uint64_t end_code   = 0;
 
-    int rc = -ENOEXEC;  /* default failure code */
+    int rc = -ENOEXEC;
 
     /* ── 7. Walk every PT_LOAD's covered 4 KiB pages ───────── */
     for (uint16_t i = 0; i < phnum; i++) {
@@ -212,8 +245,8 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
 
         uint64_t seg_flags = elf_pte_flags(ph->p_flags);
 
-        uint64_t seg_start  = ph->p_vaddr;
-        uint64_t seg_end    = ph->p_vaddr + ph->p_memsz;
+        uint64_t seg_start  = bias + ph->p_vaddr;
+        uint64_t seg_end    = bias + ph->p_vaddr + ph->p_memsz;
         uint64_t start_page = seg_start & PAGE_4K_MASK;
         uint64_t end_page   = (seg_end + (PAGE_4K_SIZE - 1)) & PAGE_4K_MASK;
 
@@ -221,24 +254,16 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
         if (seg_end   > end_code)   end_code   = seg_end;
 
         for (uint64_t pg = start_page; pg < end_page; pg += PAGE_4K_SIZE) {
-            /* Look up any existing PTE for this vaddr.  vmm_pt_walk
-            * returns NULL if absent (allocate=0); the production
-            * helper allocates intermediate tables internally when
-            * allocate != 0.  We never overwrite an existing PTE. */
             uint64_t *pte = vmm_pt_walk(pgd, pg, 0, 0);
             uint64_t page_phys = 0;
 
             if (pte && (*pte & PAGE_FLAGS_VALID_BIT)) {
-                /* Already mapped: reuse the existing phys. */
+                if (is_pie) {
+                    rc = -ENOEXEC;
+                    goto rollback;
+                }
                 page_phys = x86_pte_4k_pa(*pte);
 
-                /* Check permission compatibility.  Incompatibility
-                 * means the page was previously mapped with stricter
-                 * (RO or NX) permissions than this segment needs
-                 * (RW or X) — rejecting here keeps the existing
-                 * mapping intact for the caller to free later.
-                 * PAGE_FLAGS_NR_MASK alone would drop the NX bit
-                 * (bit 63), so it is OR-ed in explicitly. */
                 uint64_t existing =
                     (*pte & (PAGE_FLAGS_NR_MASK | PAGE_NO_EXEC));
                 if (!pte_flags_compatible(existing, seg_flags)) {
@@ -248,14 +273,12 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
                     goto rollback;
                 }
             } else {
-                /* Fresh 4 KiB leaf: alloc, zero, map. */
                 page_phys = alloc_4k_page();
                 if (!page_phys) {
                     debug_fs("elf_load: OOM allocating 4K page\n");
                     rc = -ENOMEM;
                     goto rollback;
                 }
-                /* Zero in case the allocator didn't already. */
                 memset((void *)Phy_To_Virt(page_phys), 0, PAGE_4K_SIZE);
 
                 if (x86_vmm_map_4k(pgd, page_phys, pg, seg_flags) != 0) {
@@ -266,18 +289,10 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
                     goto rollback;
                 }
                 if (rollback_count >= MAX_LOAD_LEAVES) {
-                    /* Defense in depth: any well-formed ELF that
-                     * passes elf_layout_validate fits well below
-                     * this cap.  The leaf is withdrawn and released
-                     * exactly once (it is not on the rollback list
-                     * yet). */
                     debug_fs("elf_load: too many leaves (>MAX_LOAD_LEAVES)\n");
                     uint64_t old = x86_vmm_take_4k(pgd, pg);
                     if (old)
                         x86_vmm_release_owned_4k(old);
-                    /* release_owned_4k already handed the PA back —
-                     * a trailing free_4k_page here was a latent
-                     * double free in this defense branch. */
                     rc = -ENOMEM;
                     goto rollback;
                 }
@@ -286,20 +301,16 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
                 rollback_count++;
             }
 
-            /* Copy file bytes into the page, restricted to the
-             * bytes that intersect [p_vaddr, p_vaddr + p_filesz).
-             * BSS bytes (filesz < memsz, or partial page at the
-             * segment end) remain zero. */
             if (ph->p_filesz > 0) {
                 uint64_t copy_start =
-                    (ph->p_vaddr > pg) ? ph->p_vaddr : pg;
-                uint64_t copy_end_excl = ph->p_vaddr + ph->p_filesz;
+                    (seg_start > pg) ? seg_start : pg;
+                uint64_t copy_end_excl = seg_start + ph->p_filesz;
                 if (copy_end_excl > pg + PAGE_4K_SIZE)
                     copy_end_excl = pg + PAGE_4K_SIZE;
 
                 if (copy_start < copy_end_excl) {
                     uint64_t file_off =
-                        ph->p_offset + (copy_start - ph->p_vaddr);
+                        ph->p_offset + (copy_start - seg_start);
                     uint64_t bytes_to_copy = copy_end_excl - copy_start;
                     uint64_t dest_off = copy_start - pg;
                     void *dest = (void *)((uintptr_t)Phy_To_Virt(page_phys) +
@@ -317,28 +328,51 @@ int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
         }
     }
 
-    /* ── 8. Success: publish code bounds + entry point. ─────── */
+    /* ── 7.5 PIE snapshot writeback & R_X86_64_RELATIVE patching ── */
+    if (is_pie) {
+        write_snapshot_bytes(pgd, bias, &ehdr, sizeof(ehdr));
+        write_snapshot_bytes(pgd, bias + pie.link_phdr_vaddr,
+                             phdrs, (uint64_t)phnum * sizeof(elf64_phdr_t));
+
+        for (uint32_t c = 0; c < pie.chunk_count; c++) {
+            const x86_elf_pie_rela_chunk_t *chk = pie.chunks[c];
+            for (uint32_t j = 0; j < chk->count; j++) {
+                const elf64_rela_t *rel = &chk->items[j];
+                uint64_t dst_va = bias + rel->r_offset;
+                uint64_t *pte = vmm_pt_walk(pgd, dst_va & PAGE_4K_MASK, 0, 0);
+                uint64_t pa = x86_pte_4k_pa(*pte);
+                uint64_t val = bias + (uint64_t)rel->r_addend;
+                memcpy((void *)((uintptr_t)Phy_To_Virt(pa) +
+                                (dst_va & (PAGE_4K_SIZE - 1))),
+                       &val, sizeof(val));
+            }
+        }
+    }
+
+    /* ── 8. Success: publish code bounds + image descriptor. ─── */
     if (start_code == UINT64_MAX) start_code = 0;
     mm->start_code = start_code;
     mm->end_code   = end_code;
-    *entry_point   = ehdr.e_entry;
+    out_image->entry  = bias + ehdr.e_entry;
+    out_image->phdr   = is_pie ? (bias + pie.link_phdr_vaddr) : 0;
+    out_image->phnum  = phnum;
+    out_image->is_pie = is_pie;
 
+    if (is_pie)
+        x86_elf_pie_dispose(&pie);
     kfree(rollback_vaddr);
     kfree(rollback_phys);
     kfree(phdrs);
     return 0;
 
 rollback:
-    /* Single rollback owner — every leaf the loader created in
-     * this call is freed exactly once, and every PTE it installed
-     * is cleared.  The loader root was never installed (unpublished
-     * exec target), so no TLB sync is needed: withdraw + release
-     * per leaf (unmap/TLB ownership plan Task 2). */
     for (int j = 0; j < rollback_count; j++) {
         uint64_t old = x86_vmm_take_4k(pgd, rollback_vaddr[j]);
         if (old)
             x86_vmm_release_owned_4k(old);
     }
+    if (is_pie)
+        x86_elf_pie_dispose(&pie);
     kfree(rollback_vaddr);
     kfree(rollback_phys);
     kfree(phdrs);

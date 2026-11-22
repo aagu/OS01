@@ -72,15 +72,58 @@ typedef struct {
 
 /* e_type values */
 #define ET_EXEC    2
+#define ET_DYN     3
 
 /* p_type values */
-#define PT_NULL    0
-#define PT_LOAD    1
-#define PT_DYNAMIC 2
-#define PT_INTERP  3
-#define PT_NOTE    4
-#define PT_PHDR    6
-#define PT_TLS     7
+#define PT_NULL      0
+#define PT_LOAD      1
+#define PT_DYNAMIC   2
+#define PT_INTERP    3
+#define PT_NOTE      4
+#define PT_PHDR      6
+#define PT_TLS       7
+#define PT_GNU_STACK 0x6474e551U
+#define PT_GNU_RELRO 0x6474e552U
+
+/* Dynamic section tags */
+#define DT_NULL      0
+#define DT_NEEDED    1
+#define DT_HASH      4
+#define DT_STRTAB    5
+#define DT_SYMTAB    6
+#define DT_RELA      7
+#define DT_RELASZ    8
+#define DT_RELAENT   9
+#define DT_STRSZ     10
+#define DT_SYMENT    11
+#define DT_REL       17
+#define DT_DEBUG     21
+#define DT_TEXTREL   22
+#define DT_JMPREL    23
+#define DT_RELR      36
+#define DT_FLAGS_1   0x6ffffffbLL
+#define DT_RELACOUNT 0x6ffffff9LL
+#define DT_GNU_HASH  0x6ffffef5LL
+
+#define DF_1_PIE     0x08000000U
+
+#define R_X86_64_RELATIVE 8U
+#define ELF64_R_SYM(info)  ((uint32_t)((info) >> 32))
+#define ELF64_R_TYPE(info) ((uint32_t)((info) & 0xffffffffU))
+
+typedef struct {
+    int64_t  d_tag;
+    uint64_t d_val;
+} __attribute__((packed)) elf64_dyn_t;
+
+typedef struct {
+    uint64_t r_offset;
+    uint64_t r_info;
+    int64_t  r_addend;
+} __attribute__((packed)) elf64_rela_t;
+
+_Static_assert(sizeof(elf64_dyn_t) == 16, "elf64_dyn_t must be 16 bytes");
+_Static_assert(sizeof(elf64_rela_t) == 24, "elf64_rela_t must be 24 bytes");
 
 /* Note types */
 #define NT_GNU_ABI_TAG 1
@@ -107,19 +150,6 @@ typedef struct {
  * Return 0 on success, -1 if not a valid ELF.
  */
 int elf_validate(vfs_node_t *node);
-
-/**
- * elf_load() — Load PT_LOAD segments from an ELF into the given mm's
- *              address space. The mm must already have a fresh PGD
- *              (kernel entries copied, no user mappings yet).
- *
- * @node:          VFS node for the ELF file (read position 0)
- * @mm:            Target mm_struct whose address space to populate
- * @entry_point:   [out] Set to the ELF's e_entry on success
- *
- * Returns 0 on success, -1 on error.
- */
-int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point);
 
 /**
  * elf_detect_abi() — Inspect an ELF's PT_NOTE segments for Linux ABI tags.

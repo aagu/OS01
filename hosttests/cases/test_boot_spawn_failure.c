@@ -68,10 +68,17 @@ void vfs_node_put(vfs_node_t *node)
 }
 
 int elf_validate(vfs_node_t *node) { (void)node; return 0; }
-int elf_load(vfs_node_t *node, uint64_t *out_entry)
+#include <arch/x86_64/elf_image.h>
+int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
 {
     (void)node;
-    *out_entry = 0x400000;
+    (void)mm;
+    if (out_image) {
+        out_image->entry = 0x400000;
+        out_image->phdr = 0;
+        out_image->phnum = 0;
+        out_image->is_pie = false;
+    }
     return 0;
 }
 

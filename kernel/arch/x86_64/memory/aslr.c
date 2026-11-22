@@ -23,6 +23,17 @@ _Static_assert((X86_USER_MMAP_MAX_ADDR & 0xFFFULL) == 0,
 _Static_assert(X86_USER_ADDR_LIMIT < 0x0000800000000000ULL,
                "x86_64 user addr_limit must stay in canonical low half");
 
+_Static_assert(X86_USER_PIE_LINK_END > 0 && (X86_USER_PIE_LINK_END & 0xFFFULL) == 0,
+               "x86_64 PIE link end must be nonzero and 4 KiB aligned");
+_Static_assert(X86_USER_PIE_BIAS_BASE >= X86_USER_MIN_ADDR &&
+               (X86_USER_PIE_BIAS_BASE & 0xFFFULL) == 0,
+               "x86_64 PIE bias base must be >= X86_USER_MIN_ADDR and 4 KiB aligned");
+_Static_assert(X86_USER_PIE_BIAS_BITS == 16U &&
+               X86_USER_PIE_BIAS_END > X86_USER_PIE_BIAS_BASE,
+               "x86_64 PIE bias window invalid");
+_Static_assert(X86_USER_PIE_MAX_END <= X86_USER_HEAP_LIMIT,
+               "x86_64 PIE max runtime end must not exceed heap limit");
+
 uint64_t x86_aslr_derive_mmap_base(uint64_t raw_entropy)
 {
     uint64_t mask = (UINT64_C(1) << X86_USER_MMAP_RND_BITS) - 1U;
@@ -54,5 +65,22 @@ int x86_aslr_init_mmap_base(mm_t *mm)
 
     aslr_wipe_bytes(entropy, sizeof(entropy));
     mm->mmap_base = x86_aslr_derive_mmap_base(raw);
+    return 0;
+}
+
+int x86_aslr_get_pie_bias(uint64_t *out_bias)
+{
+    if (!out_bias)
+        return -EINVAL;
+
+    uint8_t entropy[32];
+    if (!kernel_random_get_strong(entropy)) {
+        aslr_wipe_bytes(entropy, sizeof(entropy));
+        return -EAGAIN;
+    }
+
+    uint64_t raw = ((uint64_t)entropy[0]) | (((uint64_t)entropy[1]) << 8U);
+    aslr_wipe_bytes(entropy, sizeof(entropy));
+    *out_bias = X86_USER_PIE_BIAS_BASE + ((raw & 0xFFFFULL) << 12U);
     return 0;
 }

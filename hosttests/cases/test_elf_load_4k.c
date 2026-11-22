@@ -39,6 +39,9 @@
 
 #include <fs/elf.h>
 #include <fs/elf_layout.h>
+#include <arch/x86_64/elf_image.h>
+#include <arch/x86_64/aslr.h>
+#include <arch/x86_64/user_layout.h>
 
 /* Production sched/task.h is required for the real mm_struct — the
  * loader dereferences mm->pgdir, mm->start_code, mm->end_code. */
@@ -76,6 +79,19 @@ typedef struct {
     uint64_t    memsz;
     const void *data;     /* file bytes (NULL = pure BSS) */
 } segment_spec_t;
+
+
+static int elf_load_entry(vfs_node_t *node, mm_t *mm, uint64_t *out_entry)
+{
+    x86_elf_image_t img;
+    memset(&img, 0xAA, sizeof(img));
+    int rc = elf_load(node, mm, &img);
+    if (rc == 0 && out_entry) {
+        assert_false(img.is_pie);
+        *out_entry = img.entry;
+    }
+    return rc;
+}
 
 static size_t build_elf_image(uint64_t entry,
                               const segment_spec_t *segs, int n_segs)
@@ -153,7 +169,7 @@ TEST_FUNC(test_load_single_4k_text) {
     setup_fixture(file_size, 0x100000);
 
     uint64_t entry = 0xDEADBEEFDEADBEEFULL;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
     assert_eq(0, rc);
     assert_eq(0x400001UL, entry);
 
@@ -206,7 +222,7 @@ TEST_FUNC(test_load_across_4k_boundary) {
     setup_fixture(file_size, 0x100000);
 
     uint64_t entry = 0;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
     assert_eq(0, rc);
     assert_eq(0x400900UL, entry);
 
@@ -238,7 +254,7 @@ TEST_FUNC(test_load_across_2m_boundary) {
     setup_fixture(file_size, 0x100000);
 
     uint64_t entry = 0;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
     assert_eq(0, rc);
 
     assert_not_null(stubs_find_mapping(0x5FF000));
@@ -268,7 +284,7 @@ TEST_FUNC(test_load_bss_preserves_zero) {
     setup_fixture(file_size, 0x100000);
 
     uint64_t entry = 0;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
     assert_eq(0, rc);
 
     assert_not_null(stubs_find_mapping(0x600000));
@@ -315,7 +331,7 @@ TEST_FUNC(test_load_shared_page_exec_after_rw_rejected) {
     setup_fixture(file_size, 0x100000);
 
     uint64_t entry = 0xDEADBEEFUL;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
     assert_eq(-ENOEXEC, rc);
     assert_eq(0xDEADBEEFUL, entry);
 
@@ -349,7 +365,7 @@ TEST_FUNC(test_load_adjacent_segments_share_page_rw_first) {
     setup_fixture(file_size, 0x100000);
 
     uint64_t entry = 0;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
     assert_eq(0, rc);
     assert_eq(0x402010UL, entry);
 
@@ -406,7 +422,7 @@ TEST_FUNC(test_load_sparse_hole_no_pte) {
     setup_fixture(file_size, 0x100000);
 
     uint64_t entry = 0;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
     assert_eq(0, rc);
 
     assert_not_null(stubs_find_mapping(0x400000));
@@ -434,11 +450,11 @@ TEST_FUNC(test_load_no_page_huge_leaf) {
     setup_fixture(file_size, 0x100000);
 
     uint64_t entry = 0;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
     assert_eq(0, rc);
 
     /* Sweep every mapped PTE: none may carry PAGE_HUGE. */
-    for (int i = 0; i < ELF_LOAD_PTE_TABLE_SIZE; i++) {
+    for (int i = 0; i < ELF_LOAD_SPARSE_SLOTS; i++) {
         if (elf_load_state.ptes[i].pte & PAGE_VALID_BIT) {
             assert_eq(0UL, elf_load_state.ptes[i].flags & PAGE_HUGE_BIT);
         }
@@ -446,7 +462,7 @@ TEST_FUNC(test_load_no_page_huge_leaf) {
     /* And every mapped leaf is a 4 KiB PTE: flags carry at minimum
      * PAGE_VALID. */
     int mapped = 0;
-    for (int i = 0; i < ELF_LOAD_PTE_TABLE_SIZE; i++) {
+    for (int i = 0; i < ELF_LOAD_SPARSE_SLOTS; i++) {
         if (elf_load_state.ptes[i].pte & PAGE_VALID_BIT) {
             mapped++;
             assert_true((elf_load_state.ptes[i].flags & PAGE_VALID_BIT) != 0);
@@ -476,7 +492,7 @@ TEST_FUNC(test_load_rollback_on_alloc_failure) {
     elf_load_state.inject_alloc_fail_at = 2;
 
     uint64_t entry = 0xDEADBEEFUL;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
 
     assert_eq(-ENOMEM, rc);
     /* entry_point untouched on error */
@@ -517,7 +533,7 @@ TEST_FUNC(test_load_rollback_on_read_failure) {
     elf_load_state.inject_read_fail_at = 4;
 
     uint64_t entry = 0xDEADBEEFUL;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
 
     assert_eq(-ENOEXEC, rc);
     assert_eq(0xDEADBEEFUL, entry);
@@ -547,7 +563,7 @@ TEST_FUNC(test_load_rollback_on_map_failure) {
     elf_load_state.inject_map_fail_at = 2;
 
     uint64_t entry = 0xDEADBEEFUL;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
 
     assert_eq(-ENOMEM, rc);
     assert_eq(0xDEADBEEFUL, entry);
@@ -579,7 +595,7 @@ TEST_FUNC(test_load_shared_page_no_double_alloc) {
     setup_fixture(file_size, 0x100000);
 
     uint64_t entry = 0;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
     assert_eq(0, rc);
 
     /* One shared page → one alloc, one map. */
@@ -613,7 +629,7 @@ TEST_FUNC(test_load_incompatible_shared_rejected) {
     setup_fixture(file_size, 0x100000);
 
     uint64_t entry = 0xDEADBEEFUL;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
     assert_eq(-ENOEXEC, rc);
     assert_eq(0xDEADBEEFUL, entry);
 
@@ -648,7 +664,7 @@ TEST_FUNC(test_load_rejects_zero_pt_loads) {
     setup_fixture(file_size, 0x100000);
 
     uint64_t entry = 0xDEADBEEFUL;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
     assert_eq(-ENOEXEC, rc);
     assert_eq(0xDEADBEEFUL, entry);
     assert_eq(0, elf_load_state.total_maps);
@@ -673,7 +689,7 @@ TEST_FUNC(test_load_mm_code_bounds_from_layout) {
     setup_fixture(file_size, 0x100000);
 
     uint64_t entry = 0;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
     assert_eq(0, rc);
 
     assert_eq(0x400000UL, fixture_mm.start_code);
@@ -698,7 +714,7 @@ TEST_FUNC(test_load_multi_page_with_bss) {
     setup_fixture(file_size, 0x100000);
 
     uint64_t entry = 0;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
     assert_eq(0, rc);
 
     /* 2 leaves, both backed by zeroed 4 KiB pages. */
@@ -890,7 +906,7 @@ TEST_FUNC(test_load_writable_leaf_is_nx) {
     setup_fixture(file_size, 0x100000);
 
     uint64_t entry = 0;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
     assert_eq(0, rc);
 
     /* Text leaf: user R+X (no W, no NX). */
@@ -928,7 +944,7 @@ TEST_FUNC(test_load_rodata_leaf_ro_nx) {
     setup_fixture(file_size, 0x100000);
 
     uint64_t entry = 0;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
     assert_eq(0, rc);
 
     elf_load_pte_record_t *ro = stubs_find_mapping(0x401000);
@@ -957,7 +973,7 @@ TEST_FUNC(test_load_rwx_segment_stays_executable) {
     setup_fixture(file_size, 0x100000);
 
     uint64_t entry = 0;
-    int rc = elf_load(&fixture_node, &fixture_mm, &entry);
+    int rc = elf_load_entry(&fixture_node, &fixture_mm, &entry);
     assert_eq(0, rc);
 
     elf_load_pte_record_t *rwx = stubs_find_mapping(0x401000);
@@ -1058,6 +1074,436 @@ static void test_elf_overcap_single_free(void)
     free(src);
 }
 
+/* ── ASLR-B Static PIE Tests ───────────────────────────────── */
+
+static size_t build_pie_image(uint64_t entry_link,
+                              uint64_t text_memsz,
+                              uint64_t rw_vaddr,
+                              uint64_t rw_filesz,
+                              uint64_t rw_memsz,
+                              const elf64_dyn_t *dyns, size_t n_dyns,
+                              const elf64_rela_t *relas, size_t n_relas,
+                              uint64_t *out_dyn_vaddr,
+                              uint64_t *out_rela_vaddr)
+{
+    memset(elf_buf, 0, ELF_MAX_BYTES);
+    /* 3 PHDRs: PT_LOAD(RX), PT_LOAD(RW), PT_DYNAMIC */
+    const uint16_t phnum = 3;
+    uint64_t ph_off = sizeof(elf64_ehdr_t);
+    uint64_t text_end_off = ph_off + phnum * sizeof(elf64_phdr_t);
+    if (text_end_off < 0x100) text_end_off = 0x100;
+
+    uint64_t rw_off = 0x1000;
+    uint64_t dyn_off = rw_off + 0x100;
+    uint64_t rela_off = dyn_off + n_dyns * sizeof(elf64_dyn_t);
+    uint64_t min_rw_filesz = (rela_off - rw_off) + n_relas * sizeof(elf64_rela_t);
+    if (rw_filesz < min_rw_filesz) rw_filesz = min_rw_filesz;
+
+    elf64_ehdr_t *e = (elf64_ehdr_t *)elf_buf;
+    e->e_ident[EI_MAG0] = ELFMAG0;
+    e->e_ident[EI_MAG1] = ELFMAG1;
+    e->e_ident[EI_MAG2] = ELFMAG2;
+    e->e_ident[EI_MAG3] = ELFMAG3;
+    e->e_ident[EI_CLASS] = ELFCLASS64;
+    e->e_ident[EI_DATA] = ELFDATA2LSB;
+    e->e_ident[EI_VERSION] = 1;
+    e->e_type = ET_DYN;
+    e->e_machine = EM_X86_64;
+    e->e_version = 1;
+    e->e_entry = entry_link;
+    e->e_phoff = ph_off;
+    e->e_ehsize = sizeof(elf64_ehdr_t);
+    e->e_phentsize = sizeof(elf64_phdr_t);
+    e->e_phnum = phnum;
+
+    elf64_phdr_t *ph = (elf64_phdr_t *)(elf_buf + ph_off);
+    /* 0: RX PT_LOAD starting at vaddr 0 covering ehdr + phdrs */
+    ph[0].p_type = PT_LOAD;
+    ph[0].p_flags = PF_R | PF_X;
+    ph[0].p_offset = 0;
+    ph[0].p_vaddr = 0;
+    ph[0].p_filesz = text_end_off;
+    ph[0].p_memsz = text_memsz;
+    ph[0].p_align = 0x1000;
+
+    /* 1: RW PT_LOAD */
+    ph[1].p_type = PT_LOAD;
+    ph[1].p_flags = PF_R | PF_W;
+    ph[1].p_offset = rw_off;
+    ph[1].p_vaddr = rw_vaddr;
+    ph[1].p_filesz = rw_filesz;
+    ph[1].p_memsz = rw_memsz;
+    ph[1].p_align = 0x1000;
+
+    uint64_t dyn_va = rw_vaddr + (dyn_off - rw_off);
+    uint64_t rela_va = rw_vaddr + (rela_off - rw_off);
+
+    /* 2: PT_DYNAMIC */
+    ph[2].p_type = PT_DYNAMIC;
+    ph[2].p_flags = PF_R | PF_W;
+    ph[2].p_offset = dyn_off;
+    ph[2].p_vaddr = dyn_va;
+    ph[2].p_filesz = n_dyns * sizeof(elf64_dyn_t);
+    ph[2].p_memsz = n_dyns * sizeof(elf64_dyn_t);
+    ph[2].p_align = 8;
+
+    if (n_dyns > 0 && dyns) {
+        memcpy(elf_buf + dyn_off, dyns, n_dyns * sizeof(elf64_dyn_t));
+        /* Patch DT_RELA if caller left d_val == 0xDEAD0001 */
+        elf64_dyn_t *d = (elf64_dyn_t *)(elf_buf + dyn_off);
+        for (size_t i = 0; i < n_dyns; i++) {
+            if (d[i].d_tag == DT_RELA && d[i].d_val == 0xDEAD0001ULL)
+                d[i].d_val = rela_va;
+        }
+    }
+    if (n_relas > 0 && relas)
+        memcpy(elf_buf + rela_off, relas, n_relas * sizeof(elf64_rela_t));
+
+    if (out_dyn_vaddr) *out_dyn_vaddr = dyn_va;
+    if (out_rela_vaddr) *out_rela_vaddr = rela_va;
+    return (size_t)(rw_off + rw_filesz);
+}
+
+TEST_FUNC(test_pie_load_bias_and_permissions)
+{
+    elf64_dyn_t dyns[] = {
+        { DT_FLAGS_1, DF_1_PIE },
+        { DT_NULL, 0 }
+    };
+
+    /* Samples 0, 0xffff, 0x10000 -> 0x400000, 0x103ff000, 0x400000 */
+    uint64_t raw_samples[3] = { 0ULL, 0xffffULL, 0x10000ULL };
+    uint64_t expected_bias[3] = { 0x400000ULL, 0x103ff000ULL, 0x400000ULL };
+
+    for (int s = 0; s < 3; s++) {
+        setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                      dyns, 2, NULL, 0, NULL, NULL), 0x100000ULL);
+        stubs_rng_push(true, raw_samples[s]);
+        x86_elf_image_t img;
+        memset(&img, 0xAA, sizeof(img));
+        int rc = elf_load(&fixture_node, &fixture_mm, &img);
+        assert_eq(0, rc);
+        assert_true(img.is_pie);
+        assert_eq(expected_bias[s] + 0x80ULL, img.entry);
+        assert_eq(expected_bias[s] + sizeof(elf64_ehdr_t), img.phdr);
+        assert_eq(3ULL, img.phnum);
+
+        elf_load_pte_record_t *rx = stubs_find_mapping(expected_bias[s]);
+        elf_load_pte_record_t *rw = stubs_find_mapping(expected_bias[s] + 0x1000ULL);
+        assert_not_null(rx);
+        assert_not_null(rw);
+        assert_eq(0UL, rx->flags & PAGE_WRITE_BIT);
+        assert_eq(0UL, rx->flags & PAGE_NO_EXEC_BIT);
+        assert_true((rw->flags & PAGE_WRITE_BIT) != 0);
+        assert_true((rw->flags & PAGE_NO_EXEC_BIT) != 0);
+        teardown_fixture();
+    }
+
+    /* Max valid span: link end 0x02000000 at last slot 0xffff -> 0x123ff000 */
+    setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200,
+                                  X86_USER_PIE_LINK_END - 0x1000ULL,
+                                  dyns, 2, NULL, 0, NULL, NULL), 0x100000ULL);
+    stubs_rng_push(true, 0xffffULL);
+    x86_elf_image_t img;
+    assert_eq(0, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(X86_USER_PIE_MAX_END, fixture_mm.end_code);
+    teardown_fixture();
+
+    /* One byte past 0x02000000 must be rejected before RNG or mapping */
+    setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200,
+                                  X86_USER_PIE_LINK_END - 0x1000ULL + 1ULL,
+                                  dyns, 2, NULL, 0, NULL, NULL), 0x100000ULL);
+    stubs_rng_push(true, 0xffffULL);
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0, elf_load_state.total_rng_calls);
+    assert_eq(0, elf_load_state.total_allocs);
+    teardown_fixture();
+}
+
+TEST_FUNC(test_pie_rela_and_bss)
+{
+    elf64_dyn_t dyns[] = {
+        { DT_FLAGS_1, DF_1_PIE },
+        { DT_RELA, 0xDEAD0001ULL },
+        { DT_RELASZ, 4 * sizeof(elf64_rela_t) },
+        { DT_RELAENT, sizeof(elf64_rela_t) },
+        { DT_RELACOUNT, 4 },
+        { DT_NULL, 0 }
+    };
+    /* RW segment at [0x1000, 0x3000): data in [0x1000, 0x1200), BSS in [0x1200, 0x3000) */
+    elf64_rela_t relas[] = {
+        /* 1. Data pointer: 0x1000 -> B + 0x80 */
+        { 0x1000ULL, R_X86_64_RELATIVE, 0x80LL },
+        /* 2. Duplicate target in BSS (first): 0x2000 -> B + 0x10 */
+        { 0x2000ULL, R_X86_64_RELATIVE, 0x10LL },
+        /* 3. Duplicate target in BSS (second, must win): 0x2000 -> B + 0x1000 */
+        { 0x2000ULL, R_X86_64_RELATIVE, 0x1000LL },
+        /* 4. One-past-end pointer in BSS: 0x2008 -> B + image_page_end (0x3000) */
+        { 0x2008ULL, R_X86_64_RELATIVE, 0x3000LL },
+    };
+
+    setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x2000,
+                                  dyns, 6, relas, 4, NULL, NULL), 0x100000ULL);
+    uint64_t raw = 0x1234ULL;
+    uint64_t B = X86_USER_PIE_BIAS_BASE + ((raw & 0xFFFFULL) << 12);
+    stubs_rng_push(true, raw);
+
+    x86_elf_image_t img;
+    assert_eq(0, elf_load(&fixture_node, &fixture_mm, &img));
+
+    elf_load_pte_record_t *p1 = stubs_find_mapping(B + 0x1000ULL);
+    elf_load_pte_record_t *p2 = stubs_find_mapping(B + 0x2000ULL);
+    assert_not_null(p1);
+    assert_not_null(p2);
+
+    uint64_t val_data = *(uint64_t *)((uintptr_t)p1->phys);
+    uint64_t val_dup  = *(uint64_t *)((uintptr_t)p2->phys);
+    uint64_t val_end  = *(uint64_t *)((uintptr_t)p2->phys + 8);
+    assert_eq(B + 0x80ULL, val_data);
+    assert_eq(B + 0x1000ULL, val_dup);
+    assert_eq(B + 0x3000ULL, val_end);
+    teardown_fixture();
+}
+
+TEST_FUNC(test_pie_reject_before_mapping)
+{
+    x86_elf_image_t img;
+
+    /* 1. Zero-sized RELA triplet allowed (with RELACOUNT=0) */
+    {
+        elf64_dyn_t dyns[] = {
+            { DT_FLAGS_1, DF_1_PIE },
+            { DT_RELA, 0 },
+            { DT_RELASZ, 0 },
+            { DT_RELAENT, 24 },
+            { DT_RELACOUNT, 0 },
+            { DT_NULL, 0 }
+        };
+        setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                      dyns, 6, NULL, 0, NULL, NULL), 0x100000ULL);
+        stubs_rng_push(true, 1);
+        assert_eq(0, elf_load(&fixture_node, &fixture_mm, &img));
+        teardown_fixture();
+    }
+
+    /* 2. Missing DT_NULL terminator */
+    {
+        elf64_dyn_t dyns[] = { { DT_FLAGS_1, DF_1_PIE }, { DT_FLAGS_1, DF_1_PIE } };
+        setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                      dyns, 2, NULL, 0, NULL, NULL), 0x100000ULL);
+        assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+        assert_eq(0, elf_load_state.total_rng_calls);
+        assert_eq(0, elf_load_state.total_allocs);
+        teardown_fixture();
+    }
+
+    /* 3. Unknown / forbidden DT tag (DT_NEEDED) */
+    {
+        elf64_dyn_t dyns[] = {
+            { DT_FLAGS_1, DF_1_PIE },
+            { DT_NEEDED, 0 },
+            { DT_NULL, 0 }
+        };
+        setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                      dyns, 3, NULL, 0, NULL, NULL), 0x100000ULL);
+        assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+        assert_eq(0, elf_load_state.total_rng_calls);
+        assert_eq(0, elf_load_state.total_allocs);
+        teardown_fixture();
+    }
+
+    /* 4. Duplicate DT_RELA */
+    {
+        elf64_dyn_t dyns[] = {
+            { DT_FLAGS_1, DF_1_PIE },
+            { DT_RELA, 0 },
+            { DT_RELA, 0 },
+            { DT_RELASZ, 0 },
+            { DT_RELAENT, 24 },
+            { DT_NULL, 0 }
+        };
+        setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                      dyns, 6, NULL, 0, NULL, NULL), 0x100000ULL);
+        assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+        assert_eq(0, elf_load_state.total_rng_calls);
+        assert_eq(0, elf_load_state.total_allocs);
+        teardown_fixture();
+    }
+
+    /* 5. Nonzero r_sym or non-RELATIVE r_type */
+    {
+        elf64_dyn_t dyns[] = {
+            { DT_FLAGS_1, DF_1_PIE },
+            { DT_RELA, 0xDEAD0001ULL },
+            { DT_RELASZ, sizeof(elf64_rela_t) },
+            { DT_RELAENT, sizeof(elf64_rela_t) },
+            { DT_NULL, 0 }
+        };
+        elf64_rela_t bad_sym = { 0x1000ULL, (1ULL << 32) | R_X86_64_RELATIVE, 0 };
+        setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                      dyns, 5, &bad_sym, 1, NULL, NULL), 0x100000ULL);
+        assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+        assert_eq(0, elf_load_state.total_rng_calls);
+        assert_eq(0, elf_load_state.total_allocs);
+        teardown_fixture();
+
+        elf64_rela_t bad_type = { 0x1000ULL, 1U /* R_X86_64_64 */, 0 };
+        setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                      dyns, 5, &bad_type, 1, NULL, NULL), 0x100000ULL);
+        assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+        assert_eq(0, elf_load_state.total_rng_calls);
+        teardown_fixture();
+    }
+
+    /* 6. Negative addend, addend > image_page_end, unaligned r_offset, RX target, dyn/rela overlap */
+    {
+        elf64_dyn_t dyns[] = {
+            { DT_FLAGS_1, DF_1_PIE },
+            { DT_RELA, 0xDEAD0001ULL },
+            { DT_RELASZ, sizeof(elf64_rela_t) },
+            { DT_RELAENT, sizeof(elf64_rela_t) },
+            { DT_NULL, 0 }
+        };
+        elf64_rela_t cases[] = {
+            { 0x1000ULL, R_X86_64_RELATIVE, -8LL },
+            { 0x1000ULL, R_X86_64_RELATIVE, 0x2001LL },
+            { 0x1004ULL, R_X86_64_RELATIVE, 0 },
+            { 0x0080ULL, R_X86_64_RELATIVE, 0 }, /* in RX segment */
+        };
+        for (int c = 0; c < 4; c++) {
+            setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                          dyns, 5, &cases[c], 1, NULL, NULL), 0x100000ULL);
+            assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+            assert_eq(0, elf_load_state.total_rng_calls);
+            assert_eq(0, elf_load_state.total_allocs);
+            teardown_fixture();
+        }
+
+        /* Target overlapping PT_DYNAMIC */
+        uint64_t dyn_va = 0;
+        setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                      dyns, 5, NULL, 0, &dyn_va, NULL), 0x100000ULL);
+        elf64_rela_t hit_dyn = { dyn_va, R_X86_64_RELATIVE, 0 };
+        memcpy(elf_buf + 0x1000 + 0x100 + 5 * sizeof(elf64_dyn_t), &hit_dyn, sizeof(hit_dyn));
+        assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+        assert_eq(0, elf_load_state.total_rng_calls);
+        teardown_fixture();
+    }
+
+    /* 7. W+X PT_LOAD rejected */
+    {
+        elf64_dyn_t dyns[] = { { DT_FLAGS_1, DF_1_PIE }, { DT_NULL, 0 } };
+        setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                      dyns, 2, NULL, 0, NULL, NULL), 0x100000ULL);
+        elf64_phdr_t *ph = (elf64_phdr_t *)(elf_buf + sizeof(elf64_ehdr_t));
+        ph[1].p_flags = PF_R | PF_W | PF_X;
+        assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+        assert_eq(0, elf_load_state.total_rng_calls);
+        assert_eq(0, elf_load_state.total_allocs);
+        teardown_fixture();
+    }
+}
+
+TEST_FUNC(test_pie_failure_unwinds)
+{
+    elf64_dyn_t dyns[] = {
+        { DT_FLAGS_1, DF_1_PIE },
+        { DT_RELA, 0xDEAD0001ULL },
+        { DT_RELASZ, sizeof(elf64_rela_t) },
+        { DT_RELAENT, sizeof(elf64_rela_t) },
+        { DT_NULL, 0 }
+    };
+    elf64_rela_t rela = { 0x1000ULL, R_X86_64_RELATIVE, 0x80LL };
+    x86_elf_image_t sentinel;
+    memset(&sentinel, 0x55, sizeof(sentinel));
+
+    /* 1. STRONG RNG failure -> -EAGAIN, sentinel preserved, zero allocs */
+    setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                  dyns, 5, &rela, 1, NULL, NULL), 0x100000ULL);
+    stubs_rng_push(false, 0);
+    x86_elf_image_t img = sentinel;
+    assert_eq(-EAGAIN, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0, memcmp(&img, &sentinel, sizeof(img)));
+    assert_eq(0, elf_load_state.total_allocs);
+    teardown_fixture();
+
+    /* 2. Alloc failure on 2nd page -> -ENOMEM, 1st page freed, sentinel preserved */
+    setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                  dyns, 5, &rela, 1, NULL, NULL), 0x100000ULL);
+    stubs_rng_push(true, 2);
+    elf_load_state.inject_alloc_fail_at = 2;
+    img = sentinel;
+    assert_eq(-ENOMEM, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0, memcmp(&img, &sentinel, sizeof(img)));
+    assert_eq(elf_load_state.total_allocs, elf_load_state.total_frees);
+    assert_eq(elf_load_state.total_maps, elf_load_state.total_unmaps);
+    teardown_fixture();
+
+    /* 3. Map failure on 2nd page -> -ENOMEM, full rollback */
+    setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                  dyns, 5, &rela, 1, NULL, NULL), 0x100000ULL);
+    stubs_rng_push(true, 2);
+    elf_load_state.inject_map_fail_at = 2;
+    img = sentinel;
+    assert_eq(-ENOMEM, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0, memcmp(&img, &sentinel, sizeof(img)));
+    assert_eq(elf_load_state.total_allocs, elf_load_state.total_frees);
+    assert_eq(elf_load_state.total_maps, elf_load_state.total_unmaps);
+    teardown_fixture();
+
+    /* 4. Short read during segment copy -> -ENOEXEC, full rollback */
+    setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                  dyns, 5, &rela, 1, NULL, NULL), 0x100000ULL);
+    stubs_rng_push(true, 2);
+    /* Reads: 1=ehdr, 2..4=phdrs, 5=dyn, 6=rela, 7=seg0, 8=seg1 (fail at 8) */
+    elf_load_state.inject_read_fail_at = 8;
+    img = sentinel;
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0, memcmp(&img, &sentinel, sizeof(img)));
+    assert_eq(elf_load_state.total_allocs, elf_load_state.total_frees);
+    assert_eq(elf_load_state.total_maps, elf_load_state.total_unmaps);
+    teardown_fixture();
+}
+
+static void mutate_hdr_after_preread(uint64_t offset, uint64_t size, void *buf)
+{
+    (void)buf;
+    (void)size;
+    /* Once segment copy reads offset 0, mutate the backing elf_buf header & phdr
+     *? Better: mutate right after phdr reads finish (when reading DT_DYNAMIC at >= 0x1100) */
+    if (offset >= 0x1100) {
+        elf_buf[0] = 'X'; /* corrupt magic in backing file */
+        elf64_phdr_t *ph = (elf64_phdr_t *)(elf_buf + sizeof(elf64_ehdr_t));
+        ph[0].p_vaddr = 0x99990000ULL;
+    }
+}
+
+TEST_FUNC(test_pie_phdr_snapshot)
+{
+    elf64_dyn_t dyns[] = { { DT_FLAGS_1, DF_1_PIE }, { DT_NULL, 0 } };
+    size_t sz = build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                dyns, 2, NULL, 0, NULL, NULL);
+    elf64_ehdr_t expected_ehdr;
+    elf64_phdr_t expected_phdrs[3];
+    memcpy(&expected_ehdr, elf_buf, sizeof(expected_ehdr));
+    memcpy(expected_phdrs, elf_buf + sizeof(elf64_ehdr_t), sizeof(expected_phdrs));
+
+    setup_fixture(sz, 0x100000ULL);
+    elf_load_state.post_read_hook = mutate_hdr_after_preread;
+    uint64_t raw = 5ULL;
+    uint64_t B = X86_USER_PIE_BIAS_BASE + (raw << 12);
+    stubs_rng_push(true, raw);
+
+    x86_elf_image_t img;
+    assert_eq(0, elf_load(&fixture_node, &fixture_mm, &img));
+    elf_load_pte_record_t *rx = stubs_find_mapping(B);
+    assert_not_null(rx);
+    assert_eq(0, memcmp((void *)(uintptr_t)rx->phys, &expected_ehdr, sizeof(expected_ehdr)));
+    assert_eq(0, memcmp((void *)((uintptr_t)rx->phys + sizeof(elf64_ehdr_t)),
+                        expected_phdrs, sizeof(expected_phdrs)));
+    teardown_fixture();
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_load_single_4k_text),
     TEST_ENTRY(test_load_across_4k_boundary),
@@ -1083,6 +1529,11 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_detect_abi_linux_note),
     TEST_ENTRY(test_detect_abi_other_note),
     TEST_ENTRY(test_detect_abi_interp_ignored),
+    TEST_ENTRY(test_pie_load_bias_and_permissions),
+    TEST_ENTRY(test_pie_rela_and_bss),
+    TEST_ENTRY(test_pie_reject_before_mapping),
+    TEST_ENTRY(test_pie_failure_unwinds),
+    TEST_ENTRY(test_pie_phdr_snapshot),
 TEST_LIST_END
 
 int main(void) {

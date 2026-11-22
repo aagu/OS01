@@ -227,6 +227,22 @@ ELF_LOAD_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
 $(TEST_BLD)/elf_load_production.o: $(TESTS_DIR)/kernel/arch/x86_64/fs/elf.c \
 		$(TESTS_DIR)/kernel/include/fs/elf.h \
 		$(TESTS_DIR)/kernel/include/fs/elf_layout.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/elf_image.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/elf_pie.h \
+		$(TEST_MOCK)/elf_load/elf_load_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ELF_LOAD_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/elf_pie_production.o: $(TESTS_DIR)/kernel/arch/x86_64/fs/elf_pie.c \
+		$(TESTS_DIR)/kernel/include/fs/elf.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/elf_pie.h \
+		$(TEST_MOCK)/elf_load/elf_load_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ELF_LOAD_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/elf_load_aslr_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/aslr.c \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/aslr.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/user_layout.h \
 		$(TEST_MOCK)/elf_load/elf_load_stubs.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(ELF_LOAD_HOST_CFLAGS) -c $< -o $@
@@ -243,6 +259,8 @@ $(TEST_BLD)/test_elf_load_4k.o: $(TEST_CASES)/test_elf_load_4k.c \
 
 $(TEST_BLD)/test_elf_load_4k.elf: $(TEST_BLD)/test_elf_load_4k.o \
 		$(TEST_BLD)/elf_load_production.o \
+		$(TEST_BLD)/elf_pie_production.o \
+		$(TEST_BLD)/elf_load_aslr_production.o \
 		$(TEST_BLD)/elf_load_stubs.o \
 		$(TEST_BLD)/elf_layout.o \
 		$(MOCK_OBJS)

@@ -94,11 +94,17 @@ vfs_node_t *vfs_lookup(const char *path)
 void vfs_node_put(vfs_node_t *node) { (void)node; }
 int elf_validate(vfs_node_t *node) { (void)node; return 0; }
 int elf_detect_abi(vfs_node_t *node) { (void)node; return 0; }
-int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *out_entry)
+#include <arch/x86_64/elf_image.h>
+int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
 {
     (void)node;
     (void)mm;
-    *out_entry = 0x400000;
+    if (out_image) {
+        out_image->entry = 0x400000;
+        out_image->phdr = 0;
+        out_image->phnum = 0;
+        out_image->is_pie = false;
+    }
     return 0;
 }
 

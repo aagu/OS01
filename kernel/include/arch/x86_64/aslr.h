@@ -17,4 +17,12 @@ uint64_t x86_aslr_derive_mmap_base(uint64_t raw_entropy);
  */
 int x86_aslr_init_mmap_base(mm_t *mm);
 
+/**
+ * Sample a 4 KiB-aligned static-PIE load bias B in
+ * [X86_USER_PIE_BIAS_BASE, X86_USER_PIE_BIAS_END) using kernel_random_get_strong().
+ * Fails closed with -EAGAIN (leaving *out_bias untouched) when STRONG entropy
+ * is unavailable, or -EINVAL if out_bias is NULL.
+ */
+int x86_aslr_get_pie_bias(uint64_t *out_bias);
+
 #endif /* _ARCH_X86_64_ASLR_H */

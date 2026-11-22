@@ -35,6 +35,7 @@
 
 #include <arch/x86_64/user_layout.h>  // X86_USER_MIN_ADDR / stack window
 #include <arch/x86_64/aslr.h>
+#include <arch/x86_64/elf_image.h>
 // Matches kernel/arch/x86_64/intr/trap.c — the user VA envelope is
 
 // ── FPU helper ──────────────────────────────────────────────
@@ -481,8 +482,8 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     thd->cr3 = (uint64_t)mm->pgdir;
 
     // 5. Load ELF segments into the new address space
-    uint64_t entry_point;
-    if (elf_load(node, mm, &entry_point) != 0) {
+    x86_elf_image_t elf_img = {0};
+    if (elf_load(node, mm, &elf_img) != 0) {
         debug_task("spawn: ELF load failed for '%s'\n", path);
         if (tsk->files) { files_unpin(tsk->files); tsk->files = NULL; }
         if (tsk->fpu_save) kfree(tsk->fpu_save);
@@ -493,6 +494,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
         vfs_node_put(node);
         return -1;
     }
+    uint64_t entry_point = elf_img.entry;
     tsk->flags = (tsk->flags & ~PF_LINUX_ABI) | elf_detect_abi(node);
     vfs_node_put(node);
 
@@ -695,13 +697,14 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     }
     new_mm->pgdir = (uint64_t *)Virt_To_Phy((uint64_t)new_pgd);
     // 5. Load ELF segments into the new address space
-    uint64_t entry_point;
-    if (elf_load(node, new_mm, &entry_point) != 0) {
+    x86_elf_image_t elf_img = {0};
+    if (elf_load(node, new_mm, &elf_img) != 0) {
         destroy_unpublished_user_mm(new_mm);
         kfree(new_mm);
         vfs_node_put(node);
         return -ENOEXEC;
     }
+    uint64_t entry_point = elf_img.entry;
     uint32_t abi_flag = elf_detect_abi(node);
     vfs_node_put(node);
 

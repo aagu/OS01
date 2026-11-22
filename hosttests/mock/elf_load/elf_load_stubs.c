@@ -1,18 +1,3 @@
-/*
- * test/mock/elf_load/elf_load_stubs.c — Stubs for compiling and
- * running the production kernel/arch/x86_64/fs/elf.c against the host harness.
- *
- * The PTE table is real (flat, indexed by user page index), so the
- * loader's PT_LOAD traversal, BSS preservation, shared-page merge
- * semantics, and rollback discipline are exercised against observable
- * state — not a recorder of side-effect calls.
- *
- * alloc_4k_page / free_4k_page pull from a host-heap pool and track
- * every (phys, vaddr, size) tuple so the test can verify that each
- * page the loader creates is freed exactly once on rollback, and
- * that each successfully mapped leaf has a free record on the
- * success path.
- */
 #include "elf_load_stubs.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,79 +8,109 @@
 #include <fs/vfs.h>
 #include <fs/elf.h>
 #include <memory/vmm.h>
-#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)   /* PAGE_VALID, PAGE_USER, PAGE_WRITE, ... */
+#include <arch/x86_64/pte.h>
 
-/* Forward-declare posix_memalign (POSIX 1003.1-2001) — the test
- * build's libc stdlib.h may not expose it under the default
- * feature-test macros.  The loader test only runs on a Linux
- * host, where this is always available. */
 extern int posix_memalign(void **memptr, size_t alignment, size_t size);
 
-/* ── Global state ─────────────────────────────────────────── */
 elf_load_state_t elf_load_state;
+int g_log_level = 3;
 
-/* ── Host log level stub (declared extern in log/log.h) ── */
-int g_log_level = 3;   /* LOG_ERR — gates out all debug_*/
+/* ── Queueable STRONG RNG stub ── */
+#define RNG_QUEUE_MAX 32
+static struct {
+    bool ok;
+    uint8_t bytes[32];
+} rng_queue[RNG_QUEUE_MAX];
+static int rng_q_head = 0;
+static int rng_q_tail = 0;
+
+void stubs_rng_reset(void)
+{
+    rng_q_head = 0;
+    rng_q_tail = 0;
+    memset(rng_queue, 0, sizeof(rng_queue));
+}
+
+void stubs_rng_push(bool ok, uint64_t first_u64_le)
+{
+    assert(rng_q_tail < RNG_QUEUE_MAX);
+    rng_queue[rng_q_tail].ok = ok;
+    memset(rng_queue[rng_q_tail].bytes, 0x5A, 32);
+    for (int i = 0; i < 8; i++)
+        rng_queue[rng_q_tail].bytes[i] = (uint8_t)((first_u64_le >> (i * 8)) & 0xFFU);
+    rng_q_tail++;
+}
+
+bool kernel_random_get_strong(uint8_t out[32])
+{
+    elf_load_state.total_rng_calls++;
+    if (rng_q_head < rng_q_tail) {
+        int idx = rng_q_head++;
+        if (out)
+            memcpy(out, rng_queue[idx].bytes, 32);
+        return rng_queue[idx].ok;
+    }
+    if (out)
+        memset(out, 0, 32);
+    return false;
+}
 
 void stubs_reset(void)
 {
     memset(&elf_load_state, 0, sizeof(elf_load_state));
+    for (int i = 0; i < ELF_LOAD_PAGE_POOL_SIZE; i++)
+        elf_load_page_pool[i].in_use = 0;
+    stubs_rng_reset();
 }
 
-int stubs_pte_index_for(uint64_t vaddr)
+static uint32_t hash_va(uint64_t va)
 {
-    if (vaddr < ELF_LOAD_PTE_USER_OFFSET) return -1;
-    uint64_t off = vaddr - ELF_LOAD_PTE_USER_OFFSET;
-    if (off >= (uint64_t)ELF_LOAD_PTE_TABLE_SIZE * 0x1000UL) return -1;
-    return (int)(off >> 12);
+    uint64_t x = va >> 12;
+    x ^= x >> 17;
+    x *= 0xbf58476d1ce4e5b9ULL;
+    x ^= x >> 31;
+    return (uint32_t)(x & (ELF_LOAD_SPARSE_SLOTS - 1));
+}
+
+static elf_load_pte_record_t *sparse_lookup(uint64_t va, bool create)
+{
+    va &= ~0xFFFULL;
+    uint32_t idx = hash_va(va);
+    int first_free = -1;
+    for (uint32_t step = 0; step < ELF_LOAD_SPARSE_SLOTS; step++) {
+        uint32_t slot = (idx + step) & (ELF_LOAD_SPARSE_SLOTS - 1);
+        elf_load_pte_record_t *rec = &elf_load_state.ptes[slot];
+        if (!rec->used) {
+            if (first_free < 0)
+                first_free = (int)slot;
+            if (!(rec->pte & PAGE_VALID))
+                break;
+        } else if (rec->vaddr == va) {
+            return rec;
+        }
+    }
+    if (create && first_free >= 0) {
+        elf_load_pte_record_t *rec = &elf_load_state.ptes[first_free];
+        rec->vaddr = va;
+        rec->used = 1;
+        return rec;
+    }
+    return NULL;
 }
 
 elf_load_pte_record_t *stubs_find_mapping(uint64_t vaddr)
 {
-    int idx = stubs_pte_index_for(vaddr);
-    if (idx < 0) return NULL;
-    if (!(elf_load_state.ptes[idx].pte & 1 /* PAGE_VALID */)) return NULL;
-    return &elf_load_state.ptes[idx];
+    elf_load_pte_record_t *rec = sparse_lookup(vaddr, false);
+    if (!rec || !(rec->pte & PAGE_VALID))
+        return NULL;
+    return rec;
 }
 
-/* ── Page allocator pool ──────────────────────────────────── */
+/* ── Page allocator pool (lazy on-demand backing) ── */
 page_pool_record_t elf_load_page_pool[ELF_LOAD_PAGE_POOL_SIZE];
-
-/* Sentinel: the first byte of the first backing buffer holds 0xAA
- * once the pool has been initialised.  We probe this in alloc/free
- * instead of a static-local, because static locals in a stub get
- * one copy per-TU; this probe keeps every TU in lock-step on a
- * shared initialised-flag. */
-static int pool_initialised = 0;
-
-static void pool_init_once(void)
-{
-    if (pool_initialised) return;
-    pool_initialised = 1;
-    for (int i = 0; i < ELF_LOAD_PAGE_POOL_SIZE; i++) {
-        /* Allocate a 4 KiB-aligned 4 KiB buffer.  The phys the
-         * loader sees must be 4 KiB-aligned (real PTE semantics);
-         * a plain malloc/calloc may return a pointer with
-         * non-zero low bits, which would fail the alignment check
-         * in the loader's PTE format.  posix_memalign is POSIX
-         * (always available on Linux) and lets us specify the
-         * alignment explicitly. */
-        void *p = NULL;
-        if (posix_memalign(&p, 4096, 4096) != 0 || !p) {
-            abort();
-        }
-        memset(p, 0, 4096);
-        elf_load_page_pool[i].backing = p;
-        elf_load_page_pool[i].phys = (uint64_t)(uintptr_t)p;
-        elf_load_page_pool[i].in_use = 0;
-    }
-}
 
 uint64_t alloc_4k_page(void)
 {
-    pool_init_once();
-    /* Honour failure injection: AFTER N successful allocs, the next
-     * call returns 0. */
     if (elf_load_state.inject_alloc_fail_at > 0 &&
         elf_load_state.total_allocs + 1 == elf_load_state.inject_alloc_fail_at) {
         return 0;
@@ -103,63 +118,55 @@ uint64_t alloc_4k_page(void)
 
     for (int i = 0; i < ELF_LOAD_PAGE_POOL_SIZE; i++) {
         if (!elf_load_page_pool[i].in_use) {
+            if (!elf_load_page_pool[i].backing) {
+                void *p = NULL;
+                if (posix_memalign(&p, 4096, 4096) != 0 || !p)
+                    abort();
+                elf_load_page_pool[i].backing = p;
+                elf_load_page_pool[i].phys = (uint64_t)(uintptr_t)p;
+            }
             elf_load_page_pool[i].in_use = 1;
-            /* Zero the page (production alloc_4k_page returns a zeroed page) */
             memset(elf_load_page_pool[i].backing, 0, 4096);
             elf_load_state.total_allocs++;
             return elf_load_page_pool[i].phys;
         }
     }
-    /* Pool exhausted.  ELF_LOAD_PAGE_POOL_SIZE is sized to host the
- * user VA range in full (4096 entries × 4 KiB = 16 MiB), so this
- * path fires only when a single test allocates more than that
- * before freeing — flag it loudly so the test author notices. */
-    fprintf(stderr,
-            "alloc_4k_page: ELF_LOAD_PAGE_POOL_SIZE exhausted — "
-            "test needs more pages than the pool allows\n");
+    fprintf(stderr, "alloc_4k_page: ELF_LOAD_PAGE_POOL_SIZE exhausted\n");
     return 0;
 }
 
-/* Link surface: ELF leaves are never COW, but release_owned_4k
- * needs the symbol. */
 bool page_cow_put(uint64_t phys) { (void)phys; return false; }
+
 void free_4k_page(uint64_t phys)
 {
-    pool_init_once();
     for (int i = 0; i < ELF_LOAD_PAGE_POOL_SIZE; i++) {
-        if (elf_load_page_pool[i].phys == phys) {
+        if (elf_load_page_pool[i].backing && elf_load_page_pool[i].phys == phys) {
             elf_load_page_pool[i].in_use = 0;
-            /* Poison the backing buffer so the test can verify the
-             * loader never reads after free. */
             memset(elf_load_page_pool[i].backing, 0xCC, 4096);
             elf_load_state.total_frees++;
             return;
         }
     }
-    /* Freeing an unknown phys — production would kpanic; in the
-     * host we just count it as a stray free (shouldn't happen). */
 }
 
-/* ── VFS read stub ────────────────────────────────────────── */
+/* ── VFS read stub ── */
 int vfs_read(vfs_node_t *node, uint64_t offset,
              uint64_t size, void *buffer)
 {
     if (!node || !buffer) return -1;
-    if (offset + size < offset) return -1;  /* wrap */
-    if (offset + size > node->size) return -1;  /* short read / OOB */
+    if (offset + size < offset) return -1;
+    if (offset + size > node->size) return -1;
 
-    /* Honour failure injection */
     if (elf_load_state.inject_read_fail_at > 0 &&
         elf_load_state.total_reads + 1 == elf_load_state.inject_read_fail_at) {
         return -1;
     }
 
-    /* The test reuses node->name as the data pointer for the in-memory
-     * ELF image.  The production vfs_read would dispatch to the FS
-     * driver; our stub treats the node as a flat byte buffer. */
     if (!node->name) return -1;
     memcpy(buffer, (const uint8_t *)node->name + offset, size);
     elf_load_state.total_reads++;
+    if (elf_load_state.post_read_hook)
+        elf_load_state.post_read_hook(offset, size, buffer);
     return (int)size;
 }
 
@@ -168,55 +175,33 @@ uint64_t vfs_node_live_size(vfs_node_t *node)
     return node ? node->size : 0;
 }
 
-/* ── PTE table walk / map / unmap ────────────────────────── */
+/* ── PTE table walk / map / unmap ── */
 uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
                       uint64_t flags, int allocate)
 {
     (void)pgdir; (void)flags;
-    int idx = stubs_pte_index_for(virt);
-    if (idx < 0) return NULL;
-
-    elf_load_pte_record_t *rec = &elf_load_state.ptes[idx];
-    if (!(rec->pte & PAGE_VALID)) {
-        if (!allocate) return NULL;
-        /* The flat table is pre-zeroed; treat as a fresh PTE slot.
-         * Production vmm_pt_walk would walk PGD/PUD/PMD and allocate
-         * intermediate tables here.  Our flat table skips that. */
-    }
+    elf_load_pte_record_t *rec = sparse_lookup(virt, allocate != 0);
+    if (!rec) return NULL;
+    if (!(rec->pte & PAGE_VALID) && !allocate)
+        return NULL;
     return &rec->pte;
 }
 
 int x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys,
-                    uint64_t virt, uint64_t flags)
+                   uint64_t virt, uint64_t flags)
 {
     (void)pgdir;
-
-    /* Honour failure injection: AFTER N successful maps, the next
-     * call returns -1. */
     if (elf_load_state.inject_map_fail_at > 0 &&
         elf_load_state.total_maps + 1 == elf_load_state.inject_map_fail_at) {
         return -1;
     }
 
-    int idx = stubs_pte_index_for(virt);
-    if (idx < 0) return -1;
-    elf_load_pte_record_t *rec = &elf_load_state.ptes[idx];
+    elf_load_pte_record_t *rec = sparse_lookup(virt, true);
+    if (!rec) return -1;
 
-    /* Preserve any prior content; reject overwrite of an already-mapped
-     // slot (production x86_vmm_map_4k is unconditional; the loader
-     // is responsible for not double-mapping).  We mirror that by
-     // overwriting and recording — the loader's "map only if absent"
-     // invariant is exercised by the test's PTE flags/phys inspection. */
     rec->phys  = phys;
     rec->flags = flags;
-    /* The stored PTE word keeps the low-12 flag bits (the presence
-     * checks — rec->pte & PAGE_VALID — and the loader's PA read-back
-     * depend on them) and additionally carries PAGE_NO_EXEC: the W^X
-     * loader reads NX (bit 63) back through vmm_pt_walk when it
-     * checks shared-page compatibility, mirroring production
-     * x86_pte_4k_make which keeps every non-PA flag bit. */
-    rec->pte   = (phys & ~0xFFFUL) | (flags & 0xFFFUL) |
-                 (flags & PAGE_NO_EXEC);
+    rec->pte   = (phys & ~0xFFFUL) | (flags & 0xFFFUL) | (flags & PAGE_NO_EXEC);
     elf_load_state.total_maps++;
     return 0;
 }
@@ -224,27 +209,23 @@ int x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys,
 void vmm_unmap_4k_page(uint64_t *pgdir, uint64_t virt)
 {
     (void)pgdir;
-    int idx = stubs_pte_index_for(virt);
-    if (idx < 0) return;
-    elf_load_pte_record_t *rec = &elf_load_state.ptes[idx];
-    if (!(rec->pte & PAGE_VALID)) return;  /* already clear */
+    elf_load_pte_record_t *rec = sparse_lookup(virt, false);
+    if (!rec || !(rec->pte & PAGE_VALID)) return;
     rec->pte = 0;
     rec->phys = 0;
     rec->flags = 0;
     elf_load_state.total_unmaps++;
 }
 
-/* ── Allocation-free leaf withdraw / release (plan Task 2) ────
- * take saves the full descriptor and clears the slot; release is
- * the only place a withdrawn leaf hands its page back. */
 uint64_t x86_vmm_take_4k(uint64_t *root, uint64_t va)
 {
     (void)root;
-    int idx = stubs_pte_index_for(va);
-    if (idx < 0) return 0;
-    elf_load_pte_record_t *rec = &elf_load_state.ptes[idx];
+    elf_load_pte_record_t *rec = sparse_lookup(va, false);
+    if (!rec) return 0;
     uint64_t old = rec->pte;
     rec->pte = 0;
+    rec->phys = 0;
+    rec->flags = 0;
     if (!(old & (PAGE_VALID | PAGE_PROTNONE))) return 0;
     elf_load_state.total_unmaps++;
     return old;

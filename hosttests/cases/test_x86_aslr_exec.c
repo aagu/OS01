@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include <arch/x86_64/aslr.h>
+#include <arch/x86_64/elf_image.h>
 #include <arch/x86_64/mmu.h>
 #include <arch/x86_64/user_layout.h>
 #include <fs/file.h>
@@ -209,13 +210,17 @@ void vfs_node_put(vfs_node_t *node) { (void)node; }
 int elf_validate(vfs_node_t *node) { (void)node; return 0; }
 uint32_t elf_detect_abi(vfs_node_t *node) { (void)node; return 0; }
 
-int elf_load(vfs_node_t *node, mm_t *mm, uint64_t *entry_point)
+int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
 {
     (void)node;
     mm->start_code = X86_USER_MIN_ADDR;
     mm->end_code = 0x500000UL;
-    if (entry_point)
-        *entry_point = 0x401000UL;
+    if (out_image) {
+        out_image->entry = 0x401000UL;
+        out_image->phdr = 0;
+        out_image->phnum = 0;
+        out_image->is_pie = false;
+    }
     return 0;
 }
 
