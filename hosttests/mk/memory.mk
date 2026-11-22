@@ -1106,3 +1106,29 @@ LINK_GROUP_aarch64-boot-layout := \
 .PHONY: test-aarch64-boot-layout
 test-aarch64-boot-layout: $(TEST_BLD)/test_aarch64_boot_layout.elf
 	$<
+
+# x86_64 ASLR mmap_base tests
+ASLR_MMAP_HOST_CFLAGS := $(HOST_CFLAGS) $(LIBC_INC) \
+                         -I$(TESTS_DIR)/kernel/include \
+                         -include $(TEST_MOCK)/lifecycle/lifecycle_runtime.h \
+                         -I$(TEST_MOCK) -I$(TEST_INC) \
+                         -I$(TEST_MOCK)/lifecycle
+
+$(TEST_BLD)/aslr_mmap_aslr_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/aslr.c \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/aslr.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/user_layout.h \
+		$(TEST_MOCK)/lifecycle/lifecycle_runtime.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ASLR_MMAP_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/test_x86_aslr_mmap.o: $(TEST_CASES)/test_x86_aslr_mmap.c \
+		$(TEST_MOCK)/lifecycle/lifecycle_stubs.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/aslr.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/user_layout.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ASLR_MMAP_HOST_CFLAGS) $(FRAMEWORK_INC) -c $< -o $@
+
+$(TEST_BLD)/test_x86_aslr_mmap.elf: $(TEST_BLD)/test_x86_aslr_mmap.o \
+		$(TEST_BLD)/aslr_mmap_aslr_production.o \
+		$(TEST_BLD)/lifecycle_stubs.o
+	$(HOST_CC) -o $@ $^

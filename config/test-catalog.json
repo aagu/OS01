@@ -5323,6 +5323,18 @@
       }
     },
     {
+      "id": "test_x86_aslr_mmap",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [
+        "memory.aslr.x86_mmap"
+      ],
+      "source": "hosttests/cases/test_x86_aslr_mmap.c"
+    },
+    {
       "id": "test_x86_intr_fault",
       "layer": "harness",
       "subsystem": "test-framework",
@@ -5571,6 +5583,10 @@
     {
       "source": "qemutests/test_lvgl_runner.py",
       "reason": "executable QEMU driver script, not a unittest module"
+    },
+    {
+      "source": "qemutests/test_kernel_sanitizers.py",
+      "reason": "standalone sanitizer contract and live-probe script; invoked via test-kernel-sanitizers-contract and test-kernel-sanitizers"
     }
   ]
 }

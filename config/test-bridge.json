@@ -4504,6 +4504,10 @@
     {
       "source": "qemutests/test_lvgl_runner.py",
       "reason": "executable QEMU driver script, not a unittest module"
+    },
+    {
+      "source": "qemutests/test_kernel_sanitizers.py",
+      "reason": "standalone sanitizer contract and live-probe script; invoked via test-kernel-sanitizers-contract and test-kernel-sanitizers"
     }
   ]
 }

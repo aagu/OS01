@@ -8712,6 +8712,32 @@
     "action": "unique",
     "reason": "Only live QEMU evidence for compiler-instrumented violation detection"
    }
+  },
+  {
+   "id": "memory.aslr.x86_mmap",
+   "owner": "host",
+   "component": "memory",
+   "behavior": "aslr",
+   "trigger": "make PROFILE=x86_64-clang test-host",
+   "assertions": [
+    "x86_aslr_derive_mmap_base masks entropy to 28 bits and produces 4 KiB aligned addresses in [0x0000400000000000, 0x0000410000000000)",
+    "x86_aslr_init_mmap_base rejects NULL mm with -EINVAL without calling RNG, and fails closed with -EAGAIN preserving mmap_base when STRONG entropy is unavailable",
+    "do_mmap/do_munmap/do_mprotect enforce canonical ceiling, reject MAP_FIXED(0), avoid front/overlapping gaps without wrap-around, and clamp low mmap_base"
+   ],
+   "failure_modes": [
+    "Entropy truncation bias, silent fallback to 0x40000000, MAP_FIXED(0) zero-page mapping, gap-search overlap, or wrap-around below mmap_base"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_x86_aslr_mmap.c",
+    "selector": "test_x86_aslr_mmap",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Host unit and sparse-PTE boundary verification of x86_64 mmap ASLR derivation and gap/ceiling invariants"
+   }
   }
  ]
 }

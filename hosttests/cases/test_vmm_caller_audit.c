@@ -349,6 +349,7 @@ static void audit_kernel_mk_aarch64_whitelist(void)
     assert_false(contains(branch, "arch/x86_64/memory/vma.c"));
     assert_false(contains(branch, "arch/x86_64/memory/brk.c"));
     assert_false(contains(branch, "arch/x86_64/memory/mmap.c"));
+    assert_false(contains(branch, "arch/x86_64/memory/aslr.c"));
     assert_false(contains(branch, "arch/x86_64/memory/uaccess.c"));
     assert_false(contains(branch, "sched/task.c"));
     /* core/printk.c is the shared console (7ebc9d0a) and has no
