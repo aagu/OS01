@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""USB boot E2E runner (M0 firmware diagnostic & M1b readonly mount proof).
+"""USB boot E2E runner (M1b readonly mount proof and later sub-cases).
 
 CLI (the Make entry point is ``test-qemu SUITE=usb-boot`` or
 ``test-qemu-usb-boot``)::
@@ -41,7 +41,6 @@ except ImportError:  # pragma: no cover - exercised only on broken installs
 from qemutests.harness.qemu_cmd import build_qemu_x86
 
 
-CASE_FIRMWARE = "firmware"
 CASE_READONLY = "readonly"
 CASE_DUAL = "dual"
 CASE_AHCI = "ahci"
@@ -49,7 +48,6 @@ CASE_PERSISTENCE = "persistence"
 CASE_SUPERSPEED = "superspeed"
 CASE_HUB = "hub"
 CASES = (
-    CASE_FIRMWARE,
     CASE_READONLY,
     CASE_DUAL,
     CASE_AHCI,
@@ -66,16 +64,18 @@ _SECTOR_SIZE = 512
 _ESP_TYPE_GUID = uuid.UUID("C12A7328-F81F-11D2-BA4B-00A0C93EC93B")
 _LINUX_FS_TYPE_GUID = uuid.UUID("0FC63DAF-8483-4772-8E79-3D69D8477DE4")
 
-# ── M0 evidence ─────────────────────────────────────────────────────
+# ── xHCI enumeration evidence ────────────────────────────────────────
+# The xHCI lines come from kernel/arch/x86_64/driver/xhci.c.  They are
+# the M0 checkpoint's positive proof that OVMF loaded BOOTX64.EFI and
+# kernel.bin over a USB-only qemu-xhci topology and that the kernel
+# enumerated the MSC interface — they used to be followed by the
+# pre-MSC-driver expected failure, which no longer occurs.
 _XHCI_SPEED_RE = re.compile(
     r"\[xhci\] port \d+: connected, reset complete, speed=3(?:\s|$)"
 )
 _XHCI_CONFIG_RE = re.compile(
     r"\[xhci\] slot \d+: configured with config \d+ "
     r"\(iface class 08:06, ep_count=2\)"
-)
-_FATAL_PREFIX_RE = re.compile(
-    r"^\[boot-3\] FATAL stage=fs component=root rc=-19(?=\s|$)"
 )
 
 # ── M1b readonly evidence ───────────────────────────────────────────
@@ -112,7 +112,7 @@ def superspeed_evidence(serial: str, root_marker: str, esp_marker: str) -> bool:
     """True iff serial proves SuperSpeed (speed=4) and both mount sentinels."""
     if not serial or not _XHCI_SS_SPEED_RE.search(serial):
         return False
-    return readonly_evidence(serial, root_marker, esp_marker)
+    return _mount_marker_evidence(serial, root_marker, esp_marker)
 
 
 def hub_evidence(
@@ -239,8 +239,11 @@ def persistence_trace_evidence(trace_text: str) -> bool:
     return write_csw_ok and sync_csw_ok
 
 
-def firmware_evidence(serial: str) -> bool:
-    """True iff the serial stream contains the M0 firmware evidence."""
+def _xhci_enumeration_evidence(serial: str) -> bool:
+    """True iff the serial proves an xHCI port reset at speed=3 and the MSC
+    interface configured — the M0 checkpoint's positive proof that OVMF
+    loaded BOOTX64.EFI + kernel.bin over a USB-only topology.  The port
+    reset must precede the interface configuration."""
     if not serial:
         return False
     stage = 0
@@ -252,10 +255,7 @@ def firmware_evidence(serial: str) -> bool:
         elif stage == 1:
             if _XHCI_CONFIG_RE.search(line):
                 stage = 2
-        else:
-            if _FATAL_PREFIX_RE.match(line):
-                return True
-    return False
+    return stage == 2
 
 
 def _readonly_prompt_ready(serial: str) -> bool:
@@ -272,7 +272,9 @@ def _readonly_prompt_ready(serial: str) -> bool:
     return False
 
 
-def readonly_evidence(serial: str, root_marker: str, esp_marker: str) -> bool:
+def _mount_marker_evidence(
+    serial: str, root_marker: str, esp_marker: str
+) -> bool:
     """True iff serial proves usba publication, prompt, both markers, and fresh prompt."""
     if not serial or not root_marker or not esp_marker:
         return False
@@ -360,12 +362,50 @@ def _guid_boot_evidence(
     return False
 
 
+def _msc_published_before_selection(serial: str) -> bool:
+    """True iff the MSC driver published the usba disk before the kernel
+    selected it — the read half of the MSC -> GUID-selection chain."""
+    saw_msc = False
+    for raw_line in serial.splitlines():
+        stripped = raw_line.strip()
+        if not saw_msc:
+            if _MSC_USBA_RE.search(stripped):
+                saw_msc = True
+        elif _BOOT_SELECTED_RE.search(stripped):
+            return True
+    return False
+
+
 def dual_evidence(
     serial: str, usb_guid: str, root_marker: str, esp_marker: str
 ) -> bool:
     """True iff serial proves firmware ESP GUID, AHCI-first scan, usba selection, and USB markers."""
     return _guid_boot_evidence(
         serial, usb_guid, "hda", "usba", "usba2", "usba1", root_marker, esp_marker
+    )
+
+
+def readonly_evidence(
+    serial: str, esp_guid: str, root_marker: str, esp_marker: str
+) -> bool:
+    """True iff serial proves the whole USB-only chain.
+
+    This is the M1b gate and, since the M0 firmware checkpoint was
+    retired, it now carries the checkpoint's positive proof as well:
+    xHCI enumeration (port reset at speed=3 + MSC interface configured),
+    the MSC driver publishing the usba disk, the firmware ESP GUID the
+    kernel booted from, the boot scan over the USB-only disk set, the
+    GUID-selected usba root mount, and finally both partition markers
+    read back.
+    """
+    if not esp_guid:
+        return False
+    if not _xhci_enumeration_evidence(serial):
+        return False
+    if not _msc_published_before_selection(serial):
+        return False
+    return _guid_boot_evidence(
+        serial, esp_guid, "usba", "usba", "usba2", "usba1", root_marker, esp_marker
     )
 
 
@@ -1194,10 +1234,9 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
         return False
 
     def _case_evidence(text: str) -> bool:
-        if case == CASE_FIRMWARE:
-            return firmware_evidence(text)
         if case == CASE_READONLY:
-            return readonly_evidence(text, root_marker, esp_marker)
+            assert esp_guid_str is not None
+            return readonly_evidence(text, esp_guid_str, root_marker, esp_marker)
         if case == CASE_SUPERSPEED:
             return superspeed_evidence(text, root_marker, esp_marker)
         if case == CASE_HUB:
@@ -1218,7 +1257,7 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
             argv=argv,
             run_dir=run_dir,
             timeout_s=timeout,
-            writable_stdin=(case != CASE_FIRMWARE),
+            writable_stdin=True,
         )
         session.start()
         deadline = session.deadline
@@ -1231,15 +1270,11 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
                 timed_out = True
                 break
             session.observe(min(POLL_SECONDS, remaining))
-            if case == CASE_FIRMWARE:
-                if _case_evidence(session.text):
-                    break
-            else:
-                if not sent_command and _case_prompt_ready(session.text):
-                    session.send(b"cat /usb-root.txt /boot/USBESP.TXT\n")
-                    sent_command = True
-                if sent_command and _case_evidence(session.text):
-                    break
+            if not sent_command and _case_prompt_ready(session.text):
+                session.send(b"cat /usb-root.txt /boot/USBESP.TXT\n")
+                sent_command = True
+            if sent_command and _case_evidence(session.text):
+                break
             returncode = session.returncode
             if returncode is not None:
                 early_returncode = returncode

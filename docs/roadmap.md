@@ -16,7 +16,7 @@
 | **P2** | aarch64 适配 | 13 | 内存与执行体 1 · 能力齐平 7 · 架构统一 0 · 真机阻断 5 |
 | **P2** | 架构治理 / 扩展性 | 0 | 新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填该节 |
 | **P3** | GUI | 7 | GUI-4/5/6 + 优化与验证 4 |
-| **P4** | 硬件适配 | 6 | USB 3 · NVMe · HPET · ACPI S3 |
+| **P4** | 硬件适配 | 5 | USB 2 · NVMe · HPET · ACPI S3 |
 | **P5** | ABI 扩展 / 兼容性 | 14 | syscall 与 libc 缺口 |
 
 推进顺序：**P0 → P1 → P2 → P3 / P4 → P5**；P3 GUI 与 P4 硬件可并行。
@@ -131,7 +131,6 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 
 | 项 | 内容 / 完成条件 | 依赖 | 借鉴 |
 |----|-----------------|------|------|
-| USB boot M0 固件门禁转换 | **`USB_BOOT_CASE=firmware` 仍是过期的预期失败断言**：它断言的是 MSC 驱动落地**之前**的预期失败（runner 仍匹配 `[boot-3] FATAL stage=fs component=root rc=-19`，`qemutests/usb_boot.py:77-79,242-258`），而 USB-only 引导现在一路走通到 shell（`fs: boot disk selected by GUID (usba), root=usba2 boot=usba1` → PID 1 init → ash 提示符），故该用例超时失败。**它已不是默认路径**：`USB_BOOT_CASE` 默认值已是 `readonly`（`mk/components/run.mk:1342`），`firmware` 仅可显式 opt-in（`:1564-1566` 的合法值白名单），且不在 `SUITE=usb-boot` 的六组循环内（`:1451-1454`）；`usb-boot` 套件本身已登记 nightly（`config/test-ci-schedule.json:199-201`）。**待决的只是 `firmware` 这一子用例**：① 改为成功门禁（断言 xHCI 枚举 → MSC 读盘 → GUID 选盘 → 根挂载 → shell 提示符的完整证据链）；② 退役该用例，由 `readonly` 用例覆盖成功路径。**另需同步两处过期文本**：`mk/components/run.mk:2030` 的帮助文本仍把它描述为 "M0 USB-only firmware gate … expects fs/root rc=-19"；`mk/components/run.mk:1338-1341` 的注释仍称 `usb-boot` "is not a catalog suite until M1b … intentionally invalid until the bridge entry lands in M1b"——但 `usb-boot` 早已进目录（`mk/generated/test-dispatch.mk:90`）并已入 nightly | MSC/BOT ✅；`readonly` 等六组已 PASS 并已入 nightly | Tilck |
 | 真机启动 (USB) —— 物理实机验收 | **代码路径与 QEMU 验收已闭环**（`SUITE=usb-boot` 6/6 子用例：readonly / dual / ahci / persistence / superspeed / hub；另有 `SUITE=usb-hid` 覆盖 direct/hub × SMP=1/2）。**剩余**：制作实机可引导 USB 盘，验证 UEFI + bootloader + xHCI 实机硬件自举路径，并采集真实控制器 BDF、固件版本、外设 `VID:PID`、协商速度、物理拓扑与热拔插日志 | USB 存储 / FAT32 ✅；Hub ✅；HID ✅ | Tilck |
 | USB 大容量存储的协议与介质覆盖 | 现仅支持 **BOT**（协议 0x50）、**512 字节逻辑块**、**32 位 LBA**（`kernel/driver/usb_msc.c:18,137-144`）；**无 UAS**、**无 4Kn**、**无 >2 TiB**、**无热插拔重探测**（`xhci_msc_probe_controller()` 仅在 init 调用一次，`kernel/arch/x86_64/driver/xhci_msc.c:157`），也**无用户态挂载入口**（无 `mount` syscall，挂载仅由引导期 ESP GUID 选择决定） | MSC/BOT ✅ | Linux usb-storage |
 | NVMe 驱动 | PCIe NVMe 1.4+ 控制器驱动，Admin/IO 队列对与 Doorbell 机制，替代 AHCI 成为高性能块设备（当前 `kernel/` 下无任何 nvme 代码，仅 `user/lspci.c` 有类名字符串） | ARCH-9 PCI/块设备 ✅ | Linux nvme / HelenOS |
@@ -204,6 +203,7 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 
 | 闭环项 | 日期 | 详情 |
 |--------|------|------|
+| **USB boot M0 固件检查点退役**（`USB_BOOT_CASE=firmware` 子用例删除：过期的 `rc=-19` 预期失败断言、case 表与 make 白名单一并收敛；其正面证明——xHCI 枚举 + MSC 发布 + GUID 选盘 usba 根 + 两个分区标记——并入 `readonly` 的成功证据链，并同步 `mk/components/run.mk` 的帮助文本与三处过期注释） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [build](build/build.md) · [driver](driver/driver.md) |
 | **跨进程 inode 级 `MAP_SHARED`**（架构中立共享对象注册表 `kernel/memory/shared_backing.c`，键 `(挂载实例, inode)`、匿名对象 fork 继承；aarch64 mmap/fork/uaccess/拆卸全链接入；产品 E2E `USER_RUNTIME_CASE=map-shared` 实跑 `/bin/test_map_shared` 覆盖会合/偏移隔离/rename/unlink/权限上限/两种拆卸入口） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [cow-mmap](memory/cow-mmap.md#3-跨进程-inode-级-map_shared2026-11-22aarch64) · [arch.md](arch.md) |
 | **x86_64 静态 PIE 与镜像基址随机化（ASLR-B）**（`x86_elf_pie_prepare()` 校验零链接 `ET_DYN`，逐页重定位跨页 `R_X86_64_RELATIVE`，PIE 偏移 `[0x00400000,0x10400000)` 抽取；PIE 偏移/`mmap_base`/`AT_RANDOM` 三段独立强熵、任一失败 fail-closed `-EAGAIN`；用户态与 BusyBox 全迁 `-fPIE` + `user-pie.ld`，`test-user-pie` 审计 47 产物） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [spec](superpowers/specs/2026-11-22-aslr-b-static-pie-design.md) · [cow-mmap](memory/cow-mmap.md) |
 | **x86_64 用户态 `mmap_base` 随机化（ASLR-A）**（28-bit 4 KiB 页粒度窗口 `[0x0000400000000000,0x0000410000000000)` + 规范用户上界；`spawn_user_task()`/`sys_exec()` 初始化、fork 继承；无回绕 first-fit 间隙搜索封堵 `MAP_FIXED(0)`） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [spec](superpowers/specs/2026-11-21-aslr-a-mmap-base-design.md) · [cow-mmap](memory/cow-mmap.md) |

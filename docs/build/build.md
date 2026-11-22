@@ -62,7 +62,7 @@ make clean            清理指定 profile（默认 profile 还删除项目根�
 | `make test-doctor` | Compare local `clang`/`ld.lld`/`qemu` versions against `ci/Dockerfile` pins (reports `OK`/`DRIFT`/`SKIPPED(no ci pin)`, exits 2 only if a tool cannot execute) | — |
 | `make ci-local SUITE=<name>` | Run `test-qemu SUITE=<name>` (or `MAKE_ARGS=...`) inside `ghcr.io/aagu/os01-ci:latest` via `docker`/`podman` (no auto-pull) | — |
 
-`make test-qemu-usb-boot` 是 USB boot M0 的专用固件门禁（`USB_BOOT_CASE=firmware`，断言 `fs/root rc=-19`）。它使用共享的 `qemutests/harness/qemu_cmd.py` 的 `storage="usb"` 拓扑，不是 `test-qemu SUITE=` 的目录套件。**该用例已过期**：MSC 驱动落地后 USB-only 引导不再停在 `rc=-19`，而是走通到 shell，因此该用例现在超时失败——详见本节「现状」段与 `docs/roadmap.md` P4 的对应条目。
+`make test-qemu-usb-boot` 是 USB boot 门禁的**单组**入口（`USB_BOOT_CASE=<readonly|dual|ahci|persistence|superspeed|hub>`），使用共享的 `qemutests/harness/qemu_cmd.py` 的 `storage="usb"` 拓扑；整套六组矩阵走 `make test-qemu SUITE=usb-boot`。原 M0 固件检查点（`USB_BOOT_CASE=firmware`，断言 MSC 驱动落地**之前**的 `fs/root rc=-19`）已于 2026-11-22 **退役**：MSC 驱动落地后 USB-only 引导一路走通到 shell，该预期失败不再出现，断言已并入 `readonly` 的成功证据链——详见本节「USB boot 门禁」小节与 `docs/changelog.md`。
 
 AArch64 EL1 调度器验收（`MODE=sched`）：`make PROFILE=aarch64-clang test-aarch64 MODE=sched [SCHED_CASE=<v>]`。该 MODE 通过受控子构建产出隔离的 `KERNEL_SELFTEST` 调度器镜像变体：`SCHED_CASE=positive`（默认组成部分）构建 `kernel/sched` + `image/sched`（正例：严格 14 用例协议 + 全部冻结 `[sched-evidence]` 字段证据矩阵），四个故障值 `sp-top`/`sp-low`/`pc-low`/`pc-data` 各构建 `kernel/sched-fault-<v>` + `image/sched-fault-<v>`（编译期选中的 `aarch64_sched_fault_inject` 注入钩子损坏保存 SP/PC，验收要求 fatal 发生在**切栈前**且受害者零提交切换）。`SCHED_CASE` 省略时为 `all`（正例矩阵 + 全部四个负例）。选择器 `AARCH64_SCHED_TEST` 与 `SCHED_CASE` 在解析期拒绝非法值；`MODE=sched`（即使未带选择器）与 `AARCH64_SYNC_FAULT_TEST`/`AARCH64_M1_TEST`/`KERNEL_TEST_FORCE_NO_RNDRRS`/`KERNEL_CANARY_SELFTEST`/`OS01_SYSTEST`/非零 `AARCH64_SMP_TEST_NO_ACK_CPU` 的任意组合均解析期报错。runner（`qemutests/aarch64_scheduler.py`）只消费 make 传入的显式镜像/固件/ELF 路径，绝不隐式重建；每次 QEMU 有 120 s 绝对期限（tick 不延长），完成后 1 s 排空窗口，崩溃/超时永远 FAIL；`llvm-nm` 符号审计要求普通 normal/selftest/positive ELF 不含注入符号而每个 fault ELF 含有。普通镜像 BSP idle 冒烟仍是同一 runner 的 `--idle-smoke` 模式（`--cpus 1 2 4 8`）。
 
@@ -377,7 +377,7 @@ make test-monitor-host CASE=file      # 只跑指定子系统的用例
 | 目标 | Variant 镜像 | 套件 |
 | --- | --- | --- |
 | `make test-qemu SUITE=phase-0` | 普通 `build/<profile>/image/disk.img` | 启动 + shell 提示符 |
-| `make test-qemu-usb-boot` | 普通 `build/<profile>/image/disk.img`（只读 USB 拓扑；源镜像前后 sha256 由专用目标比对） | USB boot M0 固件门禁（见下方 `test-qemu-usb-boot` 小节）：证明 profile OVMF 从 USB-only `qemu-xhci` + `usb-storage` 加载 `BOOTX64.EFI` + `kernel.bin` 并进入设备初始化。**注意**：该 `firmware` 用例断言的是 **MSC 驱动落地之前**的预期失败（`[boot-3] FATAL stage=fs component=root rc=-19`）；MSC 驱动已于 2026-11-14 落地，USB-only 引导现在会一路走到 shell，**该用例因此已过期并会超时失败**——见下方小节的「现状」段与 `docs/roadmap.md` P4 |
+| `make test-qemu-usb-boot` | 普通 `build/<profile>/image/disk.img`（只读 USB 拓扑；源镜像前后 sha256 由专用目标比对） | USB boot 门禁的**单组**入口（见下方 `test-qemu-usb-boot` 小节）：证明 profile OVMF 从 USB-only `qemu-xhci` + `usb-storage` 加载 `BOOTX64.EFI` + `kernel.bin`，内核枚举出 MSC 接口、发布 USB 盘并按固件 ESP GUID 挂载 usba 根。`readonly` 即承载完整证据链的 USB-only 基础门禁 |
 | `make OS01_SYSTEST=1 test-qemu SUITE=systest` | `build/<profile>/image/systest/disk.img` | syscall E2E（`OS01_SYSTEST=1`） |
 | `make INITTAB_FILE=config/inittab.test test-qemu SUITE=inittab-phase` | `build/<profile>/image/inittab-test/disk.img` | inittab 阶段派发（`INITTAB_FILE=config/inittab.test`） |
 | `make OS01_NETTEST=1 test-qemu SUITE=network` | `build/<profile>/image/nettest/disk.img` | 网络回归（`OS01_NETTEST=1`） |
@@ -395,34 +395,39 @@ make test-monitor-host CASE=file      # 只跑指定子系统的用例
 | `make test-qemu SUITE=boot-failure` | normal 组用普通镜像只读（`-snapshot`），故障组各自隔离 `build/<profile>/image/boot-failure-<case>/disk.img`（套件自建，普通镜像 hash 前后受 cmp 校验） | BOOT-3 启动失败与降级策略 17 组矩阵（串行）：normal 1/2/4、required-subsys 1/2、optional-subsys 1/2、registration 1、root 1、tty 1、pty 1、stdio 1/2、init 1/2、child-fds 1/2。选择器 `BOOT_FAILURE_TEST=none\|required-subsys\|optional-subsys\|registration\|root\|tty\|pty\|stdio\|init\|child-fds`。判定只看 guest 串口结构化 `[boot-3] FATAL` / `[boot-3] WARN` 与能力哨兵，超时/静默/QEMU 自退一律 FAIL。运行器：`qemutests/boot_failure.py`（归档在 `build/<profile>/logs/tests/boot-failure/`） |
 | `make test-qemu SUITE=boot-contract` / `make PROFILE=aarch64-clang test-aarch64 MODE=boot-contract` | normal 组用普通镜像只读（`-snapshot`），变体组各自隔离 `build/<profile>/image/boot-contract-<case>/disk.img`（套件自建，普通镜像 hash 前后受 cmp 校验） | BOOT-4 跨架构阶段契约与依赖拓扑 14 组矩阵（双架构各 7 组：normal 1/2/4、reverse 1/2、missing 1、cycle 1）。选择器 `BOOT_CONTRACT_TEST=none\|reverse\|missing\|cycle`。判定验证三检查点 `[boot-4] checkpoint=<devices\|pre-smp\|runtime> status=ok` 全序、依赖预检与拓扑保序、missing/cycle 真实拒绝。运行器：`qemutests/boot_contract.py`（归档在 `build/<profile>/logs/tests/boot-contract/`） |
 | `make test-qemu SUITE=boot-services` | normal 组用普通镜像只读（`-snapshot`），变体组各自隔离 `build/<profile>/image/boot-services-<case>/disk.img`（套件自建，普通镜像 hash 前后受 cmp 校验） | BOOT-5 调度启动与服务解耦 8 组矩阵：normal 1/2/4/8、no-net 1/2、overlap 2/4。选择器 `BOOT_SERVICES_TEST=none\|overlap`。判定验证标桩全序 `[boot-5] vfs-runtime` → `[boot-5] init-created pid=1` → `[boot-5] runtime-ready window=closed`，PID 1 优先分配与并发发布安全。运行器：`qemutests/boot_services.py`（归档在 `build/<profile>/logs/tests/boot-services/`） |
-| `make test-qemu SUITE=usb-boot` | 普通镜像与独立 `mkdisk` 生成的 AHCI 镜像各自复制到作业私有副本并注入不同 `/usb-root.txt` 与 `/boot/USBESP.TXT` 标记（`persistence` 还会把测试专用 helper `usb_boot_probe.elf` 仅注入私有副本 `/bin/usb-boot-probe`） | 依次执行 `readonly`、`dual`（USB `bootindex=0` + AHCI `bootindex=1`，验证 AHCI 先注册但内核按固件 ESP GUID 挂载 USB）、`ahci`（AHCI-only 基线）、`persistence`（可写私有副本执行 `/bin/usb-boot-probe` + `sync()` + QEMU trace 校验 `WRITE(10)` `0x2a`→`SYNCHRONIZE CACHE(10)` `0x35`→重启只读回读）、`superspeed`（`p2=0,p3=4` + `speed=4`）、`hub`（USB-only `p2=4,p3=0` + `usb-hub` port 1 + `usb-storage` port 1.2）六组矩阵；单组可用 `make test-qemu-usb-boot USB_BOOT_CASE=<readonly\|dual\|ahci\|persistence\|superspeed\|hub\|firmware>`。运行器：`qemutests/usb_boot.py` |
+| `make test-qemu SUITE=usb-boot` | 普通镜像与独立 `mkdisk` 生成的 AHCI 镜像各自复制到作业私有副本并注入不同 `/usb-root.txt` 与 `/boot/USBESP.TXT` 标记（`persistence` 还会把测试专用 helper `usb_boot_probe.elf` 仅注入私有副本 `/bin/usb-boot-probe`） | 依次执行 `readonly`、`dual`（USB `bootindex=0` + AHCI `bootindex=1`，验证 AHCI 先注册但内核按固件 ESP GUID 挂载 USB）、`ahci`（AHCI-only 基线）、`persistence`（可写私有副本执行 `/bin/usb-boot-probe` + `sync()` + QEMU trace 校验 `WRITE(10)` `0x2a`→`SYNCHRONIZE CACHE(10)` `0x35`→重启只读回读）、`superspeed`（`p2=0,p3=4` + `speed=4`）、`hub`（USB-only `p2=4,p3=0` + `usb-hub` port 1 + `usb-storage` port 1.2）六组矩阵；单组可用 `make test-qemu-usb-boot USB_BOOT_CASE=<readonly\|dual\|ahci\|persistence\|superspeed\|hub>`。运行器：`qemutests/usb_boot.py` |
 | `make test-qemu SUITE=usb-hid` | 普通镜像复制到作业私有副本并仅向该副本注入 `usb_hid_probe.elf`（`/bin/usb-hid-probe`），源镜像前后 sha256 不变 | 依次执行 `direct`/`hub` × `SMP=1`/`2` 四组矩阵（`i8042=off`，QMP `input-send-event` 注入、租约与 PTY 隔离、正常 unbind 后 TTY/shell 恢复、共享 Hub 并发与 detach 后 BOT `WRITE(10)`→`SYNCHRONIZE CACHE(10)`、`device_del` 合成释放）；单组可用 `make test-qemu-usb-hid USB_HID_CASE=<direct\|hub> SMP=<1\|2>`。运行器：`qemutests/usb_hid.py` |
 | `make CAPACITY_TEST=1 test-qemu SUITE=arch10-capacity` | `build/<profile>/image/arch10-capacity/disk.img` | 隔离容量验收变体（`CAPACITY_TEST=1`）：12 假块设备 + 40 devfs 节点 + poll32/64 入睡/唤醒 + RLIMIT_NOFILE (64) |
 
-### `test-qemu-usb-boot`：USB boot M0 固件门禁（opt-in）
+### `test-qemu-usb-boot`：USB boot 门禁（单组入口）
 
-> **现状（2026-11-16 实测，如实记录）**：`USB_BOOT_CASE=firmware` **已过期并会失败**。
-> 该用例断言的预期证据是 MSC 驱动落地**之前**的根挂载失败
+`make PROFILE=x86_64-clang test-qemu-usb-boot USB_BOOT_CASE=<case>`
+跑 USB 启动计划的**单组**验收；整套六组矩阵走 `make test-qemu SUITE=usb-boot`。
+`USB_BOOT_CASE` 取值 `readonly` / `dual` / `ahci` / `persistence` / `superspeed` /
+`hub`，默认 `readonly`。
+
+> **2026-11-22 变更**：原 **M0 固件检查点**（`USB_BOOT_CASE=firmware`）**已退役**。
+> 它断言的是 MSC 驱动落地**之前**的根挂载失败
 > （`[boot-3] FATAL stage=fs component=root rc=-19`）；MSC 驱动已于 2026-11-14 落地，
-> USB-only 引导现在一路走通到 shell：
-> `[xhci-msc] disk=usba` → `fs: boot disk selected by GUID (usba), root=usba2 boot=usba1 (/boot ok)`
-> → `init: running as PID 1` → BusyBox ash 提示符。
-> 预期证据因此不再出现，runner 报 `timeout before firmware evidence`（exit 2）。
-> **这不是回归，而是门禁断言落后于实现**——转换方案（改为成功门禁，或退役并由
-> `readonly` 用例覆盖）见 `docs/roadmap.md` P4。
+> USB-only 引导一路走通到 shell，预期失败不再出现，runner 只会报
+> `timeout before firmware evidence`。该断言已从代码中删除，其**正面证据**
+> （OVMF 从 USB-only 拓扑加载 `BOOTX64.EFI` + `kernel.bin`、内核枚举出 MSC 接口）
+> 改由 `readonly` 的成功证据链承担——见下条。`firmware` 已从 runner 的 case 表与
+> make 白名单中移除，传入即报错。
 
-`make PROFILE=x86_64-clang test-qemu-usb-boot USB_BOOT_CASE=firmware`
-是 USB 启动计划的 **M0 固件检查点**，验收目标只有一个：profile OVMF 能从
+`readonly` 是 USB 启动的**基础门禁**：验收目标是 profile OVMF 能从
 **USB-only** 拓扑（单块 `usb-storage` 挂在 `qemu-xhci` 上，`p2=4,p3=0`，
-`port=1,bootindex=0`）加载 ESP 上的 `BOOTX64.EFI` 与 `kernel.bin`，并让内核
-进入设备初始化。
+`port=1,bootindex=0`）加载 ESP 上的 `BOOTX64.EFI` 与 `kernel.bin`，内核枚举出
+MSC 接口、发布 USB 盘，并按固件 ESP GUID 挂载 usba 根，最终落到 BusyBox ash 提示符。
 
-- **预期证据**（按顺序，缺一不可）：xHCI 端口 `speed=3`（high speed）→
+- **预期证据**（按顺序，缺一不可）：UEFI 报告的 ESP GUID 与注入镜像的 ESP 分区
+  GUID 一致 → xHCI 端口 `speed=3`（high speed）→
   `[xhci] slot N: configured with config X (iface class 08:06, ep_count=2)` →
-  以 `[boot-3] FATAL stage=fs component=root rc=-19` 开头的行。
-  `boot_failure_stop()` 会在该行后追加 `phase=... cpu=...`，runner 只匹配稳定前缀；
-  其它 rc、OVMF 横幅单独出现、标记乱序都不算通过。
-  **（以上证据链已于 MSC 驱动落地后失效，见上方「现状」段。）**
+  `usb_msc: usba: N sectors, 512-byte blocks`（MSC 发布，且**先于**选盘行）→
+  `fs: boot scan first_disk=usba` → `fs: boot disk selected by GUID (usba),
+  root=usba2 boot=usba1 (/boot ok)` → shell 提示符 → 两个分区标记各自独立成行读回
+  → 再一个提示符。标记乱序、只用命令回显冒充标记、GUID 不符、缺任一段枚举或
+  选盘证据都不算通过。
 - **拓扑独立**：`qemutests/run_test.py` 的默认 argv 总会追加 AHCI 根盘，因此 runner
   通过共享构造器 `qemutests/harness/qemu_cmd.py::build_qemu_x86(storage="usb")`
   显式选择 USB 拓扑；唯一非 pflash 盘就是 `usbdisk`，没有 AHCI/virtio/隐式盘，
@@ -436,11 +441,9 @@ make test-monitor-host CASE=file      # 只跑指定子系统的用例
 - **已登记自动化 bucket**：`usb-boot` 已在生成的 suite catalog
   （`config/test-bridge.json` → `mk/generated/test-dispatch.mk`）中，并登记为 nightly
   （strict，`config/test-ci-schedule.json:199`）。六组子用例为 `readonly` / `dual` /
-  `ahci` / `persistence` / `superspeed` / `hub`（`mk/components/run.mk:1447`），
-  `USB_BOOT_CASE` 默认即 `readonly`（`:1225`）。**唯一遗留的过期断言是 `firmware` 子用例**
-  ——它仍断言 MSC 驱动落地前的预期失败 `[boot-3] FATAL stage=fs component=root rc=-19`
-  （`qemutests/usb_boot.py:78`），而 USB-only 引导现已走通到 shell；该用例已非默认路径，
-  也不在六组循环内，只可显式 opt-in。手动诊断可用
+  `ahci` / `persistence` / `superspeed` / `hub`（`mk/components/run.mk`），`USB_BOOT_CASE`
+  默认即 `readonly`。原 `firmware` 子用例已于 2026-11-22 退役（断言删除、case 表与
+  make 白名单同步收敛），不再有遗留的过期断言。手动诊断可用
   `make run-usb`（同样的 USB 拓扑 + 交互式 display/SMP/网络设置，或 OVMF 启动菜单）。
 - **xHCI 硬件支持范围（Hub 引导扩展）**：支持根端口直连与外置 USB Hub 级联枚举（深度 0–4、每 Hub 端口 1–15），目标盘为 BOT/SCSI LUN 0、512 字节逻辑扇区的 U 盘。支持 USB 2.0（FS / HS 单 TT，拒收 multi-TT alt0）与经核验的 SuperSpeed Gen1×1 Hub（校验协议段对称 5 Gb/s PSI 与标准 BOS 含 `0x0a` SuperSpeed Capability 且无 `0x0b` SuperSpeedPlus Capability；`0x2a` Hub 描述符后下发 `SET_HUB_DEPTH`；USB 2.0 同伴 Hub 独立枚举）。`HCCPARAMS1.AC64 == 0` 时所有 DMA 分配须位于 4 GiB 以下。关键诊断日志：`[xhci-hub] ready bdf=... root=... route=... slot=... protocol=usb2|usb3 ports=... ttt=...`、`[xhci] device bdf=... root=... route=... slot=... parent=... port=... speed=... speed_id=... iface=...`、`[xhci-msc] probing disk=...` / `[xhci-msc] disk=...` / `[xhci-msc] no-bot-interface` / `[xhci-msc] probe failed`。QEMU `hub` 用例（`usb-hub` 12 Mb/s）与 `superspeed`（直连）不能替代真机 HS TT 与 SS Hub 验收。
 - **profile 覆盖**：`PROFILE=<name>` 决定固件与镜像来源；只有具备 `rootfs` 能力的

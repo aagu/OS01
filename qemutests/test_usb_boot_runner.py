@@ -1,11 +1,13 @@
 #!/usr/bin/env python3
-"""Contract tests for the USB boot M0 firmware-gate runner.
+"""Contract tests for the USB boot gate runner.
 
-The gate proves one narrow thing: the profile OVMF loaded BOOTX64.EFI and
-kernel.bin from a USB-only qemu-xhci + usb-storage topology and the kernel
-reached device initialisation.  The stock kernel has no USB MSC driver, so
-it stops at ``fs_boot_mounts`` with ``rc=-19``; that FATAL line is the
-expected pass evidence, not a failure.
+The gate proves one chain: the profile OVMF loaded BOOTX64.EFI and
+kernel.bin from a USB-only qemu-xhci + usb-storage topology, the kernel
+enumerated the MSC interface, the MSC driver published the USB disk, and
+the kernel mounted the GUID-selected USB root.  The former M0 checkpoint
+asserted the *pre*-MSC-driver ``fs_boot_mounts`` ``rc=-19`` failure; that
+checkpoint was retired once the driver landed, and its positive
+xHCI-enumeration proof now rides on the readonly case.
 
 Run with::
 
@@ -24,6 +26,7 @@ import tempfile
 import time
 import unittest
 from unittest import mock
+import uuid
 
 TEST_MANIFEST = {
     "id": "test_usb_boot_runner",
@@ -42,31 +45,53 @@ from qemutests import usb_boot as ub
 
 
 # ── Serial fragments as the guest actually prints them ──────────────
-# The xHCI lines come from kernel/arch/x86_64/driver/xhci.c; the FATAL
-# line comes from kernel/core/boot_failure.c and ALWAYS continues with
-# phase=... cpu=... — the matcher must therefore use the stable prefix.
+# The xHCI lines come from kernel/arch/x86_64/driver/xhci.c; the MSC and
+# boot-scan lines come from kernel/driver/usb_msc.c and kernel/fs/boot.c.
 SPEED = "[xhci] port 1: connected, reset complete, speed=3\n"
 CONFIG = (
     "[xhci] slot 1: configured with config 1 "
     "(iface class 08:06, ep_count=2)\n"
 )
-FATAL_PREFIX = "[boot-3] FATAL stage=fs component=root rc=-19"
-FATAL = FATAL_PREFIX + "\n"
-FATAL_REAL = FATAL_PREFIX + " phase=-1 cpu=-1\n"
+MSC_USBA = "usb_msc: usba: 131072 sectors, 512-byte blocks\n"
+
+ESP_GUID = "11111111-2222-3333-4444-555555555555"
+OTHER_GUID = "99999999-8888-7777-6666-555555555555"
+
+# The runner derives its four partition markers from uuid4(); pin them so
+# the unit tests can build a matching serial stream.
+_MARKER_UUIDS = (
+    uuid.UUID(int=1),
+    uuid.UUID(int=2),
+    uuid.UUID(int=3),
+    uuid.UUID(int=4),
+)
+ROOT_MARKER = f"USB_ROOT_MARKER_{_MARKER_UUIDS[0].hex[:12]}"
+ESP_MARKER = f"USB_ESP_MARKER_{_MARKER_UUIDS[1].hex[:12]}"
 
 
-class FirmwareEvidenceTests(unittest.TestCase):
+def _readonly_stream(
+    guid: str = ESP_GUID,
+    root_marker: str = ROOT_MARKER,
+    esp_marker: str = ESP_MARKER,
+) -> str:
+    """A USB-only boot that satisfies the whole readonly evidence chain."""
+    return (
+        f"UEFI: ESP GUID={guid}\n"
+        + SPEED
+        + CONFIG
+        + MSC_USBA
+        + "fs: boot scan first_disk=usba candidates=1\n"
+        + "fs: boot disk selected by GUID (usba), root=usba2 boot=usba1 (/boot ok)\n"
+        + "# cat /usb-root.txt /boot/USBESP.TXT\n"
+        + f"{root_marker}\n"
+        + f"{esp_marker}\n"
+        + "# "
+    )
+
+
+class EnumerationEvidenceTests(unittest.TestCase):
     def test_positive_in_order(self) -> None:
-        self.assertTrue(ub.firmware_evidence(SPEED + CONFIG + FATAL))
-
-    def test_positive_with_real_trailing_fields(self) -> None:
-        # boot_failure_stop() appends phase=... cpu=...; a whole-line-only
-        # comparison would reject this real line.
-        self.assertNotEqual(FATAL_REAL.strip(), FATAL.strip())
-        self.assertTrue(ub.firmware_evidence(SPEED + CONFIG + FATAL_REAL))
-        self.assertTrue(
-            ub.firmware_evidence(SPEED + CONFIG + FATAL_PREFIX + " phase=3 cpu=2\n")
-        )
+        self.assertTrue(ub._xhci_enumeration_evidence(SPEED + CONFIG))
 
     def test_ovmf_only_text_is_not_evidence(self) -> None:
         ovmf = (
@@ -74,39 +99,20 @@ class FirmwareEvidenceTests(unittest.TestCase):
             "BdsDxe: starting Boot0001 \"UEFI QEMU HARDDISK\"\n"
             "UEFI Interactive Shell v2.2\n"
         )
-        self.assertFalse(ub.firmware_evidence(ovmf))
-
-    def test_fatal_rc_other_than_minus_19_is_not_evidence(self) -> None:
-        for rc in ("-2", "-5", "19", "-190", "-19x"):
-            line = f"[boot-3] FATAL stage=fs component=root rc={rc} phase=-1 cpu=-1\n"
-            with self.subTest(rc=rc):
-                self.assertFalse(ub.firmware_evidence(SPEED + CONFIG + line))
-
-    def test_fatal_stage_or_component_mismatch_is_not_evidence(self) -> None:
-        cases = [
-            "[boot-3] FATAL stage=fs component=boot rc=-19 phase=-1 cpu=-1\n",
-            "[boot-3] FATAL stage=tty component=root rc=-19 phase=-1 cpu=-1\n",
-        ]
-        for line in cases:
-            with self.subTest(line=line):
-                self.assertFalse(ub.firmware_evidence(SPEED + CONFIG + line))
+        self.assertFalse(ub._xhci_enumeration_evidence(ovmf))
 
     def test_markers_out_of_order_are_rejected(self) -> None:
-        self.assertFalse(ub.firmware_evidence(CONFIG + SPEED + FATAL))
-        self.assertFalse(ub.firmware_evidence(SPEED + FATAL + CONFIG))
-        self.assertFalse(ub.firmware_evidence(FATAL + SPEED + CONFIG))
+        self.assertFalse(ub._xhci_enumeration_evidence(CONFIG + SPEED))
 
     def test_speed_must_be_exactly_3(self) -> None:
         self.assertFalse(
-            ub.firmware_evidence(
-                "[xhci] port 1: connected, reset complete, speed=30\n"
-                + CONFIG
-                + FATAL
+            ub._xhci_enumeration_evidence(
+                "[xhci] port 1: connected, reset complete, speed=30\n" + CONFIG
             )
         )
 
     def test_empty_stream_is_not_evidence(self) -> None:
-        self.assertFalse(ub.firmware_evidence(""))
+        self.assertFalse(ub._xhci_enumeration_evidence(""))
 
 
 class UsbArgvTests(unittest.TestCase):
@@ -258,7 +264,7 @@ def _write_runner_args(
     *,
     firmware_exists: bool = True,
     disk_exists: bool = True,
-    case: str = "firmware",
+    case: str = "readonly",
     timeout: float = 5.0,
 ) -> argparse.Namespace:
     firmware = tmp / "firmware" / "OVMF.fd"
@@ -278,6 +284,16 @@ def _write_runner_args(
         log_dir=str(tmp / "run"),
         timeout=timeout,
     )
+
+
+def _fake_prepare_image(source, destination, root_marker, esp_marker):
+    """Stand-in for the real image preparation.
+
+    The unit tests never touch a real image; the runner only needs the
+    ESP GUID that prepare_image reports back.
+    """
+    Path(destination).write_bytes(b"prepared")
+    return uuid.UUID(ESP_GUID)
 
 
 class RunnerTests(unittest.TestCase):
@@ -303,11 +319,16 @@ class RunnerTests(unittest.TestCase):
             session.timeout_s = call_kwargs["timeout_s"]
             return session
 
-        rc = ub.run_case(args, session_factory=factory)
+        with mock.patch.object(
+            ub, "prepare_image", side_effect=_fake_prepare_image
+        ), mock.patch.object(
+            ub.uuid, "uuid4", side_effect=list(_MARKER_UUIDS)
+        ):
+            rc = ub.run_case(args, session_factory=factory)
         return rc, session, args, calls
 
-    def test_m0_evidence_passes_and_retains_artifacts(self) -> None:
-        stream = SPEED + CONFIG + FATAL_REAL
+    def test_readonly_evidence_passes_and_retains_artifacts(self) -> None:
+        stream = _readonly_stream()
         rc, session, args, calls = self._run(stream)
         self.assertEqual(rc, 0)
         self.assertEqual(len(calls), 1)
@@ -325,8 +346,10 @@ class RunnerTests(unittest.TestCase):
         )
         meta = json.loads((run_dir / "metadata.json").read_text())
         self.assertEqual(meta["result"], "PASS")
-        self.assertEqual(meta["case"], "firmware")
+        self.assertEqual(meta["case"], "readonly")
         self.assertEqual(meta["errors"], [])
+        # The retired M0 checkpoint must not come back.
+        self.assertNotIn("firmware", ub.CASES)
 
     def test_timeout_with_noisy_child_fails_without_extending_deadline(self) -> None:
         noise = "".join(f"spam line {i}\n" for i in range(20000))
@@ -381,6 +404,8 @@ class RunnerTests(unittest.TestCase):
         started = time.monotonic()
         with mock.patch.object(
             ub, "usb_argv", return_value=[sys.executable, "-c", "pass"]
+        ), mock.patch.object(
+            ub, "prepare_image", side_effect=_fake_prepare_image
         ):
             rc = ub.run_case(args)
         elapsed = time.monotonic() - started
@@ -488,7 +513,7 @@ class CliTests(unittest.TestCase):
     def test_parse_args_accepts_the_documented_cli(self) -> None:
         args = ub.parse_args(
             [
-                "--case", "firmware",
+                "--case", "readonly",
                 "--qemu", "qemu-system-x86_64",
                 "--firmware", "/fw/OVMF.fd",
                 "--disk", "/img/disk.img",
@@ -497,9 +522,22 @@ class CliTests(unittest.TestCase):
                 "--timeout", "120",
             ]
         )
-        self.assertEqual(args.case, "firmware")
+        self.assertEqual(args.case, "readonly")
         self.assertEqual(args.smp, 2)
         self.assertEqual(args.timeout, 120.0)
+
+    def test_parse_args_rejects_the_retired_firmware_case(self) -> None:
+        with self.assertRaises(SystemExit):
+            ub.parse_args(
+                [
+                    "--case", "firmware",
+                    "--qemu", "qemu-system-x86_64",
+                    "--firmware", "/fw/OVMF.fd",
+                    "--disk", "/img/disk.img",
+                    "--smp", "2",
+                    "--log-dir", "/logs/run",
+                ]
+            )
 
     def test_parse_args_default_timeout_is_120(self) -> None:
         args = ub.parse_args(
@@ -562,39 +600,73 @@ class ReadonlyCaseTests(unittest.TestCase):
         self.assertEqual(info["root_offset"], 3072 * 512)
         self.assertEqual(info["root_size"], (4061 - 3072 + 1) * 512)
 
-    def test_readonly_requires_partition_content(self) -> None:
-        root_marker = "USB_ROOT_MARKER_ALPHA"
-        esp_marker = "USB_ESP_MARKER_BETA"
+    def test_readonly_requires_the_whole_chain(self) -> None:
+        root_marker = ROOT_MARKER
+        esp_marker = ESP_MARKER
 
-        # 1. Prompt without both standalone marker lines fails
+        # 1. The full chain passes.
+        valid = _readonly_stream()
+        self.assertTrue(
+            ub.readonly_evidence(valid, ESP_GUID, root_marker, esp_marker)
+        )
+
+        # 2. Prompt without both standalone marker lines fails
         stream_no_markers = (
             "usb_msc: usba: 131072 sectors, 512-byte blocks\n"
             "# "
         )
         self.assertFalse(
-            ub.readonly_evidence(stream_no_markers, root_marker, esp_marker)
+            ub.readonly_evidence(
+                stream_no_markers, ESP_GUID, root_marker, esp_marker
+            )
         )
 
-        # 2. Input echo containing markers on the command line fails
+        # 3. Input echo containing markers on the command line fails
         stream_echo_only = (
             "usb_msc: usba: 131072 sectors, 512-byte blocks\n"
-            "# echo USB_ROOT_MARKER_ALPHA USB_ESP_MARKER_BETA\n"
+            f"# echo {root_marker} {esp_marker}\n"
             "# "
         )
         self.assertFalse(
-            ub.readonly_evidence(stream_echo_only, root_marker, esp_marker)
+            ub.readonly_evidence(
+                stream_echo_only, ESP_GUID, root_marker, esp_marker
+            )
         )
 
-        # 3. Valid sequence: usba log -> prompt -> both standalone marker lines -> fresh prompt
-        stream_valid = (
-            "usb_msc: usba: 131072 sectors, 512-byte blocks\n"
-            "# cat /usb-root.txt /boot/USBESP.TXT\n"
-            "USB_ROOT_MARKER_ALPHA\n"
-            "USB_ESP_MARKER_BETA\n"
-            "# "
+        # 4. The M0 enumeration proof is required: no xHCI lines, no pass.
+        self.assertFalse(
+            ub.readonly_evidence(
+                "\n".join(l for l in valid.splitlines() if not l.startswith("[xhci]"))
+                + "\n",
+                ESP_GUID,
+                root_marker,
+                esp_marker,
+            )
         )
-        self.assertTrue(
-            ub.readonly_evidence(stream_valid, root_marker, esp_marker)
+
+        # 5. The MSC publish must precede the GUID selection.
+        self.assertFalse(
+            ub.readonly_evidence(
+                valid.replace(MSC_USBA, ""), ESP_GUID, root_marker, esp_marker
+            )
+        )
+
+        # 6. The GUID-selected root mount is required.
+        self.assertFalse(
+            ub.readonly_evidence(
+                "\n".join(
+                    l for l in valid.splitlines() if "selected by GUID" not in l
+                )
+                + "\n",
+                ESP_GUID,
+                root_marker,
+                esp_marker,
+            )
+        )
+
+        # 7. A different ESP GUID fails.
+        self.assertFalse(
+            ub.readonly_evidence(valid, OTHER_GUID, root_marker, esp_marker)
         )
 
 

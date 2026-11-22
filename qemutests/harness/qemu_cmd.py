@@ -45,7 +45,7 @@ def build_qemu_x86(
     - ``"ahci"`` (default): the historical q35 AHCI or ``-machine pc``
       virtio-blk disk.
     - ``"usb"``: a USB-only topology (qemu-xhci + usb-storage) with no
-      implicit AHCI/IDE/virtio disk, used by the USB boot M0 gate.
+      implicit AHCI/IDE/virtio disk, used by the USB boot gate.
     - ``"dual"``: both USB (``bootindex=0``, readonly) and AHCI
       (``bootindex=1``, writable ``ahci_image``) attached.
     """
