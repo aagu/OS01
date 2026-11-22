@@ -134,7 +134,15 @@ class ApHandoffSourceContract(unittest.TestCase):
         self.assertIn('aarch64_idle_wait_irq', body)
         import re as _re
         no_comments = _re.sub(r'/\*.*?\*/', '', body, flags=_re.S)
-        self.assertNotIn('wfi', no_comments)
+        # Guard the INSTRUCTION, not every identifier that happens to
+        # contain the letters "wfi" (e.g. the migration telemetry hook
+        # aarch64_user_mig_idle_pre_wfi).  Word boundaries keep an
+        # inline `wfi` (asm string or mnemonic) fatal while leaving
+        # legitimate helper names alone.
+        self.assertIsNone(
+            _re.search(r'\bwfi\b', no_comments),
+            "inline wfi found in the aarch64 idle C file: the idle must "
+            "sleep through the audited aarch64_idle_wait_irq helper")
         # The wait helper is entered only AFTER the rq_lock release.
         step = body.split('void arch_aarch64_idle_step', 1)[1]
         step = step.split('\n}', 1)[0]

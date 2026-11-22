@@ -470,8 +470,34 @@ class BuildContractStatic(unittest.TestCase):
         km = _read("kernel/Makefile")
         self.assertIn("KERNEL_BOOT2_FIXTURE_C_SOURCES", km)
         self.assertIn("selftest/boot_irq_time_fixture.c", km)
-        self.assertIn("selftest/boot_irq_time_fixture.c,",
-                      km)  # filtered out of the selftest wildcard
+        # The fixture must be EXCLUDED from the selftest wildcard: it has
+        # to be an entry of the $(filter-out ...) list that guards
+        # $(wildcard selftest/*.c).  GNU make separates the patterns with
+        # whitespace and the list wraps over several lines, so the guard
+        # checks list membership instead of one exact source line (the
+        # fixture is no longer the last entry of that list).
+        excluded = self._filter_out_entries(km, "selftest/*.c")
+        self.assertIn("selftest/boot_irq_time_fixture.c", excluded,
+                      "boot_irq_time_fixture.c must stay filtered out of "
+                      "the selftest wildcard: the normal build must never "
+                      "link the boot-irq-time fixture")
+
+    @staticmethod
+    def _filter_out_entries(makefile_text: str, wildcard: str) -> set[str]:
+        """Patterns of the $(filter-out ...) list guarding $(wildcard ...).
+
+        The body of the filter-out call must not contain a nested make
+        call ("$"), so a match always belongs to the filter-out that
+        actually guards the requested wildcard.
+        """
+        entries: set[str] = set()
+        pattern = re.compile(
+            r"\$\(filter-out\s+(?P<body>[^$]*?),\s*\$\(wildcard\s+"
+            + re.escape(wildcard) + r"\s*\)\s*\)")
+        for match in pattern.finditer(makefile_text):
+            body = re.sub(r"\\\s*\n", " ", match.group("body"))
+            entries.update(body.split())
+        return entries
 
     def test_entry_s_test_tail_gated(self) -> None:
         text = _read("kernel/arch/x86_64/intr/entry.S")
