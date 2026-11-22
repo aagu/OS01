@@ -8738,6 +8738,31 @@
     "action": "unique",
     "reason": "Host unit and sparse-PTE boundary verification of x86_64 mmap ASLR derivation and gap/ceiling invariants"
    }
+  },
+  {
+   "id": "memory.aslr.x86_exec",
+   "owner": "host",
+   "component": "memory",
+   "behavior": "aslr",
+   "trigger": "make PROFILE=x86_64-clang test-host",
+   "assertions": [
+    "spawn_user_task and sys_exec call kernel_random_get_strong independently for mmap_base and AT_RANDOM",
+    "STRONG entropy failure on either call fails closed with -EAGAIN, zero task publication, full rollback, and old_mm preservation without arch_switch_mm"
+   ],
+   "failure_modes": [
+    "Shared entropy with AT_RANDOM, silent fallback to 0x40000000, leaked unpublished mm/thread/fpu/files, or corrupted current->mm on failed sys_exec"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_x86_aslr_exec.c",
+    "selector": "test_x86_aslr_exec",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Host integration test verifying spawn_user_task and sys_exec ASLR wiring, rollback ledger, and old_mm preservation"
+   }
   }
  ]
 }

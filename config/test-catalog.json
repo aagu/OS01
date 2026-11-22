@@ -5323,6 +5323,18 @@
       }
     },
     {
+      "id": "test_x86_aslr_exec",
+      "layer": "host",
+      "subsystem": "sched",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [
+        "memory.aslr.x86_exec"
+      ],
+      "source": "hosttests/cases/test_x86_aslr_exec.c"
+    },
+    {
       "id": "test_x86_aslr_mmap",
       "layer": "host",
       "subsystem": "memory",

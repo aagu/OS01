@@ -137,7 +137,7 @@ void *arch_this_cpu_ptr(void) { return &percpu_data[0]; }
 
 int arch_auxv_platform(void *buf, size_t max) { (void)buf; (void)max; return 0; }
 size_t arch_auxv_payload_size(void) { return 0; }
-int kernel_random_get_strong(void *buf, size_t n) { memset(buf, 0, n); return 0; }
+bool kernel_random_get_strong(uint8_t out[32]) { memset(out, 0, 32); return false; }
 void arch_cpu_halt(void) { abort(); }
 
 int g_log_level = 0;

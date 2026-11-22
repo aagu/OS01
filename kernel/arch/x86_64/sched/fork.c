@@ -23,6 +23,7 @@
 #include <kernel.h>
 #include <arch/x86_64/vmm.h>
 #include <arch/x86_64/vma.h>
+#include <arch/x86_64/user_layout.h>
 
 // The pinned-kernel-service pre-publication channel moved to
 // kernel_thread_on_cpu() in kernel/sched/kthread.c: the common
@@ -506,7 +507,7 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
 
     if ((regs->cs & 3) == 3) {
         tsk->flags &= ~PF_KTHREAD;
-        tsk->addr_limit = 0x00007FFFFFFFFFFF;
+        tsk->addr_limit = X86_USER_ADDR_LIMIT;
         if (!current->mm || !current->mm->pgdir) {
             /* A user fork requires a valid, exclusive parent root —
              * there is no shared-mm fallback anymore. */

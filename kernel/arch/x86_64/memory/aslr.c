@@ -1,6 +1,7 @@
 #include <arch/x86_64/aslr.h>
 #include <arch/x86_64/user_layout.h>
 #include <random/random.h>
+#include <sched/task.h>
 #include <errno.h>
 #include <stddef.h>
 #include <stdint.h>

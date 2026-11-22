@@ -685,6 +685,7 @@ $(TEST_BLD)/test_boot_services_vfs.elf: \
 		$(TEST_BLD)/serial_sink_stub.o \
 		$(TEST_BLD)/rwlock.o \
 		$(TEST_BLD)/boot3_exec_production.o \
+		$(TEST_BLD)/boot3_aslr_production.o \
 		$(LIBC_OBJS) $(MOCK_OBJS)
 	$(HOST_CC) -Wl,--gc-sections -Wl,--wrap=vfs_lookup -lpthread -o $@ $^
 

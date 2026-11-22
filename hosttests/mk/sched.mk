@@ -936,13 +936,18 @@ $(TEST_BLD)/boot3_exec_production.o: $(TESTS_DIR)/kernel/arch/x86_64/sched/exec.
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
 
+$(TEST_BLD)/boot3_aslr_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/aslr.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
+
 $(TEST_BLD)/boot3_test_spawn_failure.o: $(TEST_CASES)/test_boot_spawn_failure.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(BOOT3_HOST_CFLAGS) -c $< -o $@
 
 $(TEST_BLD)/test_boot_spawn_failure.elf: \
 		$(TEST_BLD)/boot3_test_spawn_failure.o \
-		$(TEST_BLD)/boot3_exec_production.o
+		$(TEST_BLD)/boot3_exec_production.o \
+		$(TEST_BLD)/boot3_aslr_production.o
 	$(HOST_CC) -Wl,--gc-sections -o $@ $^
 
 .PHONY: test_boot_spawn_failure
@@ -1000,9 +1005,41 @@ $(TEST_BLD)/test_boot_services_spawn.o: $(TEST_CASES)/test_boot_services_spawn.c
 $(TEST_BLD)/test_boot_services_spawn.elf: \
 		$(TEST_BLD)/test_boot_services_spawn.o \
 		$(TEST_BLD)/boot3_exec_production.o \
+		$(TEST_BLD)/boot3_aslr_production.o \
 		$(TEST_BLD)/boot5_balance_production.o \
 		$(TEST_BLD)/boot5_boot_production.o
 	$(HOST_CC) -Wl,--gc-sections -Wl,--wrap=sched_notify_remote -Wl,--wrap=malloc -Wl,--wrap=calloc -o $@ $^
+
+# x86_64 ASLR spawn/exec integration tests (isolated non-privileged mmu.h mock)
+ASLR_EXEC_HOST_CFLAGS := -I$(TEST_MOCK)/aslr_exec $(BOOT3_HOST_CFLAGS)
+
+$(TEST_BLD)/aslr_exec_exec_production.o: $(TESTS_DIR)/kernel/arch/x86_64/sched/exec.c \
+		$(TEST_MOCK)/aslr_exec/arch/x86_64/mmu.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ASLR_EXEC_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
+
+$(TEST_BLD)/aslr_exec_aslr_production.o: $(TESTS_DIR)/kernel/arch/x86_64/memory/aslr.c \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/aslr.h \
+		$(TESTS_DIR)/kernel/include/arch/x86_64/user_layout.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ASLR_EXEC_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
+
+$(TEST_BLD)/aslr_exec_mm_production.o: $(TESTS_DIR)/kernel/memory/mm.c \
+		$(TESTS_DIR)/kernel/include/memory/mm.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ASLR_EXEC_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
+
+$(TEST_BLD)/test_x86_aslr_exec.o: $(TEST_CASES)/test_x86_aslr_exec.c \
+		$(TEST_MOCK)/aslr_exec/arch/x86_64/mmu.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ASLR_EXEC_HOST_CFLAGS) -I$(TEST_INC) -c $< -o $@
+
+$(TEST_BLD)/test_x86_aslr_exec.elf: \
+		$(TEST_BLD)/test_x86_aslr_exec.o \
+		$(TEST_BLD)/aslr_exec_exec_production.o \
+		$(TEST_BLD)/aslr_exec_aslr_production.o \
+		$(TEST_BLD)/aslr_exec_mm_production.o
+	$(HOST_CC) -Wl,--gc-sections -Wl,--wrap=malloc -Wl,--wrap=calloc -o $@ $^
 
 $(TEST_BLD)/test_boot_services_sequence.o: $(TEST_CASES)/test_boot_services_sequence.c
 	@mkdir -p $(TEST_BLD)

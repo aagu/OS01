@@ -34,6 +34,7 @@
 #include <arch/x86_64/vma.h>
 
 #include <arch/x86_64/user_layout.h>  // X86_USER_MIN_ADDR / stack window
+#include <arch/x86_64/aslr.h>
 // Matches kernel/arch/x86_64/intr/trap.c — the user VA envelope is
 
 // ── FPU helper ──────────────────────────────────────────────
@@ -424,7 +425,7 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
 
     tsk->state = TASK_UNINTERRUPTIBLE;
     tsk->flags = 0;                        // NOT PF_KTHREAD → user task
-    tsk->addr_limit = 0x00007FFFFFFFFFFF;
+    tsk->addr_limit = X86_USER_ADDR_LIMIT;
     tsk->pid = alloc_pid();
     tsk->blocked = 0;                        // child starts with empty blocked mask
     tsk->counter = 1;
@@ -509,6 +510,18 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
         kfree(thd);
         kfree(raw_alloc);
         return -1;
+    }
+
+    int aslr_rc = x86_aslr_init_mmap_base(mm);
+    if (aslr_rc != 0) {
+        debug_task("spawn: ASLR mmap_base init failed (%d) for '%s'\n", aslr_rc, path);
+        if (tsk->files) { files_unpin(tsk->files); tsk->files = NULL; }
+        if (tsk->fpu_save) kfree(tsk->fpu_save);
+        destroy_unpublished_user_mm(mm);
+        kfree(mm);
+        kfree(thd);
+        kfree(raw_alloc);
+        return aslr_rc;
     }
 
     // 6. Map the user stack page (separate 2MB page at 0x600000)
@@ -702,6 +715,13 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
         destroy_unpublished_user_mm(new_mm);
         kfree(new_mm);
         return -ENOMEM;
+    }
+
+    int aslr_rc = x86_aslr_init_mmap_base(new_mm);
+    if (aslr_rc != 0) {
+        destroy_unpublished_user_mm(new_mm);
+        kfree(new_mm);
+        return aslr_rc;
     }
 
     // 6. Map the user stack page

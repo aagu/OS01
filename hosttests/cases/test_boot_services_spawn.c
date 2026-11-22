@@ -203,7 +203,7 @@ void kfree(void *p)
 
 mm_t *mm_alloc(void)
 {
-    g_last_mm = __real_calloc(1, 128);
+    g_last_mm = __real_calloc(1, sizeof(mm_t));
     return (mm_t *)g_last_mm;
 }
 
@@ -239,9 +239,9 @@ const char *task_basename(const char *path) { return path; }
 
 int arch_auxv_platform(void *buf, size_t max) { (void)buf; (void)max; return 0; }
 size_t arch_auxv_payload_size(void) { return 0; }
-bool kernel_random_get_strong(void *buf)
+bool kernel_random_get_strong(uint8_t out[32])
 {
-    memset(buf, 0, 32);
+    memset(out, 0, 32);
     if (inject_locked_recheck_fail_cpu >= 0 && inject_locked_recheck_fail_cpu < NR_CPUS) {
         percpu_data[inject_locked_recheck_fail_cpu].scheduler_ok = 0;
         percpu_data[inject_locked_recheck_fail_cpu].online = 0;
@@ -403,7 +403,7 @@ static void test_locked_recheck_failure(void)
     percpu_data[1].online = 1;
     percpu_data[1].scheduler_ok = 1;
 
-    /* Simulate race: clear eligibility during setup_user_stack right before locked recheck */
+    /* Simulate race: clear eligibility during x86_aslr_init_mmap_base / setup_user_stack before locked recheck */
     inject_locked_recheck_fail_cpu = 1;
 
     int64_t ret = spawn_user_task("/bin/init", NULL);
