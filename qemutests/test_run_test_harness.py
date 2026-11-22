@@ -1217,6 +1217,8 @@ class GfxSuiteTests(unittest.TestCase):
         b"OS01 boot ... done\n",
         b"login: root\n",
         b"# ",
+        b"/bin/busybox printf '%s%s\\n' OS01-PIE- APPLET-OK\n",
+        b"OS01-PIE-APPLET-OK\n",
         b"[GFX TEST] PASS\n",
         b"/bin/tetris smoke\n",
         b"[TETRIS] SMOKE PASS\n",
@@ -1243,6 +1245,8 @@ class GfxSuiteTests(unittest.TestCase):
 
     CHUNKS_LATE_PANIC = [
         b"# ",
+        b"/bin/busybox printf '%s%s\\n' OS01-PIE- APPLET-OK\n",
+        b"OS01-PIE-APPLET-OK\n",
         b"[GFX TEST] PASS\n",
         b"[TETRIS] SMOKE PASS\n",
         b"[TERM SCREEN TEST] PASS\n",

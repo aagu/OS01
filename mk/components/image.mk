@@ -164,7 +164,7 @@ $(ROOTFS_INPUTS_STAMP): FORCE
 	@cmp -s $@.tmp $@ && rm -f $@.tmp || mv $@.tmp $@
 
 ROOTFS_MANIFEST_DEPS := $(ROOTFS_INPUTS_STAMP) $(OS01_ROOT)/config/rootfs.mk \
-		$(USER_ARTIFACTS) $(USER_ARTIFACT_DIR)/busybox.elf \
+		$(USER_ARTIFACTS) $(USER_ASLR_B_EXEC_FIXTURE) $(USER_ARTIFACT_DIR)/busybox.elf \
 		$(KERNEL_ARTIFACT) $(INITTAB_FILE) \
 		$(if $(filter 4,$(DOOM_ASSET_COUNT)),$(DOOM_ASSET_STAMP)) \
 		$(if $(filter doom,$(ROOTFS_USER_PROGRAMS)),$(DOOM_NOTICE_STAMP))

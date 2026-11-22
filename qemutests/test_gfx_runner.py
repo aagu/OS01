@@ -233,6 +233,8 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
             b"OS01 boot ... done\n"
             b"login: root\n"
             b"# "                                       # prompt
+            b"/bin/busybox printf '%s%s\\n' OS01-PIE- APPLET-OK\r\n"
+            b"OS01-PIE-APPLET-OK\r\n"
             b"[GFX TEST] PASS\n"
             b"/bin/tetris smoke\n"
             b"[TETRIS] SMOKE PASS\n"
@@ -246,6 +248,7 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
             ok = self.runner_mod.test_gfx(tester)
             self.assertTrue(ok)
             # Verify the command was sent.
+            self.assertIn("/bin/busybox printf '%s%s\\n' OS01-PIE- APPLET-OK", tester.process.sent_text())
             self.assertIn("/bin/test_gfx", tester.process.sent_text())
             self.assertIn("/bin/tetris smoke", tester.process.sent_text())
             self.assertIn(
@@ -259,7 +262,7 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
 
         tester = self._make_tester()
         self._stage_chunks(
-            b"OS01 boot ... done\n# [GFX TEST] FAIL: white-diagonal mismatch\n",
+            b"OS01 boot ... done\n# OS01-PIE-APPLET-OK\n[GFX TEST] FAIL: white-diagonal mismatch\n",
         )
         try:
             tester.start_qemu(serial_stdio=True)
@@ -285,6 +288,7 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
             b"OS01 boot ... done\n"
             b"login: root\n"
             b"# "
+            b"OS01-PIE-APPLET-OK\n"
             b"[GFX TEST] PASS\n"
             b"[TERM SCREEN TEST] PASS\n"
             b"[DESKTOP] SMOKE PASS\n",
@@ -314,6 +318,7 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
             b"OS01 boot ... done\n"
             b"login: root\n"
             b"# "
+            b"OS01-PIE-APPLET-OK\n"
             b"[GFX TEST] PASS\n"
             b"[TETRIS] SMOKE PASS\n"
             b"[DESKTOP] SMOKE PASS\n",
@@ -341,6 +346,7 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
             b"OS01 boot ... done\n"
             b"login: root\n"
             b"# "
+            b"OS01-PIE-APPLET-OK\n"
             b"[GFX TEST] PASS\n"
             b"[TETRIS] SMOKE PASS\n"
             b"[TERM SCREEN TEST] PASS\n",
@@ -361,6 +367,7 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
             b"OS01 boot ... done\n"
             b"login: root\n"
             b"# "
+            b"OS01-PIE-APPLET-OK\n"
             b"[GFX TEST] PASS\n"
             b"[TETRIS] SMOKE PASS\n"
             b"[TERM SCREEN TEST] PASS\n"
@@ -369,6 +376,45 @@ class GfxRunnerShellFlowTests(unittest.TestCase):
         try:
             tester.start_qemu(serial_stdio=True)
             self.assertTrue(self.runner_mod.test_gfx(tester))
+        finally:
+            tester.cleanup()
+
+    def test_gfx_suite_rejects_echo_only_without_pie_applet_line(self) -> None:
+        """Echo of the printf command without standalone OS01-PIE-APPLET-OK line fails."""
+
+        tester = self._make_tester()
+        self._stage_chunks(
+            b"OS01 boot ... done\n"
+            b"login: root\n"
+            b"# "
+            b"/bin/busybox printf '%s%s\\n' OS01-PIE- APPLET-OK\r\n"
+            b"[GFX TEST] PASS\n"
+            b"[TETRIS] SMOKE PASS\n"
+            b"[TERM SCREEN TEST] PASS\n"
+            b"[DESKTOP] SMOKE PASS\n",
+        )
+        try:
+            tester.start_qemu(serial_stdio=True)
+            self.assertFalse(self.runner_mod.test_gfx(tester))
+        finally:
+            tester.cleanup()
+
+    def test_gfx_suite_rejects_missing_pie_applet_line(self) -> None:
+        """Missing OS01-PIE-APPLET-OK line fails even when later markers appear."""
+
+        tester = self._make_tester()
+        self._stage_chunks(
+            b"OS01 boot ... done\n"
+            b"login: root\n"
+            b"# "
+            b"[GFX TEST] PASS\n"
+            b"[TETRIS] SMOKE PASS\n"
+            b"[TERM SCREEN TEST] PASS\n"
+            b"[DESKTOP] SMOKE PASS\n",
+        )
+        try:
+            tester.start_qemu(serial_stdio=True)
+            self.assertFalse(self.runner_mod.test_gfx(tester))
         finally:
             tester.cleanup()
 

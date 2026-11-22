@@ -433,6 +433,12 @@ On x86_64 user address spaces (`spawn_user_task()` and `sys_exec()`), `mm->mmap_
 - **Window & entropy width (`kernel/include/arch/x86_64/user_layout.h`)**: 28-bit page-granular window `[X86_USER_MMAP_RND_BASE, X86_USER_MMAP_RND_END)` = `[0x0000400000000000, 0x0000410000000000)` (64 TiB..65 TiB, 1 TiB span, `2^28` 4 KiB slots).
 - **STRONG-only fail-closed**: `x86_aslr_init_mmap_base()` calls `kernel_random_get_strong()` independently of `AT_RANDOM` and wipes the 32-byte stack buffer on both success and failure paths. When STRONG entropy is unavailable, it preserves `mm->mmap_base` and returns `-EAGAIN` (no silent fallback to `0x40000000` or WEAK entropy).
 - **`fork()` inheritance**: `mm_alloc()` keeps the deterministic `0x40000000` default for dual-arch parity; `fork_mm_copy()` inherits `parent_mm->mmap_base` without consuming entropy.
+
+## x86_64 Static PIE ASLR (ASLR-B)
+
+- **Zero-linked static PIE**: Default x86_64 userland ELFs and BusyBox are linked at base `0` with `libc/arch/x86_64/user-pie.ld` (`ET_DYN` + `DF_1_PIE`, `R_X86_64_RELATIVE`-only relocations, `-z text -z norelro --pack-dyn-relocs=none`). `ET_EXEC` compatibility is preserved for standalone fixtures (`aslr_b_exec.S`) and `aarch64` remains `ET_EXEC`.
+- **Two-phase validation & per-page relocation**: `x86_elf_pie_prepare()` (`kernel/arch/x86_64/fs/elf_pie.c`) validates the `ET_DYN` header, `PT_LOAD` geometry (`<= X86_USER_PIE_LINK_END = 0x02000000`), forbidden headers (`PT_INTERP`/`PT_TLS`/`PT_GNU_RELRO`/exec `PT_GNU_STACK`), `PT_DYNAMIC` allowlist, and `R_X86_64_RELATIVE` records before any page allocation. `elf_load()` draws `pie_bias = 0x00400000 + ((raw & 0xffff) << 12)` in `[0x00400000, 0x10400000)` via `x86_aslr_get_pie_bias()`, maps each 4 KiB page directly, and applies cross-page `R_X86_64_RELATIVE` relocations per page without extra writable copies.
+- **3-stage RNG & auxv ABI**: PIE bias, `mmap_base`, and `AT_RANDOM` each call `kernel_random_get_strong()` independently and fail closed with `-EAGAIN` on entropy failure without leaking pages or mutating the caller's `mm` on `sys_exec` failure. `setup_user_stack()` emits the 9-pair PIE auxv (`AT_PHDR`, `AT_PHENT`, `AT_PHNUM`, `AT_ENTRY`, `AT_BASE=0`, `AT_PAGESZ`, `AT_PLATFORM`, `AT_RANDOM`, `AT_NULL`).
 - **Window, gap-search & ceiling (`kernel/arch/x86_64/memory/mmap.c`)**:
   - `mmap_effective_limit(addr_limit)` clamps `addr_limit & PAGE_4K_MASK` to `X86_USER_MMAP_MAX_ADDR` (`0x00007FFFFFFFF000ULL`), reserving the top canonical guard page `[0x00007FFFFFFFF000, 0x0000800000000000)` and rejecting non-canonical ranges (`do_mmap` returns `-ENOMEM`, `do_munmap`/`do_mprotect` return `-EINVAL`).
   - `MAP_FIXED` at `addr == 0` (or below `X86_USER_MIN_ADDR`) is rejected with `-EINVAL`.
@@ -448,7 +454,7 @@ On x86_64 user address spaces (`spawn_user_task()` and `sys_exec()`), `mm->mmap_
 | `kernel/arch/x86_64/memory/vma.c` | x86 VMA 节点销毁（`x86_vma_destroy_node`）、fork 元数据复制（`fork_vma_copy`）、退休/未安装根清理（`vma_free_all`） |
 | `kernel/arch/x86_64/memory/brk.c` | `mm_init_user_heap`、`mm_set_brk`（成功安装 VA 日志；失败两轮撤销：就地取旧描述符 → 本地同步 → 释放） |
 | `kernel/arch/x86_64/memory/mmap.c` | `do_mmap`, `do_munmap`, `do_mprotect`, `mmap_effective_limit`, `mmap_find_gap_locked`, `mm_user_range_protected` |
-| `kernel/arch/x86_64/memory/aslr.c` | `x86_aslr_derive_mmap_base`, `x86_aslr_init_mmap_base` (x86_64 STRONG-only fail-closed `mmap_base` ASLR) |
+| `kernel/arch/x86_64/memory/aslr.c` | `x86_aslr_derive_mmap_base`, `x86_aslr_init_mmap_base`, `x86_aslr_get_pie_bias` (x86_64 STRONG-only fail-closed ASLR) |
 | `kernel/arch/x86_64/memory/vmm.c` | x86 raw 页表 API + COW-aware teardown + 双 walker（`arch_virt_to_phys` / `arch_user_range_accessible`） |
 | `kernel/arch/aarch64/memory/user_vm_policy.c` | aarch64 匿名 VM 策略：按需缺页、stash、`user_vm_clone_fork`、`user_vm_cow_fault`、`prepare_copy` |
 | `kernel/memory/vm_area.c` | 双架构共享的 VMA 列表原语 |
@@ -458,7 +464,8 @@ On x86_64 user address spaces (`spawn_user_task()` and `sys_exec()`), `mm->mmap_
 | `kernel/arch/aarch64/memory/user_vm_fork.c` | aarch64 fork 事务（clone 阶段与精确回滚） |
 | `kernel/arch/aarch64/memory/user_mm.c` | `aarch64_user_mm_create` / `aarch64_user_mm_destroy`：mm 拥有的私有用户根 |
 | `kernel/arch/aarch64/memory/vmm_backend.c` | `aarch64_user_vm_replace_cow`：受检 COW 换 PA 后端入口 |
-| `kernel/arch/x86_64/fs/elf.c` | 4KB per-page ELF image loader and `elf_layout_validate` (x86-only) |
+| `kernel/arch/x86_64/fs/elf.c` | 4KB per-page ELF image loader (`ET_EXEC` + `ET_DYN` static PIE) and `elf_layout_validate` (x86-only) |
+| `kernel/arch/x86_64/fs/elf_pie.c` | `x86_elf_pie_prepare`, `x86_elf_pie_dispose`, `R_X86_64_RELATIVE` relocation validator |
 | `kernel/sched/task.c` | `fork_mm_copy` (page table walk + COW install), `do_fork`, staged spawn/exec image lifecycle |
 | `kernel/arch/x86_64/intr/trap.c` | `do_page_fault` COW resolution and heap guard, `do_system_call` dispatch for `SYS_mmap/mprotect/munmap/brk` |
 | `kernel/include/arch/x86_64/pte.h` | `PAGE_COW`, `PAGE_PROTNONE`, x86 PTE 描述符位 |

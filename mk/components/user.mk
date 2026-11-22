@@ -26,13 +26,14 @@ USER_ARTIFACTS := $(addprefix $(USER_ARTIFACT_DIR)/,$(addsuffix .elf,$(USER_PROG
 # sub-make from runtime/selftest/user_udivti3_link_probe.c and published
 # beside the other user artifacts.  test-monitor-runtime consumes it.
 USER_RUNTIME_PROBE := $(USER_ARTIFACT_DIR)/user_udivti3_link_probe.elf
+USER_ASLR_B_EXEC_FIXTURE := $(if $(and $(filter 1,$(OS01_SYSTEST)),$(filter x86_64-unknown-none,$(RUNTIME_TARGET_user))),$(USER_ARTIFACT_DIR)/aslr_b_exec.elf)
 
 # One grouped rule (GNU make &:, runs once per invocation): under the
 # generation lease the sub-make builds every program into $(USER_BUILD_DIR),
 # then each program ELF is copied into the artifact dir and verified. The
 # copy/verify lines are separate recipe lines (not part of the + shell), so a
 # dry run (-n) never touches the artifacts.
-$(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)&: $(SYSROOT_STAMP) $(USER_RUNTIME_PREREQ) FORCE
+$(USER_ARTIFACTS) $(USER_RUNTIME_PROBE) $(USER_ASLR_B_EXEC_FIXTURE)&: $(SYSROOT_STAMP) $(USER_RUNTIME_PREREQ) FORCE
 	@mkdir -p $(dir $(firstword $(USER_ARTIFACTS))) $(USER_BUILD_DIR)
 	@+$(SHELL) -ec '\
 	  if [ -n "$(DRY_RUN)" ]; then \
@@ -60,6 +61,10 @@ $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE)&: $(SYSROOT_STAMP) $(USER_RUNTIME_PREREQ
 	  done; \
 	  cmp -s "$(USER_BUILD_DIR)/user_udivti3_link_probe.elf" "$(USER_RUNTIME_PROBE)" || cp "$(USER_BUILD_DIR)/user_udivti3_link_probe.elf" "$(USER_RUNTIME_PROBE)"; \
 	  test -f "$(USER_RUNTIME_PROBE)" || { echo "ERROR: missing user runtime probe artifact $(USER_RUNTIME_PROBE)"; exit 1; }; \
+	  if [ -n "$(USER_ASLR_B_EXEC_FIXTURE)" ]; then \
+	    cmp -s "$(USER_BUILD_DIR)/aslr_b_exec.elf" "$(USER_ASLR_B_EXEC_FIXTURE)" || cp "$(USER_BUILD_DIR)/aslr_b_exec.elf" "$(USER_ASLR_B_EXEC_FIXTURE)"; \
+	    test -f "$(USER_ASLR_B_EXEC_FIXTURE)" || { echo "ERROR: missing aslr_b_exec fixture $(USER_ASLR_B_EXEC_FIXTURE)"; exit 1; }; \
+	  fi; \
 	  test -f "$(USER_BUILD_DIR)/obj/doom-engine/libdoom-engine.a" || { \
 	    echo "ERROR: missing the doom engine archive (D03)"; \
 	    echo "       Expected: $(USER_BUILD_DIR)/obj/doom-engine/libdoom-engine.a"; \

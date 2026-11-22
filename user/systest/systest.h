@@ -67,6 +67,8 @@ void test_access(void);
 void test_aslr_mmap_exec_randomized(void);
 void test_aslr_mmap_fixed_and_bounds(void);
 void test_aslr_mmap_fork_inherit(void);
+void test_aslr_pie(void);
+void aslr_pie_probe(int argc, char **argv);
 void test_atexit_lifecycle(void);
 void test_boot_fat_mount(void);
 void test_brk(void);

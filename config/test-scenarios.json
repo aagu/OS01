@@ -8901,6 +8901,95 @@
     "action": "unique",
     "reason": "Userspace E2E verification of MAP_FIXED, canonical ceiling, /proc/self/maps, and non-wrap bounds"
    }
+  },
+  {
+   "id": "memory.aslr.pie_loader_host",
+   "owner": "host",
+   "component": "memory",
+   "behavior": "aslr",
+   "trigger": "make PROFILE=x86_64-clang test-host",
+   "assertions": [
+    "x86_elf_pie_prepare and elf_load validate static PIE headers, DF_1_PIE, R_X86_64_RELATIVE-only relocations, page permissions, and bias in [0x00400000, 0x10400000)",
+    "3-stage RNG failure returns -EAGAIN cleanly without leaking allocated frames, and malformed PIE images return -ENOEXEC"
+   ],
+   "failure_modes": [
+    "PIE loader accepting non-PIE or W+X segments, misapplying R_X86_64_RELATIVE addends, or leaking pages on -EAGAIN"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_elf_load_4k.c",
+    "selector": "test_elf_load_4k",
+    "evidence": "HOSTTEST_PASS"
+   },
+   "supporting": [
+    {
+     "layer": "host",
+     "source": "hosttests/cases/test_x86_aslr_exec.c",
+     "selector": "test_x86_aslr_exec",
+     "evidence": "HOSTTEST_PASS"
+    }
+   ],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Host-level fault injection of ELF PIE validation, per-page relocation, and staged RNG -EAGAIN without QEMU"
+   }
+  },
+  {
+   "id": "memory.aslr.pie_guest_systest",
+   "owner": "systest",
+   "component": "memory",
+   "behavior": "aslr",
+   "trigger": "make PROFILE=x86_64-clang OS01_SYSTEST=1 test-syscall",
+   "assertions": [
+    "8 sequential fork+exec runs of pie-probe verify R_X86_64_RELATIVE relocations, ET_DYN ELF header/PHDRs, auxv (AT_ENTRY == &_start, AT_PHENT, AT_PHNUM, AT_PAGESZ, AT_PLATFORM, AT_RANDOM, AT_NULL, AT_BASE==0/errno==0), fork COW isolation, and >=7 unique biases in [0x00400000, 0x10400000)",
+    "standalone ET_EXEC fixture /bin/aslr_b_exec executes at fixed 0x400000 and exits 73"
+   ],
+   "failure_modes": [
+    "PIE bias not randomized across exec, auxv mismatch, relocation corruption, or ET_EXEC compatibility regression"
+   ],
+   "primary": {
+    "layer": "systest",
+    "source": "user/systest/test_mem.c",
+    "selector": "aslr_pie",
+    "evidence": "SYSTEST_PASS"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "retain",
+    "reason": "Real hardware/QEMU user-mode execution of relocated static PIE, auxv stack ABI, and ET_EXEC compat fixture cannot be substituted by host mocks"
+   }
+  },
+  {
+   "id": "memory.aslr.pie_busybox_gfx",
+   "owner": "qemu_e2e",
+   "component": "memory",
+   "behavior": "aslr",
+   "trigger": "make PROFILE=x86_64-clang test-qemu SUITE=gfx",
+   "assertions": [
+    "BusyBox static PIE applet executes '/bin/busybox printf' in ash and emits standalone OS01-PIE-APPLET-OK line before GFX/Tetris/Terminal/Desktop smoke checks"
+   ],
+   "failure_modes": [
+    "BusyBox static PIE crash on startup/relocation or runner accepting command echo instead of standalone output line"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/run_test.py",
+    "selector": "gfx",
+    "evidence": "QEMU_PASS"
+   },
+   "supporting": [
+    {
+     "layer": "host",
+     "source": "qemutests/test_gfx_runner.py",
+     "selector": "test_gfx_runner",
+     "evidence": "HOSTTEST_PASS",
+     "distinct_risk": "Verifies runner echo-rejection and LF/CRLF line parsing deterministically without QEMU boot"
+    }
+   ],
+   "overlap_decision": {
+    "action": "retain",
+    "reason": "FakeProcessSession unit tests verify echo-rejection parser logic while QEMU gfx suite exercises real BusyBox static PIE execution"
+   }
   }
  ]
 }

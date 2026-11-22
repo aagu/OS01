@@ -478,6 +478,7 @@ static const test_case_t tests[] = {
     {"aslr_mmap_exec_randomized", "aslr mmap exec randomized", test_aslr_mmap_exec_randomized, 1, 0},
     {"aslr_mmap_fork_inherit",    "aslr mmap fork inherit",    test_aslr_mmap_fork_inherit,    1, 0},
     {"aslr_mmap_fixed_and_bounds","aslr mmap fixed and bounds",test_aslr_mmap_fixed_and_bounds,1, 0},
+    {"aslr_pie",                  "aslr static pie",           test_aslr_pie,                  1, 0},
 };
 
 // ── CLI: --list ────────────────────────────────────────────
@@ -500,6 +501,7 @@ int main(int argc, char **argv, char **envp)
     (void)envp;
     startup_probe(argc, argv);
     aslr_probe(argc, argv);
+    aslr_pie_probe(argc, argv);
     g_argc = argc;
     g_argv = argv;
 

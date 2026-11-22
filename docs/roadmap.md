@@ -12,7 +12,7 @@
 | 优先级 | 主题 | 未完成项 | 备注 |
 |-------|------|---------|------|
 | **P0** | 工程与测试基础设施 | 0 | flake 账本入库已于 2026-11-21 闭环（见 [`changelog.md`](changelog.md)） |
-| **P1** | 安全加固 | 2 | ASLR-B / UBSan+KASan 后续项（ASLR-A 已于 2026-11-22 闭环） |
+| **P1** | 安全加固 | 1 | UBSan+KASan 后续项；栈随机化后续范围（ASLR-A / ASLR-B 已于 2026-11-22 闭环） |
 | **P2** | aarch64 适配 | 14 | 内存与执行体 1 · 能力齐平 7 · 架构统一 1 · 真机阻断 5 |
 | **P2** | 架构治理 / 扩展性 | 0 | 新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填该节 |
 | **P3** | GUI | 7 | GUI-4/5/6 + 优化与验证 4 |
@@ -32,16 +32,15 @@
 ## 🔒 P1 安全加固
 
 前置链（已完成，详见 `docs/changelog.md`）：`getrandom` → 统一用户态启动方式 → 用户栈 canary + `AT_RANDOM` →
-AAGU-5 arch entropy facade（STRONG-only 控制流）→ 用户堆与 ELF 映射隔离 → **ASLR-A：x86_64 `mmap_base` 随机化**（2026-11-22 闭环，见 [`cow-mmap.md`](memory/cow-mmap.md) 与 [`changelog.md`](changelog.md)）。
+AAGU-5 arch entropy facade（STRONG-only 控制流）→ 用户堆与 ELF 映射隔离 → **ASLR-A：x86_64 `mmap_base` 随机化** → **ASLR-B：x86_64 静态 PIE 与镜像基址随机化**（均于 2026-11-22 闭环，见 [`cow-mmap.md`](memory/cow-mmap.md) 与 [`changelog.md`](changelog.md)）。
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| ASLR-B：ET_DYN/PIE | 单独实施可重定位 ELF 的加载偏移、静态 PIE 重定位及用户程序构建迁移（含 BusyBox） | ASLR-A 验收 ✅（2026-11-22）；当前 ELF loader 仅支持 ET_EXEC（`kernel/fs/elf_layout.c:93-94` 直接 `-ENOEXEC`），`kernel/include/fs/elf.h:73-74` 只定义 `ET_EXEC`（全树无 `ET_DYN`）；用户构建仍关 PIE（`user/Makefile:29` 与 `:74` 各一处 `-fno-pic -fno-pie`、`user/Makefile:86` `-no-pie`、`mk/profiles/x86_64-clang.mk:180` `-fno-pic -fno-pie`）；需设计重定位、linker script、启动 ABI/auxv 与回退测试 | |
 | UBSan + KASan | **x86_64 内核插桩 v1 已落地（2026-11-22）**：`KERNEL_UBSAN=1` / `KERNEL_KASAN=1` 独立 knob（`mk/project.mk` 校验 + `san-ubsan`/`san-kasan` 变体目录，普通构建逐字节不变）；KASan 两阶段影子（head.S 静态零影子 → `kasan_shadow_install` 真实影子，`shadow(VA)=(VA>>3)+0xdffffc0000000000`，PML4 472/476）+ slab 毒化钩子（malloc→kmalloc 直转发全覆盖）+ 运行期映射钩子；UBSan 处理函数 log+kpanic（剔除 object-size/alignment，实证 gate.h:236 误报）；探针 `KERNEL_SANITIZER_TEST=ubsan\|kasan` 端到端验证违规检测。**后续项**：栈插桩（需 Linux 式早期文件排除清单）、全局插桩（需 `.init_array.1` 扫描）、aarch64 接入、偶发 LAPIC 影子 0xff 待诊断（报告含影子帧 PA）。实施细节见 [`build.md`](build/build.md) 与 [plan](superpowers/plans/2026-11-22-ubsan-kasan.md) | ArvernOS |
 
-ASLR 分期实施，不把 A/B 合成一个小任务。当前用户栈固定在 `X86_USER_STACK_BASE = 0x20400000`
-（`kernel/include/arch/x86_64/user_layout.h:20`）；栈随机化另列后续范围，完成 A/B 后也不能称为完整用户态 ASLR。
-aarch64 已有 EL0 用户态，但 ASLR 本项先不扩大到 aarch64。
+ASLR 分期实施（A/B 已完成）。当前用户栈固定在 `X86_USER_STACK_BASE = 0x20400000`
+（`kernel/include/arch/x86_64/user_layout.h:20`）；栈随机化另列后续范围，完成 A/B 后尚不构成完整用户态 ASLR。
+aarch64 已有 EL0 用户态，但 ASLR 本项暂未扩大到 aarch64。
 
 ## 🏗 P2 aarch64 适配
 

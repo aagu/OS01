@@ -1,4 +1,50 @@
 #include "systest.h"
+#include <sys/auxv.h>
+
+typedef struct {
+    unsigned char e_ident[16];
+    uint16_t e_type;
+    uint16_t e_machine;
+    uint32_t e_version;
+    uint64_t e_entry;
+    uint64_t e_phoff;
+    uint64_t e_shoff;
+    uint32_t e_flags;
+    uint16_t e_ehsize;
+    uint16_t e_phentsize;
+    uint16_t e_phnum;
+    uint16_t e_shentsize;
+    uint16_t e_shnum;
+    uint16_t e_shstrndx;
+} sys_elf64_ehdr_t;
+
+typedef struct {
+    uint32_t p_type;
+    uint32_t p_flags;
+    uint64_t p_offset;
+    uint64_t p_vaddr;
+    uint64_t p_paddr;
+    uint64_t p_filesz;
+    uint64_t p_memsz;
+    uint64_t p_align;
+} sys_elf64_phdr_t;
+
+static uint64_t pie_image_base_from_auxv(const sys_elf64_ehdr_t **out_ehdr)
+{
+    unsigned long phdr_addr = getauxval(AT_PHDR);
+    if (!phdr_addr)
+        return 0;
+    uint64_t base = (uint64_t)phdr_addr & ~0xFFFUL;
+    const sys_elf64_ehdr_t *eh = (const sys_elf64_ehdr_t *)(uintptr_t)base;
+    if (eh->e_ident[0] != 0x7f || eh->e_ident[1] != 'E' ||
+        eh->e_ident[2] != 'L' || eh->e_ident[3] != 'F')
+        return 0;
+    if (eh->e_phoff != (uint64_t)phdr_addr - base)
+        return 0;
+    if (out_ehdr)
+        *out_ehdr = eh;
+    return base;
+}
 
 
 // ── 3: brk ─────────────────────────────────────────────────
@@ -401,14 +447,18 @@ void test_protected_ranges(void)
     int ok_guard = (bad == MAP_FAILED) && (errno == EINVAL);
 
     /* 3. MAP_FIXED into the heap reserve (uncommitted part). */
+    uint64_t image_base = pie_image_base_from_auxv(NULL);
+    if (!image_base) image_base = 0x400000UL;
+    int64_t brk_probe = syscall(SYS_brk, 0, 0, 0);
+    uint64_t uncomm_heap = (((uint64_t)brk_probe + 0xFFFUL) & ~0xFFFUL) + 0x1000UL;
     errno = 0;
-    bad = mmap((void *)0x500000UL, 0x1000, PROT_READ | PROT_WRITE,
+    bad = mmap((void *)uncomm_heap, 0x1000, PROT_READ | PROT_WRITE,
                MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
     int ok_heap = (bad == MAP_FAILED) && (errno == EINVAL);
 
     /* 4. MAP_FIXED into the ELF envelope (image base page). */
     errno = 0;
-    bad = mmap((void *)0x400000UL, 0x1000, PROT_READ | PROT_WRITE,
+    bad = mmap((void *)image_base, 0x1000, PROT_READ | PROT_WRITE,
                MAP_ANONYMOUS | MAP_PRIVATE | MAP_FIXED, -1, 0);
     int ok_elf = (bad == MAP_FAILED) && (errno == EINVAL);
 
@@ -489,7 +539,7 @@ void test_protected_ranges(void)
                 else    { q = line + strlen(line); }
                 unsigned long s64, e64;
                 if (sscanf(line, "%lx-%lx", &s64, &e64) >= 1) {
-                    if (s64 == 0x400000UL) has_image = 1;
+                    if (s64 == image_base) has_image = 1;
                 }
                 if (strstr(line, "[heap]")) has_heap = 1;
             }
@@ -1419,4 +1469,177 @@ void test_aslr_mmap_fixed_and_bounds(void)
                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     CHECKF(huge == MAP_FAILED && errno == ENOMEM, "aslr_64t_exhaustion_no_wrap",
            "ENOMEM", "got huge=%p errno=%d", huge, errno);
+}
+
+/* ── ASLR-B: Static PIE probe & acceptance ─────────────────── */
+extern char _start[];
+
+static int g_pie_obj_val = 0x13572468;
+static int g_pie_cow_val = 0x11223344;
+static int pie_reloc_fn(int x) { return x ^ 0x5A; }
+
+static int *volatile g_pie_obj_ptr = &g_pie_obj_val;
+static int (*volatile g_pie_fn_ptr)(int) = pie_reloc_fn;
+
+void aslr_pie_probe(int argc, char **argv)
+{
+    if (argc < 1 || !argv || !argv[0] || strcmp(argv[0], "pie-probe") != 0)
+        return;
+
+    /* 1. Relocation checks: volatile object & function pointers */
+    int reloc_ok = (g_pie_obj_ptr == &g_pie_obj_val) &&
+                   (*g_pie_obj_ptr == 0x13572468) &&
+                   (g_pie_fn_ptr(0x33) == (0x33 ^ 0x5A));
+    *g_pie_obj_ptr = 0x24681357;
+    reloc_ok = reloc_ok && (g_pie_obj_val == 0x24681357);
+
+    /* 2. ELF header & PHDR checks at runtime image_base */
+    const sys_elf64_ehdr_t *eh = NULL;
+    uint64_t image_base = pie_image_base_from_auxv(&eh);
+    int elf_ok = (image_base != 0) && (eh != NULL) &&
+                 (eh->e_type == 3) &&
+                 ((image_base & 0xFFFUL) == 0) &&
+                 (image_base >= 0x00400000UL && image_base < 0x10400000UL);
+
+    /* 3. auxv checks */
+    int auxv_ok = 0;
+    if (elf_ok) {
+        unsigned long at_entry = getauxval(AT_ENTRY);
+        unsigned long at_phent = getauxval(AT_PHENT);
+        unsigned long at_phnum = getauxval(AT_PHNUM);
+        unsigned long at_pagesz = getauxval(AT_PAGESZ);
+        unsigned long at_plat = getauxval(AT_PLATFORM);
+        unsigned long at_rand = getauxval(AT_RANDOM);
+        unsigned long at_null = getauxval(AT_NULL);
+        errno = 0;
+        unsigned long at_base = getauxval(AT_BASE);
+        int base_errno = errno;
+
+        int rand_ok = 0;
+        if (at_rand != 0) {
+            const volatile uint8_t *rp = (const volatile uint8_t *)(uintptr_t)at_rand;
+            uint8_t acc = 0;
+            for (int i = 0; i < 16; i++)
+                acc |= rp[i];
+            rand_ok = (acc != 0);
+        }
+
+        auxv_ok = (at_entry == (unsigned long)(uintptr_t)_start) &&
+                  (at_phent == sizeof(sys_elf64_phdr_t)) &&
+                  (at_phnum == eh->e_phnum) &&
+                  (at_pagesz == 4096UL) &&
+                  (at_plat != 0 && strcmp((const char *)(uintptr_t)at_plat, "x86_64") == 0) &&
+                  rand_ok &&
+                  (at_null == 0) &&
+                  (at_base == 0 && base_errno == 0);
+    }
+
+    /* 4. fork() image address parity & COW data isolation */
+    int fork_ok = 0;
+    int fds[2];
+    if (pipe(fds) == 0) {
+        int64_t pid = fork();
+        if (pid == 0) {
+            close(fds[0]);
+            uint64_t c_base = pie_image_base_from_auxv(NULL);
+            int ok_c = (c_base == image_base) &&
+                       (g_pie_obj_ptr == &g_pie_obj_val) &&
+                       (g_pie_cow_val == 0x11223344);
+            g_pie_cow_val = (int)0xAABBCCDD;
+            write(fds[1], &ok_c, sizeof(ok_c));
+            close(fds[1]);
+            _exit(ok_c ? 0 : 2);
+        } else if (pid > 0) {
+            close(fds[1]);
+            int ok_c = 0;
+            ssize_t r = read(fds[0], &ok_c, sizeof(ok_c));
+            close(fds[0]);
+            int st = 0;
+            waitpid(pid, &st, 0);
+            fork_ok = (r == (ssize_t)sizeof(ok_c)) && ok_c &&
+                      WIFEXITED(st) && WEXITSTATUS(st) == 0 &&
+                      (g_pie_cow_val == 0x11223344);
+        } else {
+            close(fds[0]);
+            close(fds[1]);
+        }
+    }
+
+    printf("PIE bias=%016lx entry=%016lx data=%016lx fn=%016lx ok=%d,%d,%d,%d\n",
+           (unsigned long)image_base,
+           (unsigned long)(uintptr_t)_start,
+           (unsigned long)(uintptr_t)g_pie_obj_ptr,
+           (unsigned long)(uintptr_t)g_pie_fn_ptr,
+           reloc_ok, elf_ok, auxv_ok, fork_ok);
+    fflush(stdout);
+    _exit((reloc_ok && elf_ok && auxv_ok && fork_ok) ? 0 : 1);
+}
+
+void test_aslr_pie(void)
+{
+    uint64_t biases[8];
+    int unique = 0;
+    char *argv[] = { (char *)"pie-probe", NULL };
+
+    for (int i = 0; i < 8; i++) {
+        char buf[256];
+        int st = 0;
+        int n = exec_capture_argv("/bin/systest", argv, buf, sizeof(buf), &st);
+        unsigned long bias = 0, entry = 0, data_p = 0, fn_p = 0;
+        int r_ok = 0, e_ok = 0, a_ok = 0, f_ok = 0;
+        const char *line = strstr(buf, "PIE ");
+        if (n <= 0 || !WIFEXITED(st) || WEXITSTATUS(st) != 0 || !line ||
+            sscanf(line, "PIE bias=%lx entry=%lx data=%lx fn=%lx ok=%d,%d,%d,%d",
+                   &bias, &entry, &data_p, &fn_p, &r_ok, &e_ok, &a_ok, &f_ok) != 8 ||
+            !r_ok || !e_ok || !a_ok || !f_ok ||
+            (bias & 0xFFFUL) != 0 ||
+            bias < 0x00400000UL || bias >= 0x10400000UL) {
+            printf("aslr_pie_probe diag: iter=%d n=%d st=%#x buf='%s'\n", i, n, st, buf);
+            FAIL("aslr_pie_probe",
+                 "iter %d failed n=%d st=%#x buf='%s'", i, n, st, buf);
+            return;
+        }
+        biases[i] = (uint64_t)bias;
+        int seen = 0;
+        for (int j = 0; j < i; j++) {
+            if (biases[j] == biases[i]) {
+                seen = 1;
+                break;
+            }
+        }
+        if (!seen)
+            unique++;
+    }
+
+    CHECKF(unique >= 7, "aslr_pie_randomized",
+           "unique=%d/8", "expected >=7 unique PIE biases, got %d/8", unique);
+
+    /* Standalone ET_EXEC compatibility fixture (/bin/aslr_b_exec) */
+    sys_elf64_ehdr_t eh;
+    int efd = open("/bin/aslr_b_exec", O_RDONLY);
+    int is_et_exec = 0;
+    if (efd >= 0) {
+        if (read(efd, &eh, sizeof(eh)) == (ssize_t)sizeof(eh)) {
+            is_et_exec = (eh.e_ident[0] == 0x7f && eh.e_ident[1] == 'E' &&
+                          eh.e_ident[2] == 'L' && eh.e_ident[3] == 'F' &&
+                          eh.e_type == 2);
+        }
+        close(efd);
+    }
+    CHECK3(is_et_exec, "aslr_pie_exec_fixture_et_exec",
+           "/bin/aslr_b_exec is ET_EXEC");
+
+    int64_t pid = fork();
+    int exec_rc = -1;
+    if (pid == 0) {
+        char *av[] = { (char *)"/bin/aslr_b_exec", NULL };
+        execve("/bin/aslr_b_exec", av, NULL);
+        _exit(127);
+    } else if (pid > 0) {
+        int st = 0;
+        if (waitpid(pid, &st, 0) == pid && WIFEXITED(st))
+            exec_rc = WEXITSTATUS(st);
+    }
+    CHECKF(exec_rc == 73, "aslr_pie_exec_compat",
+           "rc=73", "expected rc=73 from /bin/aslr_b_exec, got %d", exec_rc);
 }

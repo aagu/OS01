@@ -939,7 +939,7 @@ APP_LDLIBS := -lgfx
 
 共享辅助代码放在 `user/common/`；此目录不放 `app.mk`。
 启动对象 `crt0.o` 由 libc 安装进 sysroot，信号返回 trampoline 是 libc.a
-成员，链接脚本在 `libc/arch/<arch>/user.ld`；均由公共规则处理。
+成员；x86_64 默认用户态采用零链接静态 PIE（`-fPIE -mcmodel=small -mno-red-zone`，链接脚本 `libc/arch/x86_64/user-pie.ld`、`-static -pie --no-dynamic-linker -z max-page-size=4096 -z text -z norelro --pack-dyn-relocs=none`，`libk.a` 保留 `-mcmodel=large -fno-pic -fno-pie`），`aarch64` 保持 `libc/arch/aarch64/user.ld`（`ET_EXEC`）；均由公共规则处理。可用 `make PROFILE=<profile> test-user-pie`（`tools/tests/audit_user_pie.py`）校验用户态及 BusyBox 产物契约。
 对象与 `.d` 依赖文件保留在 profile/variant 的构建目录内，修改头文件
 或 `app.mk` 会触发相应重建。
 

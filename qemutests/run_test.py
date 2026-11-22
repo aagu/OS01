@@ -918,6 +918,17 @@ def test_gfx(tester):
         print("FAIL: gfx runner never saw the shell prompt")
         return False
 
+    # ── Step 0: /bin/busybox static PIE applet smoke ─────────
+    # Verify a real BusyBox applet executes under static PIE and emits
+    # the assembled marker on its own line (ignoring command echo).
+    tester.send_line("/bin/busybox printf '%s%s\\n' OS01-PIE- APPLET-OK")
+    pie_re = re.compile(r"(?:^|\n)OS01-PIE-APPLET-OK\r?\n")
+    passed = tester.read_until(pie_re, timeout=tester.timeout)
+    if passed is None:
+        print("FAIL: /bin/busybox printf did not produce standalone OS01-PIE-APPLET-OK line")
+        return False
+    print("PASS: OS01-PIE-APPLET-OK line observed")
+
     # ── Step A: /bin/test_gfx — full-screen view E2E ───────
     # Task 5 of the 2D graphics API plan, extended by Task 8 to
     # use the actual framebuffer dimensions and assert a >= 5.18

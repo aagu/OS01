@@ -142,8 +142,23 @@ $(RUNTIME_PROBE_ELF): $(RUNTIME_PROBE_OBJ) $(CRT0_OBJ) $(LINKER_SCRIPT) \
 
 -include $(RUNTIME_PROBE_OBJ:.o=.d)
 
+ASLR_B_EXEC_ELF :=
+ifeq ($(OS01_SYSTEST),1)
+ifneq ($(USER_ARCH),aarch64)
+ASLR_B_EXEC_ELF := $(BUILD_DIR)/aslr_b_exec.elf
+ASLR_B_EXEC_OBJ := $(OBJ_DIR)/systest/fixtures/aslr_b_exec.o
+$(ASLR_B_EXEC_OBJ): systest/fixtures/aslr_b_exec.S $(USER_COMPILE_KEY)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) --target=x86_64-unknown-none -ffreestanding -fno-pic -fno-pie -c $< -o $@
+$(ASLR_B_EXEC_ELF): $(ASLR_B_EXEC_OBJ) $(OS01_ROOT)/libc/arch/x86_64/user.ld
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) -m elf_x86_64 -static -T $(OS01_ROOT)/libc/arch/x86_64/user.ld -o $@ $<
+	$(OBJ_CPY) --strip-debug $@
+endif
+endif
+
 .PHONY: all clean
-all: $(PROGRAMS) $(RUNTIME_PROBE_ELF) $(DOOM_ARCHIVE)
+all: $(PROGRAMS) $(RUNTIME_PROBE_ELF) $(ASLR_B_EXEC_ELF) $(DOOM_ARCHIVE)
 
 $(OBJ_DIR)/%.o: %.c $(USER_COMPILE_KEY)
 	@mkdir -p $(dir $@)
