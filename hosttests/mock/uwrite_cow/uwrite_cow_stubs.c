@@ -351,3 +351,16 @@ bool uw_arch_range_accessible(uint64_t addr, uint64_t len, bool writable)
     }
     return true;
 }
+
+struct shared_backing;
+__attribute__((weak)) int shared_backing_page(
+    struct shared_backing *b, uint64_t idx, uint64_t *pa_out)
+{
+    (void)b; (void)idx; (void)pa_out;
+    return -EOPNOTSUPP;
+}
+__attribute__((weak)) void shared_backing_mark_dirty(
+    struct shared_backing *b, uint64_t idx)
+{
+    (void)b; (void)idx;
+}

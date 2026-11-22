@@ -305,4 +305,13 @@ int x86_vmm_prepare_4k_range(uint64_t *root, uint64_t start, uint64_t end)
     return 0;
 }
 
+struct shared_backing;
+struct vfs_node;
+__attribute__((weak)) int shared_backing_open_file(struct vfs_node *n, struct shared_backing **o) { (void)n; (void)o; return -EOPNOTSUPP; }
+__attribute__((weak)) int shared_backing_create_anon(struct shared_backing **o) { (void)o; return -ENOMEM; }
+__attribute__((weak)) void shared_backing_get(struct shared_backing *b) { (void)b; }
+__attribute__((weak)) void shared_backing_put(struct shared_backing *b) { (void)b; }
+__attribute__((weak)) void shared_backing_mark_dirty(struct shared_backing *b, uint64_t idx) { (void)b; (void)idx; }
+__attribute__((weak)) int shared_backing_writeback_range(struct shared_backing *b, uint64_t s, uint64_t e) { (void)b; (void)s; (void)e; return 0; }
+
 

@@ -15,6 +15,7 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
+#include <memory/shared_backing.h>
 #include <selftest/boot_services_fixture.h>
 
 #ifdef OS01_HOST_TEST
@@ -2276,7 +2277,10 @@ int vfs_truncate(vfs_node_t *node, uint64_t new_size)
     if (!vfs_is_valid_kptr(node->i_ops->truncate))
         return -1;
 
-    return node->i_ops->truncate(node, new_size);
+    int ret = node->i_ops->truncate(node, new_size);
+    if (ret == 0)
+        shared_backing_truncate(node, new_size);
+    return ret;
 }
 
 // ── Resolve full path from a VFS node ─────────────────────────

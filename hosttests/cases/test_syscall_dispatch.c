@@ -224,7 +224,7 @@ int main(void)
         SYS_mkdir, SYS_rmdir, SYS_rename, SYS_truncate, SYS_ftruncate,
         SYS_chmod, SYS_fchmod, SYS_poll, SYS_ppoll, SYS_select,
         SYS_pselect6, SYS_symlink, SYS_readlink, SYS_lstat, SYS_fstatat,
-        SYS_getrlimit, SYS_setrlimit,
+        SYS_getrlimit, SYS_setrlimit, SYS_msync, SYS_fsync,
         SYS_brk, SYS_mmap, SYS_mprotect, SYS_munmap, SYS_futex,
         SYS_time, SYS_gettimeofday, SYS_clock_gettime, SYS_nanosleep, SYS_times,
         SYS_putchar, SYS_getrandom, SYS_sync, SYS_reboot, SYS_uname,

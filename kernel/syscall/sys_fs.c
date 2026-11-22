@@ -3,6 +3,7 @@
 #include <sched/task.h>
 #include <memory/slab.h>
 #include <memory/uaccess.h>
+#include <memory/shared_backing.h>
 #include <fs/vfs.h>
 #include <fs/devfs.h>
 #include <fs/file.h>
@@ -1009,6 +1010,28 @@ case SYS_ioctl: {
         if (!f->node) { syscall_result = -ENOENT; break; }
 
         int ret = vfs_truncate(f->node, (uint64_t)length);
+        syscall_result = (int64_t)ret;
+        break;
+    }
+    case SYS_fsync: {
+        // fsync(int fd) → 0 / -errno
+        int fd = (int)ctx->args[0];
+        if (fd < 0 || fd >= NOFILE || !current->files) {
+            syscall_result = -EBADF;
+            break;
+        }
+        file_t *f = files_get_file(current->files, fd);
+        if (!f) {
+            syscall_result = -EBADF;
+            break;
+        }
+        if (f->type != FD_VFS || !f->node) {
+            files_put_file(f);
+            syscall_result = -EINVAL;
+            break;
+        }
+        int ret = shared_backing_sync_file(f->node);
+        files_put_file(f);
         syscall_result = (int64_t)ret;
         break;
     }

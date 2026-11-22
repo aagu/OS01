@@ -29,6 +29,7 @@
 #include <sched/task.h>       // current, fault_jmp, fault_cleanup, fault_cleanup_arg, addr_limit
 #include <memory/memory.h>     // Phy_To_Virt
 #include <memory/vma.h>        // vma_t, VMA_* logical flags
+#include <memory/shared_backing.h>
 #include <arch/x86_64/vma.h>   // fork_vma_copy
 #include <memory/vmm.h>
 #include <fs/vfs.h>            // VFS_NAME_MAX (strnlen limit)
@@ -89,10 +90,60 @@ ssize_t copy_to_user_ft_res(void *dst, const void *src, size_t n,
     return -EFAULT;
 }
 
+static int prepare_shared_range_locked(mm_t *mm, uint64_t addr, size_t len,
+                                     bool writable)
+{
+    if (len == 0 || !mm || !mm->pgdir || addr < X86_USER_MIN_ADDR ||
+        addr >= current->addr_limit || len > current->addr_limit - addr)
+        return 0;
+
+    uint64_t *pgd = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
+    uint64_t end = addr + len;
+    for (uint64_t va = addr & PAGE_4K_MASK; va < end; va += PAGE_4K_SIZE) {
+        vma_t *vma = vm_area_lookup(mm, va);
+        if (!vma || !vma->vm_shared_backing)
+            continue;
+        if (writable && !(vma->vm_flags & VMA_PROT_WRITE))
+            return -EFAULT;
+        if (!writable && !(vma->vm_flags & VMA_PROT_READ))
+            return -EFAULT;
+
+        uint64_t index = vma->vm_pgoff + ((va - vma->vm_start) >> PAGE_4K_SHIFT);
+        uint64_t *pte = vmm_pt_walk(pgd, va, 0, 0);
+        if (!pte || !(*pte & PAGE_VALID)) {
+            if (pte && (*pte & PAGE_PROTNONE))
+                return -EFAULT;
+            uint64_t phys = 0;
+            int rc = shared_backing_page(vma->vm_shared_backing, index, &phys);
+            if (rc != 0)
+                return rc;
+            if (x86_vmm_map_4k(pgd, phys, va,
+                               x86_vma_pte_flags(vma->vm_flags)) != 0)
+                return -ENOMEM;
+        }
+        if (writable)
+            shared_backing_mark_dirty(vma->vm_shared_backing, index);
+    }
+    return 0;
+}
+
 ssize_t copy_from_user_ft_res(void *dst, const void *src, size_t n,
                               void (*on_fault)(void *), void *arg)
 {
     if (n == 0) return 0;
+    if (current && current->mm && current->mm->pgdir) {
+        uint64_t *pgd = (uint64_t *)Phy_To_Virt((uint64_t)current->mm->pgdir);
+        if (!arch_user_range_accessible(pgd, (uint64_t)src, n, false)) {
+            spin_lock(&current->mm->lock);
+            int prc = prepare_shared_range_locked(current->mm, (uint64_t)src,
+                                                  n, false);
+            spin_unlock(&current->mm->lock);
+            if (prc < 0) {
+                if (on_fault) on_fault(arg);
+                return prc;
+            }
+        }
+    }
     os01_jmp_buf jb;
     void **old = current->fault_jmp;
     void (*old_cb)(void *) = current->fault_cleanup;
@@ -189,6 +240,8 @@ typedef struct {
 
 int prepare_user_write_range_locked(mm_t *mm, uint64_t addr, size_t len)
 {
+    int s_rc = prepare_shared_range_locked(mm, addr, len, true);
+    if (s_rc < 0) return s_rc;
     size_t count;
     if (!user_write_range_valid(mm, addr, len, &count)) return -EFAULT;
     if (count == 0) return 0;

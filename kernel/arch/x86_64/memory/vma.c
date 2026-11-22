@@ -7,6 +7,8 @@
 // mmap.c; the kernel→user write lock pair lives in uaccess.c.
 #include <memory/vma.h>        // VMA_* logical flags
 #include <memory/vm_area.h>    // shared list primitives
+#include <memory/shared_backing.h>
+#include <memory/vmm.h>        // tlb_shootdown
 #include <arch/x86_64/vma.h>   // owner surface (declares this TU's API)
 #include <kernel.h>            // container_of
 #include <sched/task.h>        // complete mm_t (vma_list)
@@ -26,6 +28,8 @@ void x86_vma_destroy_node(vma_t *vma)
 {
     if (!vma) return;
     vm_area_unlink(vma);
+    if (vma->vm_shared_backing)
+        shared_backing_put(vma->vm_shared_backing);
     if (vma->vm_file)
         vfs_node_put(vma->vm_file);
     kfree(vma);
@@ -55,7 +59,8 @@ void vma_free_all(mm_t *mm)
          * and full 2 MiB PMD blocks alike — are cleared but NEVER
          * released: the device keeps owning their pages. */
         if (user_pgd) {
-            bool borrowed = (v->vm_flags & VMA_IO) != 0;
+            bool borrowed = (v->vm_flags & VMA_IO) != 0 ||
+                            v->vm_shared_backing != NULL;
             uint64_t va = v->vm_start;
             while (va < v->vm_end) {
                 if ((va & (PAGE_2M_SIZE - 1)) == 0 &&
@@ -66,8 +71,15 @@ void vma_free_all(mm_t *mm)
                     continue;
                 }
                 uint64_t old = x86_vmm_take_4k(user_pgd, va);
-                if (old && !borrowed)
-                    x86_vmm_release_owned_4k(old);
+                if (old) {
+                    if (v->vm_shared_backing && (old & PAGE_DIRTY)) {
+                        uint64_t idx = v->vm_pgoff +
+                                       ((va - v->vm_start) >> PAGE_4K_SHIFT);
+                        shared_backing_mark_dirty(v->vm_shared_backing, idx);
+                    }
+                    if (!borrowed)
+                        x86_vmm_release_owned_4k(old);
+                }
                 va += PAGE_4K_SIZE;
             }
         }
@@ -100,6 +112,8 @@ int fork_vma_copy(mm_t *child_mm, mm_t *parent_mm)
         list_init(&cv->list);
         if (cv->vm_file)
             vfs_node_get(cv->vm_file);
+        if (cv->vm_shared_backing)
+            shared_backing_get(cv->vm_shared_backing);
         vm_area_insert_sorted(child_mm, cv);
 
         pos = pos->next;
@@ -116,3 +130,86 @@ fail:
     }
     return -ENOMEM;
 }
+
+#ifndef OS01_HOST_TEST
+static bool x86_invalidate_mm_backing(mm_t *mm, struct shared_backing *backing,
+                                      uint64_t first_dead_index)
+{
+    if (!mm || !mm->pgdir)
+        return false;
+    bool changed = false;
+    spin_lock(&mm->lock);
+    uint64_t *pgd = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
+    for (list_t *pos = mm->vma_list.next; pos != &mm->vma_list;
+         pos = pos->next) {
+        vma_t *v = container_of(pos, vma_t, list);
+        if (v->vm_shared_backing != backing)
+            continue;
+        uint64_t pages = (v->vm_end - v->vm_start) >> PAGE_4K_SHIFT;
+        if (v->vm_pgoff + pages <= first_dead_index)
+            continue;
+        uint64_t start_page = (first_dead_index > v->vm_pgoff)
+                                  ? (first_dead_index - v->vm_pgoff)
+                                  : 0;
+        for (uint64_t va = v->vm_start + (start_page << PAGE_4K_SHIFT);
+             va < v->vm_end; va += PAGE_4K_SIZE) {
+            if (x86_vmm_take_4k(pgd, va) != 0)
+                changed = true;
+        }
+    }
+    spin_unlock(&mm->lock);
+    return changed;
+}
+
+bool arch_shared_backing_invalidate(struct shared_backing *backing,
+                                    uint64_t first_dead_index)
+{
+    if (!backing)
+        return true;
+
+    bool any_changed = false;
+    mm_t *seen[32];
+    size_t n_seen = 0;
+
+    uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+    list_t *head = &init_task_union.task.list;
+    for (list_t *pos = task_list_next(head); pos && pos != head;
+         pos = task_list_next(pos)) {
+        task_t *t = container_of(pos, task_t, list);
+        if (!t->mm)
+            continue;
+        bool dup = false;
+        for (size_t i = 0; i < n_seen; i++) {
+            if (seen[i] == t->mm) {
+                dup = true;
+                break;
+            }
+        }
+        if (dup)
+            continue;
+        if (n_seen < 32)
+            seen[n_seen++] = t->mm;
+        if (x86_invalidate_mm_backing(t->mm, backing, first_dead_index))
+            any_changed = true;
+    }
+    spin_unlock_irqrestore(&task_list_lock, tl_flags);
+
+    if (current && current->mm) {
+        bool dup = false;
+        for (size_t i = 0; i < n_seen; i++) {
+            if (seen[i] == current->mm) {
+                dup = true;
+                break;
+            }
+        }
+        if (!dup && x86_invalidate_mm_backing(current->mm, backing,
+                                              first_dead_index)) {
+            any_changed = true;
+        }
+    }
+
+    if (any_changed)
+        tlb_shootdown();
+    return true;
+}
+#endif

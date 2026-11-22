@@ -33,7 +33,7 @@ int64_t sys_native_clock_gettime(syscall_ctx_t *ctx);
  * are the entries every architecture serves, so the AArch64 port
  * compiles this very table with OS01_SYSCALL_A64_SUBSET=1 and hides
  * every other entry instead of carrying a second, divergent table. */
-static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
+static const syscall_entry_t syscall_table[SYS_fsync + 1] = {
     [SYS_exit] = { sys_native_exit, "exit" },
     [SYS_getpid] = { sys_native_getpid, "getpid" },
     [SYS_getppid] = { sys_native_getppid, "getppid" },
@@ -67,6 +67,7 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_sync] = { sys_misc_dispatch, "sync" },
     [SYS_reboot] = { sys_misc_dispatch, "reboot" },
     [SYS_uname] = { sys_misc_dispatch, "uname" },
+    [SYS_msync] = { sys_mm_dispatch, "msync" },
 #endif
 
 /* The fs syscall group is served by the arch-neutral kernel/syscall/sys_fs.c.
@@ -106,8 +107,10 @@ static const syscall_entry_t syscall_table[SYS_setrlimit + 1] = {
     [SYS_readlink] = { sys_fs_dispatch, "readlink" },
     [SYS_lstat] = { sys_fs_dispatch, "lstat" },
     [SYS_fstatat] = { sys_fs_dispatch, "fstatat" },
+    [SYS_fsync] = { sys_fs_dispatch, "fsync" },
 #endif /* !OS01_SYSCALL_A64_SUBSET || OS01_HAS_VFS */
 #ifndef OS01_SYSCALL_A64_SUBSET
+    [SYS_msync] = { sys_mm_dispatch, "msync" },
     [SYS_getrlimit] = { sys_resource_dispatch, "getrlimit" },
     [SYS_setrlimit] = { sys_resource_dispatch, "setrlimit" },
     [SYS_futex] = { sys_mm_dispatch, "futex" },

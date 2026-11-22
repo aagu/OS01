@@ -165,6 +165,10 @@ int64_t user_vm_mprotect(mm_t *mm, uint64_t addr, uint64_t len,
 /* munmap over the mmap window; holes are allowed and are a no-op.
  * Removes overlapping VMA fragments and resident pages. */
 int64_t user_vm_munmap(mm_t *mm, uint64_t addr, uint64_t len);
+int64_t user_vm_msync(mm_t *mm, uint64_t addr, uint64_t len, uint64_t flags);
+struct shared_backing;
+void user_vm_invalidate_backing(mm_t *mm, struct shared_backing *backing,
+                                uint64_t first_dead_index);
 
 /* Demand-fill one EL0 data-abort address.  Returns 0 when the caller
  * must retry the same PC, -EFAULT when the address is not authorised

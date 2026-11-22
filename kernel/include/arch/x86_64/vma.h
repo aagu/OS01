@@ -100,5 +100,6 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
                 uint64_t flags, uint64_t fd, uint64_t offset);
 int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot);
 int64_t do_munmap(uint64_t addr, uint64_t length);
+int64_t do_msync(uint64_t addr, uint64_t length, uint64_t flags);
 
 #endif /* _ARCH_X86_64_VMA_H */

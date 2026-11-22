@@ -22,3 +22,20 @@ void write_serial_unlocked(char c) { (void)c; }
 
 __attribute__((weak)) void _log_err_impl(const char *fmt, ...) { (void)fmt; }
 __attribute__((weak)) void _log_warn_impl(const char *fmt, ...) { (void)fmt; }
+
+struct vfs_node;
+__attribute__((weak)) void shared_backing_truncate(
+    struct vfs_node *node, uint64_t new_size)
+{
+    (void)node; (void)new_size;
+}
+__attribute__((weak)) void shared_backing_read_overlay(
+    struct vfs_node *node, uint64_t offset, uint64_t size, void *buf)
+{
+    (void)node; (void)offset; (void)size; (void)buf;
+}
+__attribute__((weak)) void shared_backing_write_overlay(
+    struct vfs_node *node, uint64_t offset, uint64_t size, const void *buf)
+{
+    (void)node; (void)offset; (void)size; (void)buf;
+}

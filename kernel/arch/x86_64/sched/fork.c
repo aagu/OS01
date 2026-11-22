@@ -165,9 +165,11 @@ static mm_t *fork_mm_copy(mm_t *parent_mm, uint64_t *cr3_out)
                                    | ((uint64_t)l2 << 21)
                                    | ((uint64_t)l1 << 12);
                     vma_t *vma = vm_area_lookup(parent_mm, vaddr);
-                    if (vma && (vma->vm_flags & VMA_IO)) {
-                        /* MMIO: share parent's phys (no COW, no
-                         * copy).  Pass 2 must not touch this leaf. */
+                    if (vma && ((vma->vm_flags & VMA_IO) ||
+                                vma->vm_shared_backing != NULL)) {
+                        /* MMIO / inode MAP_SHARED: share parent's phys
+                         * directly (no COW, no copy).  Pass 2 must not
+                         * touch this leaf. */
                         child_pte[l1] = pte;
                         continue;
                     }

@@ -10,6 +10,7 @@
 #include <uapi/time.h>
 #include <string.h>
 #include <block/blockdev.h>
+#include <memory/shared_backing.h>
 #include <log/log.h>
 #include <arch/x86_64/uaccess.h>
 
@@ -40,12 +41,9 @@ int64_t sys_misc_dispatch(syscall_ctx_t *ctx)
         break;
     }
     case SYS_sync: {
-        // sync() — write back the ARCH-6 block cache for every disk.
-        // Partition devices carry no cache entries (physical-disk keys
-        // only), so enumerating BLOCK_DISK covers all dirty data.  One
-        // failing disk does not stop the others; the first error is
-        // reported after every disk got its chance.
-        int first_err = 0;
+        // sync() — write back dirty shared mappings first, then flush
+        // the ARCH-6 block cache for every disk.
+        int first_err = shared_backing_sync_all();
         for (int i = 0; ; i++) {
             block_device_t *d = block_device_get(i);
             if (!d)

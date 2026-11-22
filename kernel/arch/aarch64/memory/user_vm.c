@@ -20,6 +20,8 @@
 #include <config/limits.h>
 #include <errno.h>
 #include <intr/dispatch.h>
+#include <kernel.h>
+#include <memory/vma.h>
 #include <sched/task.h>
 #include <stdbool.h>
 #include <stddef.h>
@@ -239,6 +241,9 @@ int64_t arch_syscall_user_vm(uint64_t nr, const uint64_t args[6])
     case SYS_munmap:
         ret = user_vm_munmap(mm, args[0], args[1]);
         break;
+    case SYS_msync:
+        ret = user_vm_msync(mm, args[0], args[1], args[2]);
+        break;
     default:
         ret = -EINVAL;
         break;
@@ -258,6 +263,49 @@ int64_t arch_syscall_user_vm(uint64_t nr, const uint64_t args[6])
 #endif
     return ret;
 }
+
+#ifndef OS01_HOST_TEST
+bool arch_shared_backing_invalidate(struct shared_backing *backing,
+                                    uint64_t first_dead_index)
+{
+    if (!backing)
+        return true;
+
+    struct aarch64_user_task *cur_owner =
+        aarch64_user_task_owner(aarch64_user_current_task());
+    mm_t *cur_mm = cur_owner ? cur_owner->vm.auth_mm : NULL;
+    if (cur_mm) {
+        if (aarch64_vm_edit_begin(cur_mm) != 0)
+            return false;
+        user_vm_invalidate_backing(cur_mm, backing, first_dead_index);
+        aarch64_vm_edit_end();
+    }
+
+    bool other_holders = false;
+    uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+    list_t *head = &init_task_union.task.list;
+    for (list_t *pos = task_list_next(head); pos && pos != head;
+         pos = task_list_next(pos)) {
+        task_t *t = container_of(pos, task_t, list);
+        struct aarch64_user_task *own = aarch64_user_task_owner(t);
+        mm_t *m = own ? own->vm.auth_mm : NULL;
+        if (!m || m == cur_mm)
+            continue;
+        for (list_t *vp = m->vma_list.next; vp != &m->vma_list; vp = vp->next) {
+            vma_t *v = container_of(vp, vma_t, list);
+            if (v->vm_shared_backing == backing) {
+                other_holders = true;
+                break;
+            }
+        }
+        if (other_holders)
+            break;
+    }
+    spin_unlock_irqrestore(&task_list_lock, tl_flags);
+
+    return !other_holders;
+}
+#endif
 
 int aarch64_user_vm_prepare_copy(mm_t *mm, uint64_t addr, size_t len,
                                  bool write)

@@ -22,6 +22,7 @@
 #include <percpu/percpu.h>
 #include <intr/apic.h>
 #include <memory/slab.h>
+#include <memory/shared_backing.h>
 #include <driver/serial.h>
 #include <errno.h>
 #include <uapi/syscall.h>
@@ -669,6 +670,27 @@ void x86_handle_page_fault(pt_regs_t * regs, uint64_t error_code, uint64_t cr2)
 
 			uint64_t *user_pgd =
 			    (uint64_t *)Phy_To_Virt((uint64_t)t->mm->pgdir);
+
+			if (vma->vm_shared_backing) {
+				uint64_t page_va = cr2 & PAGE_4K_MASK;
+				uint64_t index = vma->vm_pgoff +
+				    ((page_va - vma->vm_start) >> PAGE_4K_SHIFT);
+				uint64_t phys = 0;
+				if (shared_backing_page(vma->vm_shared_backing,
+				                        index, &phys) != 0) {
+					kill_current_user_task(regs, SIGSEGV);
+					return;
+				}
+				if (vma->vm_flags & VMA_PROT_WRITE)
+					shared_backing_mark_dirty(
+					    vma->vm_shared_backing, index);
+				if (x86_vmm_map_4k(user_pgd, phys, page_va,
+				                   x86_vma_pte_flags(vma->vm_flags)) != 0) {
+					kill_current_user_task(regs, SIGSEGV);
+					return;
+				}
+				return;
+			}
 
 			if (vma->vm_flags & VMA_ANON) {
 				uint64_t phys = alloc_4k_page();

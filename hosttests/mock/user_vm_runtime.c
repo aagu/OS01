@@ -727,6 +727,7 @@ static struct {
 struct user_vm_test_node {
     vfs_node_t           hdr;      /* REAL layout */
     const unsigned char *bytes;
+    unsigned char       *writable_bytes;
     uint64_t             size;
     int                  read_err;
     uint64_t             read_err_from;
@@ -870,9 +871,9 @@ static int default_vfs_read(struct vfs_node *node, uint64_t offset,
     if (tn) {
         if (tn->read_err && offset >= tn->read_err_from)
             return tn->read_err;
-        if (!tn->bytes || offset >= tn->size)
+        if (!tn->bytes || offset >= tn->hdr.size)
             return 0;
-        uint64_t n = tn->size - offset;
+        uint64_t n = tn->hdr.size - offset;
         if (n > size)
             n = size;
         memcpy(buffer, tn->bytes + offset, (size_t)n);
@@ -895,6 +896,31 @@ int vfs_read(struct vfs_node *node, uint64_t offset, uint64_t size,
     if (g_injected_read)
         return g_injected_read(node, offset, size, buffer);
     return default_vfs_read(node, offset, size, buffer);
+}
+
+void user_vm_test_set_node_writable(struct vfs_node *node, unsigned char *buf)
+{
+    struct user_vm_test_node *tn = test_node_of(node);
+    if (tn) {
+        tn->writable_bytes = buf;
+        if (buf)
+            tn->bytes = buf;
+    }
+}
+
+int vfs_write(struct vfs_node *node, uint64_t offset, uint64_t size,
+              void *buffer)
+{
+    check_no_registry_lock("vfs_write");
+    struct user_vm_test_node *tn = test_node_of(node);
+    if (!tn || offset >= tn->hdr.size)
+        return 0;
+    uint64_t n = tn->hdr.size - offset;
+    if (n > size)
+        n = size;
+    if (tn->writable_bytes)
+        memcpy(tn->writable_bytes + offset, buffer, (size_t)n);
+    return (int)n;
 }
 
 /* Registry nodes carry real reference accounting; the legacy opaque

@@ -279,6 +279,7 @@ int arch_vmm_map_user_io_4k(uint64_t *pgdir, uint64_t phys, uint64_t virt,
                             uint32_t vm_flags);
 struct vfs_node *user_vm_test_make_file_node(const unsigned char *bytes,
                                              uint64_t size);
+void user_vm_test_set_node_writable(struct vfs_node *node, unsigned char *buf);
 void user_vm_test_set_file_bytes(const unsigned char *bytes, uint64_t size);
 void user_vm_test_set_files(file_t *f);
 

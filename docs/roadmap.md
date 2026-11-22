@@ -13,7 +13,7 @@
 |-------|------|---------|------|
 | **P0** | 工程与测试基础设施 | 0 | flake 账本入库已于 2026-11-21 闭环（见 [`changelog.md`](changelog.md)） |
 | **P1** | 安全加固 | 2 | UBSan/KASan 后续项（v1 已于 2026-11-22 闭环）+ ASLR 剩余范围（栈基址随机化 / aarch64） |
-| **P2** | aarch64 适配 | 13 | 内存与执行体 1 · 能力齐平 7 · 架构统一 0 · 真机阻断 5 |
+| **P2** | aarch64 适配 | 12 | 内存与执行体 0 · 能力齐平 7 · 架构统一 0 · 真机阻断 5 |
 | **P2** | 架构治理 / 扩展性 | 0 | 新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填该节 |
 | **P3** | GUI | 7 | GUI-4/5/6 + 优化与验证 4 |
 | **P4** | 硬件适配 | 5 | USB 2 · NVMe · HPET · ACPI S3 |
@@ -43,9 +43,7 @@ AAGU-5 arch entropy facade（STRONG-only 控制流）→ 用户堆与 ELF 映射
 
 ### 内存管理与执行体后续任务
 
-| 任务 | 内容与完成条件 | 前置 |
-|------|----------------|------|
-| inode 级 `MAP_SHARED` 的剩余范围 | 架构中立共享对象注册表（`kernel/memory/shared_backing.c`，键 `(挂载实例, inode)`、匿名对象 fork 继承）+ aarch64 mmap/fork/uaccess/拆卸全链接入 + 产品 E2E `USER_RUNTIME_CASE=map-shared` **已于 2026-11-22 闭环**（见 [`changelog.md`](changelog.md) 与 [`memory/cow-mmap.md`](memory/cow-mmap.md) §3）。**剩余五项**：① 磁盘回写——共享页的修改落盘；② fd I/O 一致性——同一 inode 的 fd 读写与共享页可见性对齐；③ truncate 撤页——截断后对象页回收；④ 共享内存 ABI——对用户态暴露的共享内存约定；⑤ x86_64 用户 VM 接入——x86 侧 VM 策略与共享对象注册表打通 | 共享对象注册表 ✅、aarch64 接入 ✅（2026-11-22） |
+当前无剩余项。`inode 级 MAP_SHARED` 的剩余五项（磁盘回写、fd I/O 一致性、truncate 撤页、共享内存 ABI、`x86_64` 用户 VM 接入）已于 2026-11-22 全部闭环，见 [`changelog.md`](changelog.md#2026-11-22) 与 [`memory/cow-mmap.md`](memory/cow-mmap.md#3-跨进程-inode-级-map_shared2026-11-22aarch64)。
 
 ### 能力齐平：对标 x86_64 的剩余缺口（2026-11-21 扫描，2026-11-22 复核）
 
@@ -203,6 +201,7 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 
 | 闭环项 | 日期 | 详情 |
 |--------|------|------|
+| **inode 级 `MAP_SHARED` 剩余五项闭环**（磁盘回写 `msync`/`fsync`/`sync`/拆卸落盘、fd I/O 读写与共享页双向覆盖对齐、`vfs_truncate` 撤页与尾页清零回收、POSIX `shm_open`/`shm_unlink` + `SYS_msync`/`SYS_fsync` ABI、`x86_64` 用户 VM 全链接入共享对象注册表） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [cow-mmap](memory/cow-mmap.md#3-跨进程-inode-级-map_shared2026-11-22aarch64) · [syscall](syscall/syscall.md) |
 | **USB boot M0 固件检查点退役**（`USB_BOOT_CASE=firmware` 子用例删除：过期的 `rc=-19` 预期失败断言、case 表与 make 白名单一并收敛；其正面证明——xHCI 枚举 + MSC 发布 + GUID 选盘 usba 根 + 两个分区标记——并入 `readonly` 的成功证据链，并同步 `mk/components/run.mk` 的帮助文本与三处过期注释） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [build](build/build.md) · [driver](driver/driver.md) |
 | **跨进程 inode 级 `MAP_SHARED`**（架构中立共享对象注册表 `kernel/memory/shared_backing.c`，键 `(挂载实例, inode)`、匿名对象 fork 继承；aarch64 mmap/fork/uaccess/拆卸全链接入；产品 E2E `USER_RUNTIME_CASE=map-shared` 实跑 `/bin/test_map_shared` 覆盖会合/偏移隔离/rename/unlink/权限上限/两种拆卸入口） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [cow-mmap](memory/cow-mmap.md#3-跨进程-inode-级-map_shared2026-11-22aarch64) · [arch.md](arch.md) |
 | **x86_64 静态 PIE 与镜像基址随机化（ASLR-B）**（`x86_elf_pie_prepare()` 校验零链接 `ET_DYN`，逐页重定位跨页 `R_X86_64_RELATIVE`，PIE 偏移 `[0x00400000,0x10400000)` 抽取；PIE 偏移/`mmap_base`/`AT_RANDOM` 三段独立强熵、任一失败 fail-closed `-EAGAIN`；用户态与 BusyBox 全迁 `-fPIE` + `user-pie.ld`，`test-user-pie` 审计 47 产物） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [spec](superpowers/specs/2026-11-22-aslr-b-static-pie-design.md) · [cow-mmap](memory/cow-mmap.md) |

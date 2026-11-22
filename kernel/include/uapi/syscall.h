@@ -101,6 +101,8 @@
 #define SYS_fstatat       74   // fstatat(dirfd, path, buf, flags)
 #define SYS_getrlimit     75   // getrlimit(resource, rlim)
 #define SYS_setrlimit     76   // setrlimit(resource, rlim)
+#define SYS_msync         77   // msync(addr, length, flags)
+#define SYS_fsync         78   // fsync(fd)
 
 // ── reboot(2) commands ──────────────────────────────────────
 #define RB_AUTOBOOT    0x01234567

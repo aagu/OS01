@@ -42,16 +42,19 @@
 struct shared_page_node {
     uint64_t index;
     uint64_t pa;
+    bool     dirty;
     struct shared_page_node *next;
 };
 
 struct shared_backing {
     uint32_t refs;
     bool     anon;
+    uint64_t sync_gen;
     struct vfs_node *node;              /* file-backed: held reference */
     struct vfs_mount *mount;            /* file identity (NULL anon) */
     uint64_t ino;
     struct shared_page_node *pages[SHARED_PAGE_BUCKETS];
+    struct shared_page_node *retired_pages;
     struct shared_backing *file_next;   /* file-table collision chain */
 };
 
@@ -163,18 +166,37 @@ static struct shared_backing *backing_new(struct vfs_node *node)
     return b;
 }
 
-/* Runs with no registry lock held: frees every published page, the
- * object metadata and the held node reference. */
+/* Runs with no registry lock held: flushes any remaining dirty pages,
+ * frees every published and retired page, the object metadata and the
+ * held node reference. */
 static void backing_destroy(struct shared_backing *backing)
 {
     for (uint32_t i = 0; i < SHARED_PAGE_BUCKETS; i++) {
         struct shared_page_node *p = backing->pages[i];
         while (p) {
             struct shared_page_node *next = p->next;
+            if (p->dirty && !backing->anon && backing->node &&
+                p->index <= (UINT64_MAX >> PAGE_4K_SHIFT)) {
+                uint64_t off = p->index << PAGE_4K_SHIFT;
+                uint64_t file_size = backing->node->size;
+                if (off < file_size) {
+                    uint64_t avail = file_size - off;
+                    uint64_t len = avail < PAGE_4K_SIZE ? avail : PAGE_4K_SIZE;
+                    (void)vfs_write(backing->node, off, len,
+                                    Phy_To_Virt(p->pa));
+                }
+            }
             free_4k_page(p->pa);
             kfree(p);
             p = next;
         }
+    }
+    struct shared_page_node *rp = backing->retired_pages;
+    while (rp) {
+        struct shared_page_node *next = rp->next;
+        free_4k_page(rp->pa);
+        kfree(rp);
+        rp = next;
     }
     struct vfs_node *node = backing->node;
     kfree(backing);
@@ -379,4 +401,283 @@ recheck:
         return 0;
     }
     return ret;
+}
+
+__attribute__((weak)) bool arch_shared_backing_invalidate(
+    struct shared_backing *backing, uint64_t first_dead_index)
+{
+    (void)backing;
+    (void)first_dead_index;
+    return true;
+}
+
+void shared_backing_mark_dirty(struct shared_backing *backing, uint64_t index)
+{
+    if (!backing || backing->anon)
+        return;
+    uint64_t flags = REGISTRY_LOCK();
+    struct shared_page_node *hit = page_find_locked(backing, index);
+    if (hit)
+        hit->dirty = true;
+    REGISTRY_UNLOCK(flags);
+}
+
+int shared_backing_writeback_range(struct shared_backing *backing,
+                                   uint64_t start_index,
+                                   uint64_t end_index)
+{
+    if (!backing || backing->anon || !backing->node ||
+        start_index >= end_index)
+        return 0;
+
+    uint8_t *bounce = kmalloc(PAGE_4K_SIZE);
+    if (!bounce)
+        return -ENOMEM;
+
+    int first_err = 0;
+    uint64_t cursor = start_index;
+
+    for (;;) {
+        uint64_t flags = REGISTRY_LOCK();
+        struct shared_page_node *best = NULL;
+        for (uint32_t i = 0; i < SHARED_PAGE_BUCKETS; i++) {
+            for (struct shared_page_node *p = backing->pages[i]; p; p = p->next) {
+                if (!p->dirty || p->index < cursor || p->index >= end_index)
+                    continue;
+                if (!best || p->index < best->index)
+                    best = p;
+            }
+        }
+        if (!best) {
+            REGISTRY_UNLOCK(flags);
+            break;
+        }
+        uint64_t idx = best->index;
+        best->dirty = false;
+        memcpy(bounce, (const void *)Phy_To_Virt(best->pa), PAGE_4K_SIZE);
+        REGISTRY_UNLOCK(flags);
+
+        if (idx <= (UINT64_MAX >> PAGE_4K_SHIFT)) {
+            uint64_t off = idx << PAGE_4K_SHIFT;
+            uint64_t file_size = backing->node->size;
+            if (off < file_size) {
+                uint64_t avail = file_size - off;
+                uint64_t len = avail < PAGE_4K_SIZE ? avail : PAGE_4K_SIZE;
+                int n = vfs_write(backing->node, off, len, bounce);
+                if (n < 0 || (uint64_t)n < len) {
+                    flags = REGISTRY_LOCK();
+                    struct shared_page_node *hit = page_find_locked(backing, idx);
+                    if (hit)
+                        hit->dirty = true;
+                    REGISTRY_UNLOCK(flags);
+                    if (first_err == 0)
+                        first_err = (n == -ENOMEM) ? -ENOMEM : -EIO;
+                }
+            }
+        }
+
+        if (idx == UINT64_MAX)
+            break;
+        cursor = idx + 1;
+    }
+
+    kfree(bounce);
+    return first_err;
+}
+
+int shared_backing_writeback_all(struct shared_backing *backing)
+{
+    return shared_backing_writeback_range(backing, 0, UINT64_MAX);
+}
+
+int shared_backing_sync_file(struct vfs_node *node)
+{
+    if (!node || !node->mount || node->ino == 0)
+        return 0;
+
+    uint64_t flags = REGISTRY_LOCK();
+    struct shared_backing *b = file_find_locked(node->mount, node->ino);
+    if (b)
+        b->refs++;
+    REGISTRY_UNLOCK(flags);
+
+    if (!b)
+        return 0;
+
+    int rc = shared_backing_writeback_all(b);
+    shared_backing_put(b);
+    return rc;
+}
+
+int shared_backing_sync_all(void)
+{
+    static uint64_t g_sync_gen = 0;
+    uint64_t gen;
+
+    uint64_t flags = REGISTRY_LOCK();
+    gen = ++g_sync_gen;
+    if (gen == 0)
+        gen = ++g_sync_gen;
+    REGISTRY_UNLOCK(flags);
+
+    int first_err = 0;
+    for (;;) {
+        struct shared_backing *batch[16];
+        size_t count = 0;
+
+        flags = REGISTRY_LOCK();
+        for (uint32_t i = 0; i < SHARED_FILE_BUCKETS && count < 16; i++) {
+            for (struct shared_backing *b = g_shared_files[i]; b;
+                 b = b->file_next) {
+                if (b->sync_gen != gen) {
+                    b->sync_gen = gen;
+                    b->refs++;
+                    batch[count++] = b;
+                    if (count == 16)
+                        break;
+                }
+            }
+        }
+        REGISTRY_UNLOCK(flags);
+
+        if (count == 0)
+            break;
+
+        for (size_t i = 0; i < count; i++) {
+            int rc = shared_backing_writeback_all(batch[i]);
+            if (rc != 0 && first_err == 0)
+                first_err = rc;
+            shared_backing_put(batch[i]);
+        }
+    }
+    return first_err;
+}
+
+void shared_backing_read_overlay(struct vfs_node *node, uint64_t offset,
+                                 uint64_t size, void *buf)
+{
+    if (!node || !node->mount || node->ino == 0 || !buf || size == 0)
+        return;
+    if (offset > UINT64_MAX - size)
+        return;
+
+    uint64_t flags = REGISTRY_LOCK();
+    struct shared_backing *b = file_find_locked(node->mount, node->ino);
+    if (b) {
+        uint64_t cur = offset;
+        uint64_t end = offset + size;
+        while (cur < end) {
+            uint64_t idx = cur >> PAGE_4K_SHIFT;
+            uint64_t page_off = cur & (PAGE_4K_SIZE - 1);
+            uint64_t chunk = PAGE_4K_SIZE - page_off;
+            if (chunk > end - cur)
+                chunk = end - cur;
+            struct shared_page_node *hit = page_find_locked(b, idx);
+            if (hit) {
+                memcpy((uint8_t *)buf + (cur - offset),
+                       (const uint8_t *)Phy_To_Virt(hit->pa) + page_off,
+                       chunk);
+            }
+            cur += chunk;
+        }
+    }
+    REGISTRY_UNLOCK(flags);
+}
+
+void shared_backing_write_overlay(struct vfs_node *node, uint64_t offset,
+                                  uint64_t size, const void *buf)
+{
+    if (!node || !node->mount || node->ino == 0 || !buf || size == 0)
+        return;
+    if (offset > UINT64_MAX - size)
+        return;
+
+    uint64_t flags = REGISTRY_LOCK();
+    struct shared_backing *b = file_find_locked(node->mount, node->ino);
+    if (b) {
+        uint64_t cur = offset;
+        uint64_t end = offset + size;
+        while (cur < end) {
+            uint64_t idx = cur >> PAGE_4K_SHIFT;
+            uint64_t page_off = cur & (PAGE_4K_SIZE - 1);
+            uint64_t chunk = PAGE_4K_SIZE - page_off;
+            if (chunk > end - cur)
+                chunk = end - cur;
+            struct shared_page_node *hit = page_find_locked(b, idx);
+            if (hit) {
+                memcpy((uint8_t *)Phy_To_Virt(hit->pa) + page_off,
+                       (const uint8_t *)buf + (cur - offset),
+                       chunk);
+            }
+            cur += chunk;
+        }
+    }
+    REGISTRY_UNLOCK(flags);
+}
+
+void shared_backing_truncate(struct vfs_node *node, uint64_t new_size)
+{
+    if (!node || !node->mount || node->ino == 0)
+        return;
+
+    uint64_t first_dead = (new_size > UINT64_MAX - (PAGE_4K_SIZE - 1))
+                              ? ((UINT64_MAX >> PAGE_4K_SHIFT) + 1)
+                              : ((new_size + PAGE_4K_SIZE - 1) >> PAGE_4K_SHIFT);
+
+    uint64_t flags = REGISTRY_LOCK();
+    struct shared_backing *b = file_find_locked(node->mount, node->ino);
+    if (!b) {
+        REGISTRY_UNLOCK(flags);
+        return;
+    }
+    b->refs++;
+
+    if ((new_size & (PAGE_4K_SIZE - 1)) != 0) {
+        uint64_t tail_idx = new_size >> PAGE_4K_SHIFT;
+        uint64_t tail_off = new_size & (PAGE_4K_SIZE - 1);
+        struct shared_page_node *tail = page_find_locked(b, tail_idx);
+        if (tail) {
+            memset((uint8_t *)Phy_To_Virt(tail->pa) + tail_off, 0,
+                   PAGE_4K_SIZE - tail_off);
+        }
+    }
+
+    struct shared_page_node *dead = NULL;
+    for (uint32_t i = 0; i < SHARED_PAGE_BUCKETS; i++) {
+        struct shared_page_node **pp = &b->pages[i];
+        while (*pp) {
+            struct shared_page_node *p = *pp;
+            if (p->index >= first_dead) {
+                *pp = p->next;
+                p->next = dead;
+                dead = p;
+            } else {
+                pp = &p->next;
+            }
+        }
+    }
+    REGISTRY_UNLOCK(flags);
+
+    if (dead) {
+        bool all_unmapped = arch_shared_backing_invalidate(b, first_dead);
+        if (all_unmapped) {
+            while (dead) {
+                struct shared_page_node *next = dead->next;
+                free_4k_page(dead->pa);
+                kfree(dead);
+                dead = next;
+            }
+        } else {
+            flags = REGISTRY_LOCK();
+            while (dead) {
+                struct shared_page_node *next = dead->next;
+                dead->next = b->retired_pages;
+                b->retired_pages = dead;
+                dead = next;
+            }
+            REGISTRY_UNLOCK(flags);
+        }
+    }
+
+    shared_backing_put(b);
 }

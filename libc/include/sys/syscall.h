@@ -88,6 +88,8 @@
 #define SYS_fstatat       74   // fstatat(dirfd, path, buf, flags)
 #define SYS_getrlimit     75   // getrlimit(resource, rlim)
 #define SYS_setrlimit     76   // setrlimit(resource, rlim)
+#define SYS_msync         77   // msync(addr, length, flags)
+#define SYS_fsync         78   // fsync(fd)
 
 // Compile-time cross-check: libc SYS_* values must mirror kernel/include/uapi/syscall.h.
 // If the kernel side changes these numbers, update this assertion or libc will

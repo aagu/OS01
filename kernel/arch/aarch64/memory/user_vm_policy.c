@@ -386,6 +386,12 @@ int user_vm_cow_fault(mm_t *mm, uint64_t far)
     if (r->source == USER_VM_PAGE_BACKING) {
         if (!(r->logical & VM_USER_RW))
             return -EFAULT;
+        vma_t *v = vm_area_lookup(mm, r->va);
+        if (v && v->vm_shared_backing) {
+            uint64_t idx = v->vm_pgoff +
+                           ((r->va - v->vm_start) >> PAGE_4K_SHIFT);
+            shared_backing_mark_dirty(v->vm_shared_backing, idx);
+        }
         uint64_t *root = aarch64_user_vm_root_va(mm);
         if (arch_vmm_update_4k(root, r->pa, r->va, r->logical,
                                NULL, NULL) != 0)
@@ -1268,6 +1274,13 @@ int64_t user_vm_munmap(mm_t *mm, uint64_t addr, uint64_t len)
         list_t *next = lp->next;
         vma_t *v = container_of(lp, vma_t, list);
         if (v->vm_end > addr && v->vm_start < end) {
+            if (v->vm_shared_backing &&
+                (v->vm_flags & VMA_SHARED_MAYWRITE) && v->vm_file) {
+                uint64_t pages = (v->vm_end - v->vm_start) >> PAGE_4K_SHIFT;
+                shared_backing_writeback_range(v->vm_shared_backing,
+                                               v->vm_pgoff,
+                                               v->vm_pgoff + pages);
+            }
             aarch64_user_vm_vma_put_refs(v);
             vm_area_unlink(v);
             kfree(v);
@@ -1275,6 +1288,64 @@ int64_t user_vm_munmap(mm_t *mm, uint64_t addr, uint64_t len)
         lp = next;
     }
     return 0;
+}
+
+#define A64_MS_ASYNC      1ULL
+#define A64_MS_INVALIDATE 2ULL
+#define A64_MS_SYNC       4ULL
+
+int64_t user_vm_msync(mm_t *mm, uint64_t addr, uint64_t len, uint64_t flags)
+{
+    if (!mm)
+        return -EINVAL;
+    if (addr & ((uint64_t)PAGE_4K_SIZE - 1))
+        return -EINVAL;
+    if (flags & ~(A64_MS_ASYNC | A64_MS_INVALIDATE | A64_MS_SYNC))
+        return -EINVAL;
+    if ((flags & A64_MS_ASYNC) && (flags & A64_MS_SYNC))
+        return -EINVAL;
+    if (len == 0)
+        return 0;
+
+    uint64_t alen = page_align_up(len);
+    if (alen < len || addr > UINT64_MAX - alen)
+        return -ENOMEM;
+    uint64_t end = addr + alen;
+
+    if (addr < USER_VM_MMAP_BASE || end > AARCH64_USER_LIMIT)
+        return -ENOMEM;
+
+    uint64_t p = addr;
+    while (p < end) {
+        vma_t *v = vm_area_lookup(mm, p);
+        if (!v || !policy_vma_is_mmap(v) || v->vm_end <= p)
+            return -ENOMEM;
+        p = v->vm_end;
+    }
+
+    if (flags & A64_MS_ASYNC)
+        return 0;
+
+    int first_err = 0;
+    for (list_t *lp = mm->vma_list.next; lp != &mm->vma_list; lp = lp->next) {
+        vma_t *v = container_of(lp, vma_t, list);
+        if (v->vm_end <= addr) continue;
+        if (v->vm_start >= end) break;
+        if (v->vm_shared_backing && v->vm_file &&
+            (v->vm_flags & VMA_SHARED_MAYWRITE)) {
+            uint64_t seg_start = (addr > v->vm_start) ? addr : v->vm_start;
+            uint64_t seg_end   = (end < v->vm_end) ? end : v->vm_end;
+            uint64_t s_idx = v->vm_pgoff +
+                             ((seg_start - v->vm_start) >> PAGE_4K_SHIFT);
+            uint64_t e_idx = v->vm_pgoff +
+                             ((seg_end - v->vm_start) >> PAGE_4K_SHIFT);
+            int rc = shared_backing_writeback_range(v->vm_shared_backing,
+                                                    s_idx, e_idx);
+            if (rc != 0 && first_err == 0)
+                first_err = rc;
+        }
+    }
+    return first_err;
 }
 
 /* ── Demand paging ─────────────────────────────────────────────── */
@@ -1322,6 +1393,8 @@ static int instantiate_absent(mm_t *mm, uint64_t va, uint32_t map_vm,
         }
         rec->source = USER_VM_PAGE_BACKING;
         rec->pa = pa;
+        if (map_vm & VM_USER_RW)
+            shared_backing_mark_dirty(v->vm_shared_backing, index);
     } else {
         uint64_t pa = alloc_4k_page();
         if (!pa) {
@@ -1362,6 +1435,32 @@ static int instantiate_absent(mm_t *mm, uint64_t va, uint32_t map_vm,
     }
     *out = rec;
     return 0;
+}
+
+void user_vm_invalidate_backing(mm_t *mm, struct shared_backing *backing,
+                                uint64_t first_dead_index)
+{
+    if (!mm || !backing)
+        return;
+    uint64_t *root = aarch64_user_vm_root_va(mm);
+    if (!root)
+        return;
+
+    list_t *lp = mm->resident_list.next;
+    while (lp) {
+        list_t *next = lp->next;
+        user_vm_page_t *r = container_of(lp, user_vm_page_t, list);
+        if (r->source == USER_VM_PAGE_BACKING) {
+            vma_t *v = vm_area_lookup(mm, r->va);
+            if (v && v->vm_shared_backing == backing) {
+                uint64_t idx = v->vm_pgoff +
+                               ((r->va - v->vm_start) >> PAGE_4K_SHIFT);
+                if (idx >= first_dead_index)
+                    resident_remove_leaf(mm, r, root);
+            }
+        }
+        lp = next;
+    }
 }
 
 int user_vm_fault(mm_t *mm, uint64_t far, bool write)

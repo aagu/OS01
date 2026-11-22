@@ -3412,6 +3412,73 @@ TEST_FUNC(test_range_accessible_cow_and_absent)
     assert_eq(user_vm_test_double_frees(), 0);
 }
 
+TEST_FUNC(test_shared_backing_writeback_and_overlays)
+{
+    user_vm_test_reset();
+    struct vfs_mount *m = user_vm_test_make_mount("ext2");
+    static unsigned char disk_buf[8192];
+    memset(disk_buf, 0x11, sizeof(disk_buf));
+    /* Node size = 5000 bytes (page 0 full 4096, page 1 partial 904 bytes). */
+    struct vfs_node *n = user_vm_test_make_mount_node(m, 777, disk_buf, 5000);
+    user_vm_test_set_node_writable(n, disk_buf);
+
+    struct shared_backing *obj = NULL;
+    assert_eq(0, shared_backing_open_file(n, &obj));
+    assert_not_null(obj);
+
+    uint64_t pa0 = 0, pa1 = 0;
+    assert_eq(0, shared_backing_page(obj, 0, &pa0));
+    assert_eq(0, shared_backing_page(obj, 1, &pa1));
+    unsigned char *p0 = (unsigned char *)Phy_To_Virt(pa0);
+    unsigned char *p1 = (unsigned char *)Phy_To_Virt(pa1);
+
+    /* Modify page 0 and page 1 (including past EOF at offset 5000). */
+    p0[10] = 0xAA;
+    p1[10] = 0xBB;
+    p1[2000] = 0xCC; /* beyond node->size (5000): must NOT overwrite disk_buf[6096] */
+    shared_backing_mark_dirty(obj, 0);
+    shared_backing_mark_dirty(obj, 1);
+
+    /* Read overlay sees uncommitted dirty bytes before writeback. */
+    unsigned char rbuf[16];
+    memset(rbuf, 0, sizeof(rbuf));
+    shared_backing_read_overlay(n, 8, 8, rbuf);
+    assert_eq(0xAA, rbuf[2]);
+
+    /* Writeback flushes dirty bytes clamped to node->size. */
+    assert_eq(0, shared_backing_sync_file(n));
+    assert_eq(0xAA, disk_buf[10]);
+    assert_eq(0xBB, disk_buf[4096 + 10]);
+    assert_eq(0x11, disk_buf[4096 + 2000]);
+
+    /* Write overlay updates already-cached shared page. */
+    unsigned char wbuf[4] = { 0xDE, 0xAD, 0xBE, 0xEF };
+    shared_backing_write_overlay(n, 20, 4, wbuf);
+    assert_eq(0xDE, p0[20]);
+    assert_eq(0xEF, p0[23]);
+
+    /* Truncate to 100 bytes: zeroes [100, 4096) in page 0 and reclaims page 1. */
+    int frees_before = user_vm_test_free_count();
+    n->size = 100;
+    shared_backing_truncate(n, 100);
+    assert_eq(0xAA, p0[10]);
+    assert_eq(0x00, p0[100]);
+    assert_eq(0x00, p0[4095]);
+    assert_true(user_vm_test_free_count() > frees_before);
+
+    /* Re-fetching page 1 allocates a fresh zeroed page (no stale 0xBB). */
+    uint64_t pa1_new = 0;
+    assert_eq(0, shared_backing_page(obj, 1, &pa1_new));
+    unsigned char *p1_new = (unsigned char *)Phy_To_Virt(pa1_new);
+    assert_eq(0x00, p1_new[10]);
+
+    shared_backing_put(obj);
+    assert_eq(0, user_vm_test_lock_violations());
+    assert_eq(0, user_vm_test_double_frees());
+    assert_eq(user_vm_test_kmallocs(), user_vm_test_kfrees());
+    assert_eq(user_vm_test_page_allocs(), user_vm_test_free_count());
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_mmap_and_brk_growth_allocate_no_pages),
     TEST_ENTRY(test_mprotect_split_node_failure_changes_nothing),
@@ -3479,6 +3546,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_shared_vma_retire),
     TEST_ENTRY(test_shared_file_protect_ceiling),
     TEST_ENTRY(test_range_accessible_cow_and_absent),
+    TEST_ENTRY(test_shared_backing_writeback_and_overlays),
 TEST_LIST_END
 
 int main(void)

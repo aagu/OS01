@@ -17,6 +17,7 @@
 #include <memory/vma.h>         // VMA_* logical flags, PROT_*/MAP_*
 #include <memory/vm_area.h>     // shared list primitives
 #include <memory/vm_device.h>   // enum vm_device_cache
+#include <memory/shared_backing.h>
 #include <fs/file.h>            // files_get_file / files_put_file
 #include <arch/spinlock.h>      // mm->lock
 #include <arch/x86_64/pte.h>    // PAGE_* hardware bits, x86_pte_4k_*
@@ -124,7 +125,8 @@ static void split_vma_locked(mm_t *mm, vma_t *left, uint64_t at,
 static void unmap_vma_leaves(uint64_t *root, const vma_t *vma,
                              uint64_t start, uint64_t end)
 {
-    bool borrowed = (vma->vm_flags & VMA_IO) != 0;
+    bool borrowed = (vma->vm_flags & VMA_IO) != 0 ||
+                    vma->vm_shared_backing != NULL;
     uint64_t old_ptes[UNMAP_LEAF_BATCH];
     int n = 0;
     bool changed = false;
@@ -144,6 +146,11 @@ static void unmap_vma_leaves(uint64_t *root, const vma_t *vma,
         uint64_t old = x86_vmm_take_4k(root, va);
         if (old) {
             changed = true;
+            if (vma->vm_shared_backing && (old & PAGE_DIRTY)) {
+                uint64_t idx = vma->vm_pgoff +
+                               ((va - vma->vm_start) >> PAGE_4K_SHIFT);
+                shared_backing_mark_dirty(vma->vm_shared_backing, idx);
+            }
             if (!borrowed) {
                 old_ptes[n++] = old;
                 if (n == UNMAP_LEAF_BATCH) {
@@ -281,7 +288,15 @@ static void commit_unmap_locked(mm_t *mm, uint64_t start, uint64_t end,
 static void release_retired_vmas(list_t *retired)
 {
     while (!list_is_empty(retired)) {
-        x86_vma_destroy_node(container_of(retired->next, vma_t, list));
+        vma_t *v = container_of(retired->next, vma_t, list);
+        if (v->vm_shared_backing && (v->vm_flags & VMA_SHARED_MAYWRITE) &&
+            v->vm_file) {
+            uint64_t pages = (v->vm_end - v->vm_start) >> PAGE_4K_SHIFT;
+            shared_backing_writeback_range(v->vm_shared_backing,
+                                           v->vm_pgoff,
+                                           v->vm_pgoff + pages);
+        }
+        x86_vma_destroy_node(v);
     }
 }
 
@@ -656,7 +671,47 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         return (int64_t)dv->vm_start;
     }
 
-    // ── 5. Ordinary mapping: select + commit under one lock ──
+    // ── 5. Ordinary mapping: prepare shared backing, then commit ──
+    struct shared_backing *backing = NULL;
+    bool maywrite = false;
+    if (flags & MAP_SHARED) {
+        if (!(flags & MAP_ANONYMOUS)) {
+            if (!file || file->type != FD_VFS || !file_node) {
+                if (file_node) vfs_node_put(file_node);
+                if (file) files_put_file(file);
+                return -EBADF;
+            }
+            uint32_t mode = (uint32_t)file->flags & 3u;
+            if (mode == O_WRONLY) {
+                vfs_node_put(file_node);
+                files_put_file(file);
+                return -EACCES;
+            }
+            if ((vm_flags_base & VMA_PROT_WRITE) && mode != O_RDWR) {
+                vfs_node_put(file_node);
+                files_put_file(file);
+                return -EACCES;
+            }
+            if ((int64_t)offset < 0 ||
+                length - PAGE_4K_SIZE > (uint64_t)INT64_MAX - offset) {
+                vfs_node_put(file_node);
+                files_put_file(file);
+                return -EINVAL;
+            }
+            int orc = shared_backing_open_file(file_node, &backing);
+            if (orc != 0) {
+                vfs_node_put(file_node);
+                files_put_file(file);
+                return orc;
+            }
+            maywrite = (mode == O_RDWR);
+        } else {
+            if (shared_backing_create_anon(&backing) != 0)
+                return -ENOMEM;
+            maywrite = true;
+        }
+    }
+
     mm_t *mm = current->mm;
     spin_lock(&mm->lock);
 
@@ -664,6 +719,7 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         int gap_rc = mmap_find_gap_locked(mm, length, limit, &addr);
         if (gap_rc != 0 || mm_user_range_protected(mm, addr, addr + length)) {
             spin_unlock(&mm->lock);
+            if (backing) shared_backing_put(backing);
             if (file_node) vfs_node_put(file_node);
             if (file) files_put_file(file);
             return -ENOMEM;
@@ -675,6 +731,7 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         rc = prepare_unmap_locked(mm, addr, addr + length, &right);
         if (rc != 0) {
             spin_unlock(&mm->lock);
+            if (backing) shared_backing_put(backing);
             if (file_node) vfs_node_put(file_node);
             if (file) files_put_file(file);
             return rc;
@@ -685,6 +742,7 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     if (!vma) {
         if (right) kfree(right);
         spin_unlock(&mm->lock);
+        if (backing) shared_backing_put(backing);
         if (file_node) vfs_node_put(file_node);
         if (file) files_put_file(file);
         return -ENOMEM;
@@ -698,10 +756,10 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     list_init(&vma->list);
     vma->vm_start     = addr;
     vma->vm_end       = addr + length;
-    vma->vm_flags     = vm_flags_base;
+    vma->vm_flags     = vm_flags_base | (maywrite ? VMA_SHARED_MAYWRITE : 0);
     vma->vm_pgoff     = offset >> PAGE_4K_SHIFT;
     vma->vm_file      = file_node;
-    vma->vm_shared_backing = NULL;
+    vma->vm_shared_backing = backing;
     vm_area_insert_sorted(mm, vma);
 
     spin_unlock(&mm->lock);
@@ -742,11 +800,14 @@ static void split_vma_locked(mm_t *mm, vma_t *left, uint64_t at,
     list_init(&right->list);
     right->vm_start = at;
     right->vm_end   = left->vm_end;
-    if (left->vm_file) {
+    if (left->vm_file || left->vm_shared_backing) {
         right->vm_pgoff = left->vm_pgoff +
                           ((at - left->vm_start) >> PAGE_4K_SHIFT);
-        vfs_node_get(right->vm_file);
     }
+    if (right->vm_file)
+        vfs_node_get(right->vm_file);
+    if (right->vm_shared_backing)
+        shared_backing_get(right->vm_shared_backing);
     left->vm_end = at;
     vm_area_insert_sorted(mm, right);
 }
@@ -818,6 +879,12 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
         if (v->vm_flags & VMA_IO) {
             spin_unlock(&mm->lock);
             return -EPERM;
+        }
+        if ((v->vm_flags & VMA_SHARED) && v->vm_shared_backing &&
+            (new_vm_flags & VMA_PROT_WRITE) &&
+            !(v->vm_flags & VMA_SHARED_MAYWRITE)) {
+            spin_unlock(&mm->lock);
+            return -EACCES;
         }
         scan_addr = v->vm_end;
         if (scan_addr >= end) break;
@@ -915,6 +982,12 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
                 *pte = x86_pte_4k_make(
                     phys, (new_page_prot & ~PAGE_WRITE) | PAGE_COW | cache);
             } else {
+                if (v->vm_shared_backing &&
+                    ((*pte & PAGE_DIRTY) || (new_vm_flags & VMA_PROT_WRITE))) {
+                    uint64_t idx = v->vm_pgoff +
+                                   ((va - v->vm_start) >> PAGE_4K_SHIFT);
+                    shared_backing_mark_dirty(v->vm_shared_backing, idx);
+                }
                 *pte = x86_pte_4k_make(phys, new_page_prot | cache);
             }
         }
@@ -927,4 +1000,100 @@ int64_t do_mprotect(uint64_t addr, uint64_t length, uint64_t prot)
 
     spin_unlock(&mm->lock);
     return 0;
+}
+
+#define X86_MS_ASYNC      1ULL
+#define X86_MS_INVALIDATE 2ULL
+#define X86_MS_SYNC       4ULL
+
+int64_t do_msync(uint64_t addr, uint64_t length, uint64_t flags)
+{
+    if (addr & (PAGE_4K_SIZE - 1))
+        return -EINVAL;
+    if (flags & ~(X86_MS_ASYNC | X86_MS_INVALIDATE | X86_MS_SYNC))
+        return -EINVAL;
+    if ((flags & X86_MS_ASYNC) && (flags & X86_MS_SYNC))
+        return -EINVAL;
+    if (length == 0)
+        return 0;
+
+    uint64_t rounded = PAGE_4K_ALIGN(length);
+    if (rounded < length || addr > UINT64_MAX - rounded)
+        return -ENOMEM;
+    uint64_t end = addr + rounded;
+
+    if (!current->mm)
+        return -EINVAL;
+    uint64_t limit = mmap_effective_limit(current->addr_limit);
+    if (addr < X86_USER_MIN_ADDR || end > limit)
+        return -ENOMEM;
+
+    mm_t *mm = current->mm;
+    struct msync_item {
+        struct shared_backing *backing;
+        uint64_t start_idx;
+        uint64_t end_idx;
+    };
+    struct msync_item items[8];
+    size_t n_items = 0;
+
+    spin_lock(&mm->lock);
+    uint64_t *pgd = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
+    uint64_t scan = addr;
+    for (list_t *pos = mm->vma_list.next; pos != &mm->vma_list; pos = pos->next) {
+        vma_t *v = container_of(pos, vma_t, list);
+        if (v->vm_end <= scan) continue;
+        if (v->vm_start >= end) break;
+        if (v->vm_start > scan) {
+            spin_unlock(&mm->lock);
+            for (size_t i = 0; i < n_items; i++)
+                shared_backing_put(items[i].backing);
+            return -ENOMEM;
+        }
+        uint64_t seg_start = (addr > v->vm_start) ? addr : v->vm_start;
+        uint64_t seg_end   = (end < v->vm_end) ? end : v->vm_end;
+        if (v->vm_shared_backing && v->vm_file &&
+            (v->vm_flags & VMA_SHARED_MAYWRITE)) {
+            for (uint64_t va = seg_start; va < seg_end; va += PAGE_4K_SIZE) {
+                uint64_t *pte = vmm_pt_walk(pgd, va, 0, 0);
+                if (pte && (*pte & PAGE_VALID) && (*pte & PAGE_DIRTY)) {
+                    uint64_t idx = v->vm_pgoff +
+                                   ((va - v->vm_start) >> PAGE_4K_SHIFT);
+                    shared_backing_mark_dirty(v->vm_shared_backing, idx);
+                }
+            }
+            if (n_items < 8) {
+                shared_backing_get(v->vm_shared_backing);
+                uint64_t s_idx = v->vm_pgoff +
+                                 ((seg_start - v->vm_start) >> PAGE_4K_SHIFT);
+                uint64_t e_idx = v->vm_pgoff +
+                                 ((seg_end - v->vm_start) >> PAGE_4K_SHIFT);
+                items[n_items++] = (struct msync_item){
+                    v->vm_shared_backing, s_idx, e_idx
+                };
+            }
+        }
+        scan = v->vm_end;
+        if (scan >= end) break;
+    }
+    spin_unlock(&mm->lock);
+
+    if (scan < end) {
+        for (size_t i = 0; i < n_items; i++)
+            shared_backing_put(items[i].backing);
+        return -ENOMEM;
+    }
+
+    int first_err = 0;
+    for (size_t i = 0; i < n_items; i++) {
+        if (!(flags & X86_MS_ASYNC)) {
+            int rc = shared_backing_writeback_range(items[i].backing,
+                                                    items[i].start_idx,
+                                                    items[i].end_idx);
+            if (rc != 0 && first_err == 0)
+                first_err = rc;
+        }
+        shared_backing_put(items[i].backing);
+    }
+    return first_err;
 }

@@ -58,6 +58,45 @@ void shared_backing_put(struct shared_backing *backing);
 int shared_backing_page(struct shared_backing *backing, uint64_t index,
                         uint64_t *pa_out);
 
+/* Mark page `index` dirty for writeback (file-backed only; no-op for
+ * anonymous or absent pages). */
+void shared_backing_mark_dirty(struct shared_backing *backing, uint64_t index);
+
+/* Write back dirty pages in [start_index, end_index) to the backing
+ * file, clamped to node->size.  No-op for anonymous objects. */
+int shared_backing_writeback_range(struct shared_backing *backing,
+                                   uint64_t start_index,
+                                   uint64_t end_index);
+int shared_backing_writeback_all(struct shared_backing *backing);
+
+/* Flush any active file-backed shared object for `node`, or all active
+ * file-backed shared objects in the registry. */
+int shared_backing_sync_file(struct vfs_node *node);
+int shared_backing_sync_all(void);
+
+/* fd I/O consistency overlays: read_overlay patches `buf` with any
+ * cached shared pages overlapping [offset, offset + size);
+ * write_overlay updates any already-cached shared pages overlapping
+ * [offset, offset + size) from `buf`. */
+void shared_backing_read_overlay(struct vfs_node *node, uint64_t offset,
+                                 uint64_t size, void *buf);
+void shared_backing_write_overlay(struct vfs_node *node, uint64_t offset,
+                                  uint64_t size, const void *buf);
+
+/* Truncate invalidation: zeroes any partial tail beyond `new_size` in
+ * the boundary page, detaches pages >= PAGE_4K_ALIGN(new_size), and
+ * invokes arch_shared_backing_invalidate() to unmap PTEs before
+ * reclaiming their physical pages. */
+void shared_backing_truncate(struct vfs_node *node, uint64_t new_size);
+
+/* Architecture hook: unmap all leaves for `backing` with page index
+ * >= `first_dead_index` across active address spaces and synchronize
+ * TLBs.  Returns true if all holders were unmapped so the pages can be
+ * freed immediately; false if any holder could not be quiesced (pages
+ * are retained until backing_destroy). */
+bool arch_shared_backing_invalidate(struct shared_backing *backing,
+                                    uint64_t first_dead_index);
+
 #ifdef OS01_HOST_TEST
 /* Host race-test observability: how many critical sections the
  * current thread is inside.  The mock backend asserts this stays 0

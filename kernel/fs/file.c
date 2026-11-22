@@ -14,6 +14,7 @@
 #include <fs/devfs.h>
 #include <sys/stat.h>
 #include <memory/uaccess.h>
+#include <memory/shared_backing.h>
 #include <selftest/boot_failure_fixture.h>
 #include <arch/features.h>
 #include <arch/mmu.h>            // ARCH_PAGE_OFFSET (kernel VA lower bound)   // OS01_HAS_NET (lwIP socket fd paths)
@@ -897,6 +898,9 @@ int64_t fd_read(file_t *f, void *buf, uint64_t size)
             int64_t n = vfs_file_read(f, f->offset, chunk, kbuf);
             if (n < 0) { last_err = n; break; }   // I/O error (preserved)
             if (n == 0) break;                    // EOF
+            if (f->type == FD_VFS && !f->node->f_ops->read_file)
+                shared_backing_read_overlay(f->node, f->offset,
+                                            (uint64_t)n, kbuf);
 
             ssize_t rc = copy_to_user_ft(
                 (uint8_t *)buf + committed, kbuf, (size_t)n);
@@ -1212,6 +1216,13 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
 
             mutex_lock(&f->pos_lock);
             int64_t n = vfs_append(f, chunk, abuf);
+            if (n > 0) {
+                uint64_t write_off = (f->offset >= (uint64_t)n)
+                                         ? (f->offset - (uint64_t)n)
+                                         : 0;
+                shared_backing_write_overlay(f->node, write_off,
+                                             (uint64_t)n, abuf);
+            }
             mutex_unlock(&f->pos_lock);
             kfree(abuf);
             if (n < 0) return n;
@@ -1259,6 +1270,9 @@ int64_t fd_write(file_t *f, const void *buf, uint64_t size)
                 }
                 break;
             }
+            if (f->type == FD_VFS)
+                shared_backing_write_overlay(f->node, f->offset,
+                                             (uint64_t)n, kbuf);
             f->offset += (uint64_t)n;
             committed += (uint64_t)n;
             if ((uint64_t)n < chunk) break;    // short write

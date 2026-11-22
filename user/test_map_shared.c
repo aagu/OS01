@@ -226,13 +226,13 @@ static void role_execrole(char *path, char *fdspec, char *mode)
         execv("/bin/test_map_shared", argv);
         fail("exec-reexec");
     }
-    /* post-exec image: remap and read the backend's original bytes. */
+    /* post-exec image: remap and read the written-back modification. */
     int fd = open(path, O_RDWR);
     if (fd < 0)
         fail("exec-post-open");
     volatile uint8_t *va = (volatile uint8_t *)map_at(
         0x41500000ULL, PAGE, PROT_READ, fd, 0, "exec-post-mmap");
-    if (va[0] != 0x3A)
+    if (va[0] != 0x88)
         fail("exec-post-content");
     xwrite(pw, "ok", 2, "exec-post-sig");
     close(pr);
@@ -443,13 +443,13 @@ int main(int argc, char **argv)
     if (*(volatile uint8_t *)((uintptr_t)rva) != 0x99)
         fail("p3b-independtent");
 
-    /* Backend edits: a filled page keeps the mapped view, an unfilled
-     * page observes the backend on first fill. */
+    /* Backend edits: fd write updates the cached shared page immediately,
+     * and an unfilled page observes the backend on first fill. */
     if (lseek(fd, 0, SEEK_SET) < 0)
         fail("p3b-seek0");
     if (write(fd, &(char){0x71}, 1) != 1)
         fail("p3b-bkwrite0");
-    if (*(volatile uint8_t *)((uintptr_t)rva) != 0x99)
+    if (*(volatile uint8_t *)((uintptr_t)rva) != 0x71)
         fail("p3b-cache-keeps");
     if (lseek(fd, PAGE, SEEK_SET) < 0)
         fail("p3b-seek1");
@@ -644,15 +644,118 @@ int main(int argc, char **argv)
     if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) ||
         WEXITSTATUS(st) != 0)
         fail("p7-wait");
-    /* The child's exit dropped the last reference: the parent's remap
-     * refills from the backend, not from the child's modification. */
+    /* The child's exit wrote back dirty pages and dropped the last
+     * reference: the parent's remap sees the child's modification. */
     void *xva = map_at(0x41700000ULL, PAGE, PROT_READ | PROT_WRITE,
                        fd, 0, "p7-remap");
-    if (*(volatile uint8_t *)xva != 0x4A)
+    if (*(volatile uint8_t *)xva != 0x99)
         fail("p7-exit-teardown");
     munmap(xva, PAGE);
     close(fd);
     unlink(EXIT_FIXTURE);
+
+    /* ── Phase 8: writeback, fd I/O consistency, truncate, shm_open ─ */
+    {
+        const char *WB_FIX = "/tmp/mapt_wb.bin";
+        fd = open(WB_FIX, O_CREAT | O_RDWR | O_TRUNC, 0644);
+        if (fd < 0)
+            fail("p8-create");
+        fill_fd(fd, 0x22, PAGE * 2, "p8-init");
+
+        volatile uint8_t *wva = (volatile uint8_t *)map_at(
+            0x41800000ULL, PAGE * 2, PROT_READ | PROT_WRITE, fd, 0, "p8-mmap");
+        wva[5] = 0x91;
+        wva[PAGE + 7] = 0x92;
+
+        /* ② fd read sees uncommitted MAP_SHARED writes immediately. */
+        uint8_t rdbuf[8];
+        if (lseek(fd, 5, SEEK_SET) != 5)
+            fail("p8-lseek1");
+        xread(fd, rdbuf, 1, "p8-fd-read");
+        if (rdbuf[0] != 0x91)
+            fail("p8-fd-read-overlay");
+
+        /* ② fd write is immediately visible through MAP_SHARED. */
+        if (lseek(fd, 12, SEEK_SET) != 12)
+            fail("p8-lseek2");
+        uint8_t wbyte = 0xA5;
+        xwrite(fd, &wbyte, 1, "p8-fd-write");
+        if (wva[12] != 0xA5)
+            fail("p8-fd-write-overlay");
+
+        /* ① msync flushes to backend; unmapping + remapping after drop
+         *    must still read the flushed bytes from backend. */
+        if (msync((void *)wva, PAGE * 2, MS_SYNC) != 0)
+            fail("p8-msync");
+        if (fsync(fd) != 0)
+            fail("p8-fsync");
+        munmap((void *)wva, PAGE * 2);
+
+        if (lseek(fd, 5, SEEK_SET) != 5)
+            fail("p8-lseek3");
+        xread(fd, rdbuf, 1, "p8-wb-read0");
+        if (rdbuf[0] != 0x91)
+            fail("p8-wb-verify0");
+        if (lseek(fd, PAGE + 7, SEEK_SET) != PAGE + 7)
+            fail("p8-lseek4");
+        xread(fd, rdbuf, 1, "p8-wb-read1");
+        if (rdbuf[0] != 0x92)
+            fail("p8-wb-verify1");
+
+        /* ③ ftruncate invalidates page 1 and zeroes tail of page 0. */
+        wva = (volatile uint8_t *)map_at(
+            0x41800000ULL, PAGE * 2, PROT_READ | PROT_WRITE, fd, 0, "p8-mmap2");
+        wva[200] = 0x7E;
+        wva[PAGE + 7] = 0x7F;
+        if (ftruncate(fd, 100) != 0)
+            fail("p8-ftruncate-shrink");
+        if (ftruncate(fd, PAGE * 2) != 0)
+            fail("p8-ftruncate-grow");
+        if (wva[5] != 0x91 || wva[200] != 0x00 || wva[PAGE + 7] != 0x00)
+            fail("p8-truncate-zero");
+        munmap((void *)wva, PAGE * 2);
+        close(fd);
+        unlink(WB_FIX);
+    }
+
+    /* ④ POSIX shm_open / shm_unlink across fork. */
+    {
+        const char *shm_name = "/os01_shm_test";
+        shm_unlink(shm_name);
+        int sfd = shm_open(shm_name, O_CREAT | O_EXCL | O_RDWR, 0600);
+        if (sfd < 0)
+            fail("p8-shm-open");
+        if (ftruncate(sfd, PAGE) != 0)
+            fail("p8-shm-ftruncate");
+        volatile uint8_t *sva = (volatile uint8_t *)map_at(
+            0x41900000ULL, PAGE, PROT_READ | PROT_WRITE, sfd, 0, "p8-shm-mmap");
+        sva[0] = 0x5A;
+
+        pid = fork();
+        if (pid == 0) {
+            int cfd = shm_open(shm_name, O_RDWR, 0);
+            if (cfd < 0)
+                fail("p8-shm-child-open");
+            volatile uint8_t *cva = (volatile uint8_t *)map_at(
+                0x41A00000ULL, PAGE, PROT_READ | PROT_WRITE, cfd, 0,
+                "p8-shm-child-mmap");
+            if (cva[0] != 0x5A)
+                fail("p8-shm-child-read");
+            cva[1] = 0xA5;
+            munmap((void *)cva, PAGE);
+            close(cfd);
+            exit(0);
+        }
+        if (waitpid(pid, &st, 0) != pid || !WIFEXITED(st) ||
+            WEXITSTATUS(st) != 0)
+            fail("p8-shm-wait");
+        if (sva[1] != 0xA5)
+            fail("p8-shm-parent-read");
+        munmap((void *)sva, PAGE);
+        close(sfd);
+        if (shm_unlink(shm_name) != 0)
+            fail("p8-shm-unlink");
+    }
 
     printf("test_map_shared: PASS\n");
     return 0;

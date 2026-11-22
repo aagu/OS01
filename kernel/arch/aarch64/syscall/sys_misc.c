@@ -18,6 +18,7 @@
 #define GRND_NONBLOCK 0x0001UL
 #define GRND_RANDOM   0x0002UL
 #include <block/blockdev.h>
+#include <memory/shared_backing.h>
 #include <arch/aarch64/psci.h>
 #include <uapi/time.h>                 /* struct utsname (kernel UAPI) */
 #include <log/log.h>
@@ -51,8 +52,9 @@ int64_t sys_misc_dispatch(syscall_ctx_t *ctx)
         break;
     }
     case SYS_sync: {
-        // sync() — write back the ARCH-6 block cache for every disk.
-        int first_err = 0;
+        // sync() — write back dirty shared mappings first, then flush
+        // the ARCH-6 block cache for every disk.
+        int first_err = shared_backing_sync_all();
         for (int i = 0; ; i++) {
             block_device_t *d = block_device_get(i);
             if (!d)

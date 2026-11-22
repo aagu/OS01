@@ -37,3 +37,20 @@ uint64_t task_nofile_soft(struct task_struct *t)
     (void)t;
     return OS01_NOFILE_CAPACITY;
 }
+
+struct vfs_node;
+__attribute__((weak)) void shared_backing_read_overlay(
+    struct vfs_node *node, uint64_t offset, uint64_t size, void *buf)
+{
+    (void)node; (void)offset; (void)size; (void)buf;
+}
+__attribute__((weak)) void shared_backing_write_overlay(
+    struct vfs_node *node, uint64_t offset, uint64_t size, const void *buf)
+{
+    (void)node; (void)offset; (void)size; (void)buf;
+}
+__attribute__((weak)) void shared_backing_truncate(
+    struct vfs_node *node, uint64_t new_size)
+{
+    (void)node; (void)new_size;
+}

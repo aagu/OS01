@@ -69,8 +69,8 @@ entries = {
         dispatch,
     )
 }
-if set(defined.values()) != set(range(77)):
-    fail("kernel UAPI syscall definitions are not the complete 0..76 range")
+if set(defined.values()) != set(range(79)):
+    fail("kernel UAPI syscall definitions are not the complete 0..78 range")
 missing = sorted(set(defined) - set(entries))
 unexpected = sorted(set(entries) - set(defined))
 if missing or unexpected:
@@ -83,8 +83,8 @@ if null_handlers != ["getpeername"] or defined.get("getpeername") != 62:
     fail(f"only SYS_getpeername=62 may have a null handler; found {null_handlers}")
 if len({defined[name] for name in entries}) != len(entries):
     fail("handler table maps multiple names to the same syscall number")
-if len(entries) - len(null_handlers) != 76:
-    fail(f"expected 76 implemented syscall handlers; found {len(entries) - len(null_handlers)}")
+if len(entries) - len(null_handlers) != 78:
+    fail(f"expected 78 implemented syscall handlers; found {len(entries) - len(null_handlers)}")
 
 documented = {
     name: int(number)
@@ -93,4 +93,4 @@ documented = {
 if documented != defined:
     fail("documentation syscall table does not exactly match UAPI names and numbers")
 
-print("syscall boundary audit: PASS (no legacy switch, generic handlers stay arch-neutral, docs/UAPI 0..76 aligned, 76 handlers, named absent 62)")
+print("syscall boundary audit: PASS (no legacy switch, generic handlers stay arch-neutral, docs/UAPI 0..78 aligned, 78 handlers, named absent 62)")

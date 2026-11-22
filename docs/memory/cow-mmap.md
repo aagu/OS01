@@ -321,7 +321,7 @@ aarch64 的匿名 VM 策略在 `kernel/arch/aarch64/memory/user_vm_policy.c`
 因此一次尚未驻留的文件页首写可能拉长该核的 EL1 中断延迟——这是
 spec 规定的 uaccess 内 VFS 填页语义的已知代价（无死锁：aarch64 块驱动
 为轮询式，不依赖完成中断）。PMM COW 机制继续只服务
-fork 私有页；磁盘回写、fd I/O 一致性、truncate 撤页为后续范围。x86 的用户 VM 按生命周期拆分：
+fork 私有页。后续五项（磁盘回写 `msync`/`fsync`/`sync`/拆卸落盘、fd I/O 与共享页双向覆盖对齐、`vfs_truncate` 撤页与尾页清零回收、POSIX `shm_open`/`shm_unlink` ABI、以及 `x86_64` 用户 VM 全链接入）均已于同日闭环。x86 的用户 VM 按生命周期拆分：
 `brk.c`（堆 VMA + brk 提交/回滚）、`mmap.c`（mmap/munmap/mprotect 事务）、
 `vma.c`（节点销毁 + fork 元数据 + 退休根清理）、`uaccess.c`（内核→用户
 写入预备对），声明统一在 `kernel/include/arch/x86_64/vma.h`。两个 VM

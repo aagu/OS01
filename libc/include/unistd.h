@@ -77,6 +77,7 @@ int rmdir(const char *path);
 int rename(const char *oldpath, const char *newpath);
 int truncate(const char *path, int64_t length);
 int ftruncate(int fd, int64_t length);
+int fsync(int fd);
 
 // ── Process ───────────────────────────────────────────────────
 int64_t getppid(void);

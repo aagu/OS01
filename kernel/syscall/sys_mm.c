@@ -25,6 +25,7 @@ int64_t sys_mm_dispatch(syscall_ctx_t *ctx)
     case SYS_mmap:
     case SYS_mprotect:
     case SYS_munmap:
+    case SYS_msync:
         return arch_syscall_user_vm(ctx->nr, ctx->args);
     default:
         return -EINVAL;
@@ -76,6 +77,13 @@ int64_t sys_mm_dispatch(syscall_ctx_t *ctx)
         uint64_t addr   = ctx->args[0];
         uint64_t length = ctx->args[1];
         syscall_result = do_munmap(addr, length);
+        break;
+    }
+    case SYS_msync: {
+        uint64_t addr   = ctx->args[0];
+        uint64_t length = ctx->args[1];
+        uint64_t flags  = ctx->args[2];
+        syscall_result = do_msync(addr, length, flags);
         break;
     }
     case SYS_futex: {
