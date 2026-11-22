@@ -315,7 +315,12 @@ aarch64 的匿名 VM 策略在 `kernel/arch/aarch64/memory/user_vm_policy.c`
 （`USER_VM_PAGE_IO` 同款借用语义）。fork 对对象页借用同 PA、按逻辑权限装叶
 或还原 stash，不降权父页；CPU 缺页与 uaccess 统一走 `instantiate_absent()`
 （`vm_pgoff + 页内偏移` 取对象页）。写上限以 `VMA_SHARED_MAYWRITE`
-随 VMA 记录，mprotect 扩写在切分前对整段原子校验。PMM COW 机制继续只服务
+随 VMA 记录，mprotect 扩写在切分前对整段原子校验。uaccess
+（`user_vm_prepare_copy`）在 IRQ 屏蔽窗内运行统一实例化入口：文件页经
+`vfs_read` 从后端填充（ext2/vfat 落到轮询式 virtio-blk，tmpfs 仅短自旋锁），
+因此一次尚未驻留的文件页首写可能拉长该核的 EL1 中断延迟——这是
+spec 规定的 uaccess 内 VFS 填页语义的已知代价（无死锁：aarch64 块驱动
+为轮询式，不依赖完成中断）。PMM COW 机制继续只服务
 fork 私有页；磁盘回写、fd I/O 一致性、truncate 撤页为后续范围。x86 的用户 VM 按生命周期拆分：
 `brk.c`（堆 VMA + brk 提交/回滚）、`mmap.c`（mmap/munmap/mprotect 事务）、
 `vma.c`（节点销毁 + fork 元数据 + 退休根清理）、`uaccess.c`（内核→用户

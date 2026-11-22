@@ -93,6 +93,9 @@ int fork_vma_copy(mm_t *child_mm, mm_t *parent_mm)
         vma_t *cv = (vma_t *)kmalloc(sizeof(vma_t));
         if (!cv) goto fail;
 
+        /* Field-for-field copy: vm_shared_backing propagates from the
+         * parent fragment (always NULL on x86 — every construction
+         * site initialises it; see vma.h's invariant). */
         memcpy(cv, pv, sizeof(vma_t));
         list_init(&cv->list);
         if (cv->vm_file)

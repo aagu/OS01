@@ -259,6 +259,11 @@ void shared_backing_put(struct shared_backing *backing)
 {
     if (!backing)
         return;
+    /* One reference per holder (VMA fragment, mmap transient, open_file
+     * winner — see shared_backing.h).  While the object is alive a
+     * refs==0 put is a no-op; a put after backing_destroy() freed the
+     * object is unreachable under that contract and pinned by the host
+     * suite's double_frees == 0 baseline. */
     bool destroy = false;
 
     uint64_t flags = REGISTRY_LOCK();

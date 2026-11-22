@@ -630,6 +630,7 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
         dv->vm_flags     = vm_flags_base | VMA_IO;
         dv->vm_pgoff     = offset >> PAGE_4K_SHIFT;
         dv->vm_file      = NULL;    // published VMA owns no node ref
+        dv->vm_shared_backing = NULL;
 
         mmap_dev_ctx_t ctx = {
             .mm    = current->mm,
@@ -700,6 +701,7 @@ int64_t do_mmap(uint64_t addr, uint64_t length, uint64_t prot,
     vma->vm_flags     = vm_flags_base;
     vma->vm_pgoff     = offset >> PAGE_4K_SHIFT;
     vma->vm_file      = file_node;
+    vma->vm_shared_backing = NULL;
     vm_area_insert_sorted(mm, vma);
 
     spin_unlock(&mm->lock);
@@ -733,6 +735,9 @@ static bool vma_file_window_valid(const vma_t *v)
 static void split_vma_locked(mm_t *mm, vma_t *left, uint64_t at,
                              vma_t *right)
 {
+    /* Field-for-field copy: vm_shared_backing propagates from the
+     * left fragment (always NULL on x86 — every construction site
+     * initialises it; see vma.h's invariant). */
     memcpy(right, left, sizeof(vma_t));
     list_init(&right->list);
     right->vm_start = at;

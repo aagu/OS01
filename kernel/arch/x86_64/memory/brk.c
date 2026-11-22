@@ -61,6 +61,7 @@ int mm_init_user_heap(mm_t *mm, uint64_t elf_end)
     hv->vm_flags     = VMA_PROT_READ | VMA_PROT_WRITE | VMA_ANON | VMA_HEAP;
     hv->vm_pgoff     = 0;
     hv->vm_file      = NULL;
+    hv->vm_shared_backing = NULL;
 
     /* Commit the break fields only AFTER the VMA alloc succeeds —
      * a -ENOMEM return leaves mm unchanged (start_brk/end_brk

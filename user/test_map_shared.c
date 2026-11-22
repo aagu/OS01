@@ -279,7 +279,7 @@ int main(int argc, char **argv)
     int st = 0;
 
     /* ── Phase 1: ext2 cross-process rendezvous ─────────────────── */
-    int fd = open(EXT2_FIXTURE, O_CREAT | O_RDWR);
+    int fd = open(EXT2_FIXTURE, O_CREAT | O_RDWR, 0644);
     if (fd < 0)
         fail("p1-create");
     fill_fd(fd, 0x41, 3 * PAGE, "p1-init");
@@ -330,7 +330,7 @@ int main(int argc, char **argv)
     unlink(EXT2_FIXTURE);
 
     /* ── Phase 2: tmpfs sparse (ftruncate-only) rendezvous ──────── */
-    fd = open(TMP_FIXTURE, O_CREAT | O_RDWR);
+    fd = open(TMP_FIXTURE, O_CREAT | O_RDWR, 0644);
     if (fd < 0)
         fail("p2-create");
     if (ftruncate(fd, 3 * PAGE) != 0)
@@ -370,7 +370,7 @@ int main(int argc, char **argv)
     unlink(TMP_FIXTURE);
 
     /* ── Phase 3: lifecycle — rename, unlink, rebuild, ceilings ─── */
-    fd = open(LIFE_FIXTURE, O_CREAT | O_RDWR);
+    fd = open(LIFE_FIXTURE, O_CREAT | O_RDWR, 0644);
     if (fd < 0)
         fail("p3-create");
     fill_fd(fd, 0, 3 * PAGE, "p3-init");
@@ -430,7 +430,7 @@ int main(int argc, char **argv)
 
     /* Same-path rebuild: a NEW inode under the old name is an
      * independent object; the old mapping (if any) keeps its content. */
-    fd = open(LIFE_RENAMED, O_CREAT | O_RDWR);
+    fd = open(LIFE_RENAMED, O_CREAT | O_RDWR, 0644);
     if (fd < 0)
         fail("p3b-create");
     {
@@ -551,7 +551,7 @@ int main(int argc, char **argv)
     munmap(ava3, PAGE);
 
     /* ── Phase 5: vfat /boot — 8.3 case alias and ordinary rename ── */
-    fd = open(VFAT_A, O_CREAT | O_RDWR);
+    fd = open(VFAT_A, O_CREAT | O_RDWR, 0644);
     if (fd < 0)
         fail("p5-create");
     fill_fd(fd, 0x40, PAGE, "p5-init");
@@ -588,7 +588,7 @@ int main(int argc, char **argv)
         fail("p5-cleanup");
 
     /* ── Phase 6: exec teardown ─────────────────────────────────── */
-    fd = open(EXEC_FIXTURE, O_CREAT | O_RDWR);
+    fd = open(EXEC_FIXTURE, O_CREAT | O_RDWR, 0644);
     if (fd < 0)
         fail("p6-create");
     {
@@ -626,7 +626,7 @@ int main(int argc, char **argv)
     unlink(EXEC_FIXTURE);
 
     /* ── Phase 7: exit teardown ─────────────────────────────────── */
-    fd = open(EXIT_FIXTURE, O_CREAT | O_RDWR);
+    fd = open(EXIT_FIXTURE, O_CREAT | O_RDWR, 0644);
     if (fd < 0)
         fail("p7-create");
     {

@@ -616,13 +616,20 @@ def parse_map_shared_evidence(text):
 
     # Respawn evidence mirrors the product shell-IO checks: the probe
     # exits back into ash, which init respawns (second banner/prompt).
+    # The prompt check is anchored on BARE prompt lines ("# " and
+    # nothing else): the first prompt is always merged with the echoed
+    # command ("# /bin/test_map_shared"), so a session that returned to
+    # an idle prompt after the respawn shows exactly one bare prompt —
+    # a trace whose "# " occurrences are all command echoes never
+    # satisfies it.
     banners = sum(1 for line in lines if "built-in shell (ash)" in line)
-    prompts = sum(1 for line in lines if "# " in line)
+    prompts = sum(1 for line in lines if line.strip() == "#")
     if banners < 2:
         errors.append(
             f"expected respawned busybox ash banner after exit, got {banners}")
-    if prompts < 2:
-        errors.append(f"expected second '# ' prompt after exit, got {prompts}")
+    if prompts < 1:
+        errors.append(
+            f"expected a bare '# ' prompt after respawn, got {prompts}")
 
     return len(errors) == 0, errors
 
@@ -786,7 +793,7 @@ def _run_product_cpu(args, cpus, archive, run_dir, budget, drain, dtb_factory):
     return result, errors, session, timed_out, child_exited_before_runner_stop, command
 
 
-def _run_map_shared(args, archive, run_dir, budget, drain, dtb_factory):
+def _run_map_shared(args, run_dir, budget, drain, dtb_factory):
     """Boot a private writable COPY of the product image on 2 CPUs and
     run /bin/test_map_shared from the ash.
 
@@ -939,9 +946,8 @@ def run_boot(args, deadline_s=None, dtb_factory=None):
     if args.case == "map-shared":
         (result, errors, session, timed_out, child_exited, command,
          copy_dir) = _run_map_shared(
-            args, archive, run_dir, budget, drain, dtb_factory
-        )
-        shutil.rmtree(copy_dir, ignore_errors=True)   # post-stop cleanup
+            args, run_dir, budget, drain, dtb_factory
+        )   # the helper removes the private copy on every path
         _write_report(
             archive, argv=command, profile=args.profile, cpu=cpus,
             variant=variant, firmware=args.firmware, image=args.image,

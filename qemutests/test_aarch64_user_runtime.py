@@ -252,6 +252,24 @@ class MapSharedRuntimeTests(unittest.TestCase):
         ok, errors = runner.parse_map_shared_evidence(text)
         self.assertFalse(ok)
 
+    def test_map_shared_echoed_commands_do_not_count_as_prompts(self):
+        # A trace whose only "# " occurrences are the shell ECHOING the
+        # typed commands (no bare prompt after respawn) must fail: the
+        # prompt count is anchored on bare prompt lines, not substrings.
+        text = (
+            "[INFO] [boot-5] init-created pid=1\n"
+            "[INFO] init: inittab loaded\n"
+            "BusyBox v1.36.1 (2026-11-22 00:00:00 CST) built-in shell (ash)\n"
+            "# /bin/test_map_shared\n"
+            "test_map_shared: PASS\n"
+            "# exit\n"
+            "BusyBox v1.36.1 (2026-11-22 00:00:00 CST) built-in shell (ash)\n"
+            "# /bin/echo never-typed\n"
+        )
+        ok, errors = runner.parse_map_shared_evidence(text)
+        self.assertFalse(ok)
+        self.assertTrue(any("prompt" in e for e in errors), errors)
+
     def test_map_shared_respawn_required(self):
         text = _good_map_shared_trace().replace(
             "BusyBox v1.36.1 (2026-11-22 00:00:00 CST) built-in shell (ash)\n# ",

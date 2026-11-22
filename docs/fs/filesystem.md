@@ -174,6 +174,14 @@ Read-write filesystem driver for FAT32 partitions. `fat32_init(dev, &fs)` reads 
 - **Directory traversal**: Walks cluster chains via `fat32_next_cluster()`, converting cluster numbers to LBAs with `fat32_cluster_to_sector()`. Each cluster contains short (8.3) directory entries; long filename (LFN) entries are skipped.
 - **Read/write**: Reads/writes sectors through the block device layer, supporting file offset → cluster → LBA mapping.
 - **Flags**: Sets `VFS_OPS_CASE_INSENSITIVE` for case-insensitive name matching.
+- **Rename**: Cross-directory and overwrite renames supported.  A rename
+  whose source and target resolve to the same directory-entry slot
+  (e.g. an 8.3 case alias — `maptst.txt` → `MAPTST.TXT`) short-circuits
+  successfully **without rewriting the on-disk spelling**: the stored
+  8.3/LFN case stays as originally created, unlike Linux which rewrites
+  it.  Slot identity (LBA + offset within the slot) is also what keeps
+  the inode-level `MAP_SHARED` object rendezvous stable across a
+  case-alias rename.
 - **Mount point**: Mounted at `/boot` (ESP partition in GPT layout) or at `/` (fallback single-partition layout).
 
 ---
