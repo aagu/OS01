@@ -13,6 +13,8 @@
 
 #include <stdint.h>
 
+#include <memory/vma.h>   /* complete vma_t for the ref helpers */
+
 struct mm_struct;
 typedef struct mm_struct mm_t;
 typedef struct user_vm_page user_vm_page_t;
@@ -30,5 +32,12 @@ void aarch64_user_vm_resident_unlink(mm_t *mm, user_vm_page_t *node);
 /* Shared no-file VMA drain: unlink and free every VMA node of mm.
  * Used by fork rollback (child metadata reset) and user_vm_destroy. */
 void aarch64_user_vm_free_vmas(mm_t *mm);
+
+/* VMA reference transaction: every construction that copies or splits
+ * a fragment acquires one node + one shared-object reference for the
+ * new fragment; every removal path releases both through the put
+ * helper.  NULL members are skipped. */
+void aarch64_user_vm_vma_get_refs(vma_t *v);
+void aarch64_user_vm_vma_put_refs(vma_t *v);
 
 #endif /* _ARCH_AARCH64_USER_VM_INTERNAL_H */

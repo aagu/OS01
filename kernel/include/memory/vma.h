@@ -36,6 +36,12 @@ typedef struct mm_struct mm_t;
 #define VMA_IO        0x80   // MMIO region (no COW, no file-backed demand paging)
 #define VMA_HEAP      0x100  // the unique heap VMA — zero-length, tracks
                             // [start_brk, ALIGN_UP(end_brk, 4096))
+#define VMA_SHARED_MAYWRITE 0x200
+                            // file-backed MAP_SHARED maximum write
+                            // permission, captured from the fd access
+                            // mode at mmap time.  mprotect may never
+                            // widen past it across splits, fork, fd
+                            // close or permission downgrades.
 
 // ── PROT_* constants (kernel-accessible copy of libc mman.h) ─
 #define PROT_NONE  0x0
@@ -50,6 +56,8 @@ typedef struct mm_struct mm_t;
 #define MAP_ANONYMOUS 0x20
 
 // ── VMA structure ──────────────────────────────────────────
+struct shared_backing;   // <memory/shared_backing.h> (opaque here)
+
 typedef struct vm_area_struct {
     list_t      list;
     uint64_t    vm_start;     // start VA (4KB aligned)
@@ -62,6 +70,13 @@ typedef struct vm_area_struct {
                               // bits on demand (x86_vma_pte_flags).
     uint64_t    vm_pgoff;     // file offset in 4KB pages
     vfs_node_t *vm_file;      // NULL = anonymous
+    struct shared_backing *vm_shared_backing;
+                              // inode MAP_SHARED object this fragment
+                              // references (one object reference per
+                              // active fragment; NULL = private/IO).
+                              // aarch64 only today — every VMA
+                              // construction must initialise it to
+                              // NULL explicitly.
 } vma_t;
 
 #endif // _KERNEL_VMA_H

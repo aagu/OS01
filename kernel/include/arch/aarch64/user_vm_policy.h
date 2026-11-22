@@ -52,6 +52,11 @@ enum user_vm_page_source {
     USER_VM_PAGE_STACK,     /* image user stack leaf */
     USER_VM_PAGE_IO,        /* device window leaf: the PA is NOT owned
                              * by the mm — teardown unmaps, never frees */
+    USER_VM_PAGE_BACKING,   /* shared_backing object page: the PA is
+                             * owned by the object (kept alive by the
+                             * VMA's object reference) — teardown
+                             * unmaps, never frees, never touches the
+                             * PMM COW map */
 };
 
 enum user_vm_page_share {

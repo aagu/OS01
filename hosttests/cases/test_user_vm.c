@@ -2211,6 +2211,8 @@ TEST_FUNC(test_mmap_shared_anon_fork_write_through)
     assert_eq(0, user_vm_fault(parent, BASE, true));
     user_vm_page_t *pr = resident_at(parent, BASE);
     assert_not_null(pr);
+    assert_eq((uint32_t)USER_VM_PAGE_BACKING, pr->source);
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, pr->share);
     uint64_t pa = pr->pa;
     memset(Phy_To_Virt(pa), 0x5A, PAGE_4K_SIZE);
 
@@ -2219,20 +2221,24 @@ TEST_FUNC(test_mmap_shared_anon_fork_write_through)
     assert_eq(0, user_vm_clone_fork(parent, child,
                                     clone_publish_ok, &probe));
 
-    /* Both leaves map the same PA (read-through without faults). */
+    /* Both sides hold the object page directly at RW/NX and the same
+     * PA: fork neither downgrades the parent leaf nor touches the PMM
+     * COW map (object pages are borrowed, never COW-counted). */
+    assert_eq(pa, user_vm_test_leaf_pa_in(parent->pgdir, BASE));
     assert_eq(pa, user_vm_test_leaf_pa_in(child->pgdir, BASE));
-    assert_eq(0x5A, *(unsigned char *)Phy_To_Virt(pa));
-
-    /* Child write fault on the shared VMA: the leaf upgrades in place
-     * — same PA, no privatization, COW references untouched. */
-    assert_eq(0, user_vm_cow_fault(child, BASE));
-    assert_eq(pa, user_vm_test_leaf_pa_in(child->pgdir, BASE));
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
+              user_vm_test_leaf_vm_in(parent->pgdir, BASE));
     assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
               user_vm_test_leaf_vm_in(child->pgdir, BASE));
     user_vm_page_t *cr = resident_at(child, BASE);
     assert_not_null(cr);
-    assert_eq((uint32_t)USER_VM_PAGE_SHARED, cr->share);
-    assert_eq(2, user_vm_test_cow_refs(pa));
+    assert_eq((uint32_t)USER_VM_PAGE_BACKING, cr->source);
+    assert_eq(0, user_vm_test_cow_refs(pa));
+
+    /* The shared backing write-fault path keeps the leaf in place —
+     * and an ordinary child store needs no fault at all. */
+    assert_eq(0, user_vm_cow_fault(child, BASE));
+    assert_eq(pa, user_vm_test_leaf_pa_in(child->pgdir, BASE));
     memset(Phy_To_Virt(pa), 0x7C, PAGE_4K_SIZE);
     assert_eq(0x7C, *(unsigned char *)Phy_To_Virt(pa));
 
@@ -2784,6 +2790,556 @@ TEST_FUNC(test_shared_backing_fill_retry)
     assert_eq(user_vm_test_double_frees(), 0);
 }
 
+/* ══════════════════════════════════════════════════════════════
+ * aarch64 VM paths over the shared backing (Task 3)
+ * ══════════════════════════════════════════════════════════════ */
+
+static file_t sb_fd(struct vfs_node *node, int flags)
+{
+    file_t f;
+    memset(&f, 0, sizeof(f));
+    f.type = FD_VFS;
+    f.flags = flags;
+    f.node = node;
+    return f;
+}
+
+/* mmap args with an explicit fd and offset. */
+static int64_t test_mmap_file_call(mm_t *mm, uint64_t addr, uint64_t len,
+                                   uint64_t prot, uint64_t flags,
+                                   uint64_t fd, uint64_t off)
+{
+    uint64_t args[6] = { addr, len, prot, flags, fd, off };
+    return user_vm_mmap(mm, args);
+}
+
+TEST_FUNC(test_inode_shared_fault_and_uaccess)
+{
+    user_vm_test_reset();
+    struct vfs_mount *m = user_vm_test_make_mount("tmpfs");
+    static const unsigned char backend[24576] = {
+        [0] = 0xB0, [4096] = 0xB1, [8192] = 0xB2,
+    };
+    struct vfs_node *na = user_vm_test_make_mount_node(m, 91, backend,
+                                                       sizeof(backend));
+    struct vfs_node *nb = user_vm_test_make_mount_node(m, 91, backend,
+                                                       sizeof(backend));
+    struct vfs_node *nc = user_vm_test_make_mount_node(m, 91, backend,
+                                                       sizeof(backend));
+    struct vfs_node *nd = user_vm_test_make_mount_node(m, 91, backend,
+                                                       sizeof(backend));
+
+    file_t fa = sb_fd(na, O_RDWR);
+    file_t fb = sb_fd(nb, O_RDWR);
+    file_t fc = sb_fd(nc, O_RDWR);
+    file_t fpriv = sb_fd(nd, O_RDWR);
+
+    uint64_t B1 = BASE;
+    uint64_t B2 = BASE + 0x4000;
+    uint64_t B3 = BASE + 0x8000;
+    uint64_t B4 = BASE + 0xc000;
+    uint64_t B5 = BASE + 0x10000;
+
+    mm_t *mm1 = new_mm(HEAP_BASE);
+    user_vm_test_set_files(&fa);
+    assert_eq((int64_t)B1, test_mmap_file_call(mm1, B1, 3 * PAGE_4K_SIZE,
+                                               PROT_RW, MAP_SHARED, 0, 0));
+    mm_t *mm2 = new_mm(HEAP_BASE);
+    user_vm_test_set_files(&fb);
+    assert_eq((int64_t)B2, test_mmap_file_call(mm2, B2, 3 * PAGE_4K_SIZE,
+                                               PROT_RW, MAP_SHARED, 0, 0));
+
+    /* CPU fault through mm1 fills from the backend as an object page. */
+    assert_eq(0, user_vm_fault(mm1, B1, false));
+    user_vm_page_t *r1 = resident_at(mm1, B1);
+    assert_not_null(r1);
+    assert_eq((uint32_t)USER_VM_PAGE_BACKING, r1->source);
+    assert_eq((uint32_t)USER_VM_PAGE_PRIVATE, r1->share);
+    assert_eq(0xB0, *(const unsigned char *)Phy_To_Virt(r1->pa));
+
+    /* uaccess (copy pass) through mm2 at the same inode/index lands on
+     * the SAME PA with a zero PMM COW count. */
+    assert_eq(0, user_vm_prepare_copy(mm2, B2, 4, false));
+    user_vm_page_t *r2 = resident_at(mm2, B2);
+    assert_not_null(r2);
+    assert_eq(r1->pa, r2->pa);
+    assert_eq(0, user_vm_test_cow_refs(r1->pa));
+
+    /* Private-file uaccess: the FIRST read of a private mapping's page
+     * comes from the backend, never a zero page. */
+    mm_t *mm3 = new_mm(HEAP_BASE);
+    user_vm_test_set_files(&fpriv);
+    assert_eq((int64_t)B3, test_mmap_file_call(mm3, B3, PAGE_4K_SIZE,
+                                               PROT_RW, MAP_PRIVATE, 0, 0));
+    assert_eq(0, user_vm_prepare_copy(mm3, B3, 4, false));
+    user_vm_page_t *r3 = resident_at(mm3, B3);
+    assert_not_null(r3);
+    assert_eq((uint32_t)USER_VM_PAGE_ANON, r3->source);
+    assert_eq(0xB0, *(const unsigned char *)Phy_To_Virt(r3->pa));
+    destroy_mm(mm3);
+
+    /* Cross-two-page copy: the second page's backend read fails — the
+     * first staged leaf is withdrawn, the other mappings keep their
+     * PA and data, and the retry reuses the published cache.  The
+     * fill reads through the OBJECT's node (the first opener's), so
+     * the injection targets na. */
+    user_vm_test_set_node_read_err_from(na, -EIO, 2 * PAGE_4K_SIZE);
+    assert_eq(-EFAULT, user_vm_prepare_copy(mm2, B2 + PAGE_4K_SIZE,
+                                            2 * PAGE_4K_SIZE, false));
+    assert_eq(0, user_vm_test_leaf_state_in(mm2->pgdir,
+                                            B2 + PAGE_4K_SIZE));
+    assert_eq(0, user_vm_test_leaf_state_in(mm2->pgdir,
+                                            B2 + 2 * PAGE_4K_SIZE));
+    assert_eq(r1->pa, user_vm_test_leaf_pa_in(mm2->pgdir, B2));
+    assert_eq(0xB0, *(const unsigned char *)Phy_To_Virt(r1->pa));
+    assert_eq(0xB0, *(const unsigned char *)Phy_To_Virt(
+                        user_vm_test_leaf_pa_in(mm1->pgdir, B1)));
+    user_vm_test_set_node_read_err(na, 0);
+
+    assert_eq(0, user_vm_prepare_copy(mm2, B2, 3 * PAGE_4K_SIZE, false));
+    user_vm_page_t *r2p1 = resident_at(mm2, B2 + PAGE_4K_SIZE);
+    user_vm_page_t *r2p2 = resident_at(mm2, B2 + 2 * PAGE_4K_SIZE);
+    assert_not_null(r2p1);
+    assert_not_null(r2p2);
+    assert_eq((uint32_t)USER_VM_PAGE_BACKING, r2p1->source);
+    assert_eq(0xB1, *(const unsigned char *)Phy_To_Virt(r2p1->pa));
+    assert_eq(0xB2, *(const unsigned char *)Phy_To_Virt(r2p2->pa));
+
+    /* The retry's first page reused the object cache: mm1 faults the
+     * same index and sees the same PA. */
+    assert_eq(0, user_vm_fault(mm1, B1 + PAGE_4K_SIZE, false));
+    assert_eq(r2p1->pa,
+              user_vm_test_leaf_pa_in(mm1->pgdir, B1 + PAGE_4K_SIZE));
+
+    /* Leaf-install failure variant: the first staged page is withdrawn
+     * while its object page keeps serving other mappings; the retry
+     * reuses both cached pages. */
+    mm_t *mm4 = new_mm(HEAP_BASE);
+    user_vm_test_set_files(&fc);
+    assert_eq((int64_t)B4, test_mmap_file_call(mm4, B4, 2 * PAGE_4K_SIZE,
+                                               PROT_RW, MAP_SHARED, 0, 0));
+    mm_t *mm5 = new_mm(HEAP_BASE);
+    user_vm_test_set_files(&fc);
+    assert_eq((int64_t)B5, test_mmap_file_call(mm5, B5, 2 * PAGE_4K_SIZE,
+                                               PROT_RW, MAP_SHARED, 0, 0));
+
+    user_vm_test_fail_map_after(1);
+    assert_eq(-ENOMEM, user_vm_prepare_copy(mm4, B4, 2 * PAGE_4K_SIZE,
+                                            false));
+    assert_eq(0, user_vm_test_leaf_state_in(mm4->pgdir, B4));
+    assert_eq(0, user_vm_test_leaf_state_in(mm4->pgdir,
+                                            B4 + PAGE_4K_SIZE));
+    user_vm_test_fail_map_after(-1);
+
+    /* mm5 proves the object page published by the failed attempt is
+     * alive and shared; mm4's retry reuses it. */
+    assert_eq(0, user_vm_fault(mm5, B5 + PAGE_4K_SIZE, false));
+    assert_eq(0, user_vm_prepare_copy(mm4, B4, 2 * PAGE_4K_SIZE, false));
+    user_vm_page_t *r4 = resident_at(mm4, B4);
+    user_vm_page_t *r4p1 = resident_at(mm4, B4 + PAGE_4K_SIZE);
+    assert_not_null(r4);
+    assert_not_null(r4p1);
+    assert_eq(0xB0, *(const unsigned char *)Phy_To_Virt(r4->pa));
+    assert_eq(0xB1, *(const unsigned char *)Phy_To_Virt(r4p1->pa));
+    assert_eq(r4p1->pa,
+              user_vm_test_leaf_pa_in(mm5->pgdir, B5 + PAGE_4K_SIZE));
+
+    destroy_mm(mm1);
+    destroy_mm(mm2);
+    destroy_mm(mm4);
+    destroy_mm(mm5);
+    user_vm_test_set_files(NULL);
+
+    assert_eq(user_vm_test_page_allocs() - user_vm_test_page_alloc_fails(),
+              user_vm_test_free_count());
+    assert_eq(user_vm_test_node_gets(na), user_vm_test_node_puts(na));
+    assert_eq(user_vm_test_node_gets(nb), user_vm_test_node_puts(nb));
+    assert_eq(user_vm_test_node_gets(nc), user_vm_test_node_puts(nc));
+    assert_eq(user_vm_test_node_gets(nd), user_vm_test_node_puts(nd));
+    assert_eq(user_vm_test_fd_gets(), user_vm_test_fd_puts());
+    assert_eq(user_vm_test_lock_violations(), 0);
+    assert_eq(user_vm_test_double_frees(), 0);
+}
+
+TEST_FUNC(test_shared_anon_fork_backing)
+{
+    user_vm_test_reset();
+    mm_t *parent = new_mm(HEAP_BASE);
+    assert_eq((int64_t)BASE,
+              test_mmap_call(parent, 0, 3 * PAGE_4K_SIZE, PROT_RW,
+                             MAP_SHARED | MAP_ANONYMOUS));
+
+    /* Page 0: RW leaf with content.  Page 1: RW with content, then
+     * stashed (PROT_NONE).  Page 2: never touched. */
+    assert_eq(0, user_vm_fault(parent, BASE, true));
+    user_vm_page_t *p0 = resident_at(parent, BASE);
+    assert_not_null(p0);
+    write_page(p0->pa, 0xA1);
+    assert_eq(0, user_vm_fault(parent, BASE + PAGE_4K_SIZE, true));
+    uint64_t pa1 = user_vm_test_leaf_pa_in(parent->pgdir,
+                                           BASE + PAGE_4K_SIZE);
+    write_page(pa1, 0xA2);
+    assert_eq(0, user_vm_mprotect(parent, BASE + PAGE_4K_SIZE,
+                                  PAGE_4K_SIZE, PROT_NONE));
+
+    mm_t *child = new_child_mm(0x9000);
+    struct clone_publish_probe probe = { 0, 0 };
+    assert_eq(0, user_vm_clone_fork(parent, child, clone_publish_ok,
+                                    &probe));
+
+    /* The parent's RW leaf is NOT downgraded; the child inherits the
+     * same PA at its logical permission; the stash is reproduced. */
+    assert_eq(p0->pa, user_vm_test_leaf_pa_in(parent->pgdir, BASE));
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
+              user_vm_test_leaf_vm_in(parent->pgdir, BASE));
+    assert_eq(p0->pa, user_vm_test_leaf_pa_in(child->pgdir, BASE));
+    assert_eq((uint32_t)(VM_USER_RW | VM_NO_EXEC),
+              user_vm_test_leaf_vm_in(child->pgdir, BASE));
+    assert_eq(0, user_vm_test_cow_refs(p0->pa));
+    assert_eq(2, user_vm_test_leaf_state_in(child->pgdir,
+                                            BASE + PAGE_4K_SIZE));
+    assert_eq(0, user_vm_test_leaf_state_in(child->pgdir,
+                                            BASE + 2 * PAGE_4K_SIZE));
+
+    /* Page 2: first touch on both sides rendezvous on one PA. */
+    assert_eq(0, user_vm_fault(child, BASE + 2 * PAGE_4K_SIZE, true));
+    uint64_t pa2 = user_vm_test_leaf_pa_in(child->pgdir,
+                                           BASE + 2 * PAGE_4K_SIZE);
+    assert_eq(0, user_vm_fault(parent, BASE + 2 * PAGE_4K_SIZE, true));
+    assert_eq(pa2,
+              user_vm_test_leaf_pa_in(parent->pgdir,
+                                      BASE + 2 * PAGE_4K_SIZE));
+
+    /* Restoring the stash reveals the shared content. */
+    assert_eq(0, user_vm_mprotect(child, BASE + PAGE_4K_SIZE,
+                                  PAGE_4K_SIZE, PROT_RW));
+    assert_eq(pa1,
+              user_vm_test_leaf_pa_in(child->pgdir, BASE + PAGE_4K_SIZE));
+    assert_eq(0xA2,
+              *(const unsigned char *)Phy_To_Virt(
+                  user_vm_test_leaf_pa_in(child->pgdir,
+                                          BASE + PAGE_4K_SIZE)));
+    assert_eq(0, user_vm_test_cow_refs(p0->pa));
+
+    destroy_mm(parent);
+    destroy_mm(child);
+}
+
+TEST_FUNC(test_shared_anon_fork_backing_publish_fail)
+{
+    user_vm_test_reset();
+    mm_t *parent = new_mm(HEAP_BASE);
+    assert_eq((int64_t)BASE,
+              test_mmap_call(parent, 0, 3 * PAGE_4K_SIZE, PROT_RW,
+                             MAP_SHARED | MAP_ANONYMOUS));
+    assert_eq(0, user_vm_fault(parent, BASE, true));
+    user_vm_page_t *p0 = resident_at(parent, BASE);
+    assert_not_null(p0);
+    write_page(p0->pa, 0xB2);
+    assert_eq(0, user_vm_fault(parent, BASE + PAGE_4K_SIZE, true));
+    assert_eq(0, user_vm_mprotect(parent, BASE + PAGE_4K_SIZE,
+                                  PAGE_4K_SIZE, PROT_NONE));
+
+    uint64_t pa0 = p0->pa;
+    uint32_t vm0 = user_vm_test_leaf_vm_in(parent->pgdir, BASE);
+    uint32_t vm1 = user_vm_test_leaf_vm_in(parent->pgdir,
+                                           BASE + PAGE_4K_SIZE);
+    int frees0 = user_vm_test_free_count();
+    int allocs0 = user_vm_test_page_allocs();
+
+    mm_t *child = new_child_mm(0x9000);
+    struct clone_publish_probe probe = { 0, 0 };
+    assert_eq(-ENOMEM, user_vm_clone_fork(parent, child,
+                                          clone_publish_fail, &probe));
+    assert_eq(1, probe.calls);
+
+    /* No child leaf, no child VMA; the parent's permissions, PAs and
+     * the PMM baseline are exactly as before. */
+    assert_eq(0, user_vm_test_leaf_count_in(child->pgdir));
+    assert_eq(0, vma_count(child));
+    assert_eq(pa0, user_vm_test_leaf_pa_in(parent->pgdir, BASE));
+    assert_eq(vm0, user_vm_test_leaf_vm_in(parent->pgdir, BASE));
+    assert_eq(vm1, user_vm_test_leaf_vm_in(parent->pgdir,
+                                           BASE + PAGE_4K_SIZE));
+    assert_eq(0, user_vm_test_cow_refs(pa0));
+    assert_eq(allocs0, user_vm_test_page_allocs());
+    assert_eq(frees0, user_vm_test_free_count());
+
+    destroy_mm(parent);
+    destroy_mm(child);
+}
+
+TEST_FUNC(test_shared_vma_retire)
+{
+    user_vm_test_reset();
+    struct vfs_mount *m = user_vm_test_make_mount("tmpfs");
+    static const unsigned char backend[16384] = { [0] = 0xC0 };
+    struct vfs_node *na = user_vm_test_make_mount_node(m, 95, backend,
+                                                       sizeof(backend));
+    struct vfs_node *nb = user_vm_test_make_mount_node(m, 95, backend,
+                                                       sizeof(backend));
+
+    uint64_t B = BASE;
+    file_t fa = sb_fd(na, O_RDWR);
+    user_vm_test_set_files(&fa);
+    mm_t *mm1 = new_mm(HEAP_BASE);
+    assert_eq((int64_t)B, test_mmap_file_call(mm1, B, 4 * PAGE_4K_SIZE,
+                                              PROT_RW, MAP_SHARED, 0,
+                                              0x2000));
+    assert_eq(2, vma_count(mm1));   /* heap + mapping */
+
+    assert_eq(0, user_vm_fault(mm1, B, true));
+    write_page(user_vm_test_leaf_pa_in(mm1->pgdir, B), 0xD0);
+    assert_eq(0, user_vm_fault(mm1, B + PAGE_4K_SIZE, true));
+    write_page(user_vm_test_leaf_pa_in(mm1->pgdir, B + PAGE_4K_SIZE),
+               0xD1);
+    assert_eq(0, user_vm_fault(mm1, B + 2 * PAGE_4K_SIZE, true));
+    uint64_t pa1 = user_vm_test_leaf_pa_in(mm1->pgdir,
+                                           B + PAGE_4K_SIZE);
+    uint64_t pa2 = user_vm_test_leaf_pa_in(mm1->pgdir,
+                                           B + 2 * PAGE_4K_SIZE);
+
+    /* Partial munmap: the right fragment advances the page offset. */
+    assert_eq(0, user_vm_munmap(mm1, B + PAGE_4K_SIZE, 2 * PAGE_4K_SIZE));
+    assert_eq(0, user_vm_test_leaf_state_in(mm1->pgdir,
+                                            B + PAGE_4K_SIZE));
+    assert_eq(0, user_vm_test_leaf_state_in(mm1->pgdir,
+                                            B + 2 * PAGE_4K_SIZE));
+    vma_t *right = NULL;
+    for (list_t *p = mm1->vma_list.next; p != &mm1->vma_list;
+         p = p->next) {
+        vma_t *v = container_of(p, vma_t, list);
+        if (v->vm_start == B + 3 * PAGE_4K_SIZE)
+            right = v;
+    }
+    assert_not_null(right);
+    assert_eq(B + 4 * PAGE_4K_SIZE, right->vm_end);
+    assert_eq(UINT64_C(5), right->vm_pgoff);   /* 2 + 3 pages */
+    assert_eq((uint32_t)VMA_SHARED, right->vm_flags & VMA_SHARED);
+    assert_not_null(right->vm_shared_backing);
+
+    /* A same-object MAP_FIXED remap re-publishes the cached pages. */
+    file_t fb = sb_fd(nb, O_RDWR);
+    user_vm_test_set_files(&fb);
+    assert_eq((int64_t)(B + PAGE_4K_SIZE),
+              test_mmap_file_call(mm1, B + PAGE_4K_SIZE, 2 * PAGE_4K_SIZE,
+                                  PROT_RW, MAP_SHARED | MAP_FIXED, 0,
+                                  0x3000));
+    assert_eq(0, user_vm_fault(mm1, B + PAGE_4K_SIZE, true));
+    assert_eq(pa1, user_vm_test_leaf_pa_in(mm1->pgdir,
+                                           B + PAGE_4K_SIZE));
+    assert_eq(0xD1, *(const unsigned char *)Phy_To_Virt(pa1));
+    assert_eq(0, user_vm_fault(mm1, B + 2 * PAGE_4K_SIZE, true));
+    assert_eq(pa2, user_vm_test_leaf_pa_in(mm1->pgdir,
+                                           B + 2 * PAGE_4K_SIZE));
+    assert_eq(0x00, *(const unsigned char *)Phy_To_Virt(pa2));
+
+    /* Offset-window failures keep every leaf and datum intact. */
+    int64_t neg_rc = test_mmap_file_call(mm1, B + PAGE_4K_SIZE,
+                                         2 * PAGE_4K_SIZE, PROT_RW,
+                                         MAP_SHARED | MAP_FIXED, 0,
+                                         (uint64_t)(int64_t)-1);
+    int64_t una_rc = test_mmap_file_call(mm1, B + PAGE_4K_SIZE,
+                                         2 * PAGE_4K_SIZE, PROT_RW,
+                                         MAP_SHARED | MAP_FIXED, 0,
+                                         0x1001);
+    int64_t oob_rc = test_mmap_file_call(mm1, B + PAGE_4K_SIZE,
+                                         2 * PAGE_4K_SIZE, PROT_RW,
+                                         MAP_SHARED | MAP_FIXED, 0,
+                                         0x7ffffffffffff000ULL);
+    assert_eq(-EINVAL, neg_rc);
+    assert_eq(-EINVAL, una_rc);
+    assert_eq(-EINVAL, oob_rc);
+    if (neg_rc != -EINVAL || una_rc != -EINVAL || oob_rc != -EINVAL) {
+        /* Legacy divergence: invalid offsets were accepted, so the mm
+         * is not in the asserted shape.  RED stops here. */
+        return;
+    }
+    assert_eq(4, vma_count(mm1));   /* heap + left + remap + right */
+    assert_eq(pa1, user_vm_test_leaf_pa_in(mm1->pgdir,
+                                           B + PAGE_4K_SIZE));
+    assert_eq(0xD1, *(const unsigned char *)Phy_To_Virt(pa1));
+
+    /* Split-preparation failure: the new VMA is allocated, the split
+     * node is not — the fixed replace aborts with the old VA, PA and
+     * data untouched. */
+    user_vm_test_fail_node_after(1);
+    assert_eq(-ENOMEM,
+              test_mmap_file_call(mm1, B + PAGE_4K_SIZE, PAGE_4K_SIZE,
+                                  PROT_RW, MAP_SHARED | MAP_FIXED, 0,
+                                  0x3000));
+    user_vm_test_fail_node_after(-1);
+    assert_eq(4, vma_count(mm1));
+    assert_eq(pa1, user_vm_test_leaf_pa_in(mm1->pgdir,
+                                           B + PAGE_4K_SIZE));
+    assert_eq(0xD1, *(const unsigned char *)Phy_To_Virt(pa1));
+
+    /* Successful replace: left fragment keeps the cache, the right
+     * fragment advances its page offset. */
+    assert_eq((int64_t)(B + PAGE_4K_SIZE),
+              test_mmap_file_call(mm1, B + PAGE_4K_SIZE, PAGE_4K_SIZE,
+                                  PROT_RW, MAP_SHARED | MAP_FIXED, 0,
+                                  0x3000));
+    assert_eq(5, vma_count(mm1));
+    assert_eq(0, user_vm_test_leaf_state_in(mm1->pgdir,
+                                            B + PAGE_4K_SIZE));
+    assert_eq(0, user_vm_fault(mm1, B + PAGE_4K_SIZE, true));
+    assert_eq(pa1, user_vm_test_leaf_pa_in(mm1->pgdir,
+                                           B + PAGE_4K_SIZE));
+    assert_eq(0xD1, *(const unsigned char *)Phy_To_Virt(pa1));
+
+    /* A second independent mapping holds the object across mm1's
+     * teardown. */
+    mm_t *mm2 = new_mm(HEAP_BASE);
+    assert_eq((int64_t)(BASE + 0x8000),
+              test_mmap_file_call(mm2, BASE + 0x8000, PAGE_4K_SIZE,
+                                  PROT_RW, MAP_SHARED, 0, 0x3000));
+    assert_eq(0, user_vm_fault(mm2, BASE + 0x8000, true));
+    assert_eq(pa1, user_vm_test_leaf_pa_in(mm2->pgdir, BASE + 0x8000));
+
+    /* Teardown withdraws present and stashed leaves first, then the
+     * last reference releases the object pages. */
+    assert_eq(0, user_vm_mprotect(mm1, B, PAGE_4K_SIZE,
+                                  PROT_NONE));
+    assert_eq(2, user_vm_test_leaf_state_in(mm1->pgdir, B));
+    destroy_mm(mm1);
+    assert_eq(0, user_vm_test_leaf_state_in(mm1->pgdir, B));
+    assert_eq(0, user_vm_test_leaf_state_in(mm1->pgdir,
+                                            B + PAGE_4K_SIZE));
+    destroy_mm(mm2);
+    assert_eq(0, user_vm_test_leaf_state_in(mm2->pgdir,
+                                            BASE + 0x8000));
+
+    user_vm_test_set_files(NULL);
+    assert_eq(user_vm_test_page_allocs() - user_vm_test_page_alloc_fails(),
+              user_vm_test_free_count());
+    assert_eq(user_vm_test_kmallocs() - user_vm_test_node_alloc_fails(),
+              user_vm_test_kfrees());
+    assert_eq(user_vm_test_node_gets(na), user_vm_test_node_puts(na));
+    assert_eq(user_vm_test_node_gets(nb), user_vm_test_node_puts(nb));
+    assert_eq(user_vm_test_fd_gets(), user_vm_test_fd_puts());
+    assert_eq(user_vm_test_lock_violations(), 0);
+    assert_eq(user_vm_test_double_frees(), 0);
+}
+
+TEST_FUNC(test_shared_file_protect_ceiling)
+{
+    user_vm_test_reset();
+    struct vfs_mount *m = user_vm_test_make_mount("tmpfs");
+    static const unsigned char backend[16384] = { [0] = 0xE0 };
+    struct vfs_node *na = user_vm_test_make_mount_node(m, 96, backend,
+                                                       sizeof(backend));
+
+    uint64_t B = BASE;
+    file_t ro = sb_fd(na, O_RDONLY);
+    file_t wr = sb_fd(na, O_RDWR);
+
+    /* O_RDONLY fd: readable mapping ok, writable mapping refused. */
+    mm_t *mm = new_mm(HEAP_BASE);
+    user_vm_test_set_files(&ro);
+    assert_eq((int64_t)B, test_mmap_file_call(mm, B, 2 * PAGE_4K_SIZE,
+                                              PROT_READ, MAP_SHARED, 0,
+                                              0));
+    mm_t *mmbad = new_mm(HEAP_BASE);
+    int64_t ro_rw = test_mmap_file_call(mmbad, BASE + 0x8000,
+                                        2 * PAGE_4K_SIZE, PROT_RW,
+                                        MAP_SHARED, 0, 0);
+    assert_eq(-EACCES, ro_rw);
+
+    /* O_WRONLY fd is not readable. */
+    file_t wo = sb_fd(na, O_WRONLY);
+    user_vm_test_set_files(&wo);
+    mm_t *mmwo = new_mm(HEAP_BASE);
+    int64_t wo_r = test_mmap_file_call(mmwo, BASE + 0x8000, PAGE_4K_SIZE,
+                                       PROT_READ, MAP_SHARED, 0, 0);
+    assert_eq(-EACCES, wo_r);
+    if (ro_rw != -EACCES || wo_r != -EACCES) {
+        /* Legacy divergence: the access-mode ceiling was not enforced,
+         * so the mm layout below is not the asserted shape.  RED stops
+         * here. */
+        return;
+    }
+    destroy_mm(mmbad);
+    destroy_mm(mmwo);
+
+    /* Adjacent segments: one RW ceiling, one RO ceiling, same object. */
+    user_vm_test_set_files(&wr);
+    assert_eq((int64_t)(B + 2 * PAGE_4K_SIZE),
+              test_mmap_file_call(mm, B + 2 * PAGE_4K_SIZE,
+                                  2 * PAGE_4K_SIZE, PROT_RW, MAP_SHARED,
+                                  0, 0x2000));
+    assert_eq(0, user_vm_fault(mm, B, false));
+    write_page(user_vm_test_leaf_pa_in(mm->pgdir, B), 0xE1);
+    assert_eq(0, user_vm_fault(mm, B + 2 * PAGE_4K_SIZE, true));
+
+    /* Cross-segment write expansion fails atomically: neither segment
+     * is upgraded or split. */
+    assert_eq(-EACCES,
+              user_vm_mprotect(mm, B, 3 * PAGE_4K_SIZE, PROT_RW));
+    assert_eq(3, vma_count(mm));
+    for (list_t *p = mm->vma_list.next; p != &mm->vma_list;
+         p = p->next) {
+        vma_t *v = container_of(p, vma_t, list);
+        if (v->vm_start == B)
+            assert_true((v->vm_flags & VMA_PROT_WRITE) == 0);
+    }
+    assert_eq((uint32_t)(VM_USER_RO | VM_NO_EXEC),
+              user_vm_test_leaf_vm_in(mm->pgdir, B));
+
+    /* Split the read-only segment, fork, and re-expand every
+     * fragment in the child. */
+    assert_eq(0, user_vm_mprotect(mm, B, PAGE_4K_SIZE, PROT_NONE));
+    assert_eq(0, user_vm_mprotect(mm, B, PAGE_4K_SIZE, PROT_READ));
+    assert_eq(4, vma_count(mm));
+
+    mm_t *child = new_child_mm(0x9000);
+    struct clone_publish_probe probe = { 0, 0 };
+    assert_eq(0, user_vm_clone_fork(mm, child, clone_publish_ok,
+                                    &probe));
+    assert_eq(4, vma_count(child));
+    assert_eq(-EACCES,
+              user_vm_mprotect(child, B, PAGE_4K_SIZE, PROT_RW));
+    assert_eq(-EACCES,
+              user_vm_mprotect(child, B + PAGE_4K_SIZE, PAGE_4K_SIZE,
+                               PROT_RW));
+
+    /* Positive ceiling: the O_RDWR segment may be downgraded, split,
+     * forked, and re-expanded after the fd is long gone. */
+    assert_eq(0, user_vm_mprotect(mm, B + 2 * PAGE_4K_SIZE, PAGE_4K_SIZE,
+                                  PROT_READ));
+    assert_eq(0, user_vm_mprotect(mm, B + 3 * PAGE_4K_SIZE, PAGE_4K_SIZE,
+                                  PROT_NONE));
+    assert_eq(0, user_vm_mprotect(mm, B + 3 * PAGE_4K_SIZE, PAGE_4K_SIZE,
+                                  PROT_READ));
+    assert_eq(5, vma_count(mm));
+
+    mm_t *child2 = new_child_mm(0xa000);
+    struct clone_publish_probe probe2 = { 0, 0 };
+    assert_eq(0, user_vm_clone_fork(mm, child2, clone_publish_ok,
+                                    &probe2));
+    user_vm_test_set_files(NULL);   /* the fd is closed */
+    assert_eq(0,
+              user_vm_mprotect(child2, B + 2 * PAGE_4K_SIZE,
+                               PAGE_4K_SIZE, PROT_RW));
+    assert_eq(0,
+              user_vm_mprotect(child2, B + 3 * PAGE_4K_SIZE,
+                               PAGE_4K_SIZE, PROT_RW));
+    assert_eq(0,
+              user_vm_mprotect(mm, B + 2 * PAGE_4K_SIZE, PAGE_4K_SIZE,
+                               PROT_RW));
+
+    destroy_mm(mm);
+    destroy_mm(child);
+    destroy_mm(child2);
+
+    assert_eq(user_vm_test_page_allocs() - user_vm_test_page_alloc_fails(),
+              user_vm_test_free_count());
+    assert_eq(user_vm_test_node_gets(na), user_vm_test_node_puts(na));
+    assert_eq(user_vm_test_fd_gets(), user_vm_test_fd_puts());
+    assert_eq(user_vm_test_lock_violations(), 0);
+    assert_eq(user_vm_test_double_frees(), 0);
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_mmap_and_brk_growth_allocate_no_pages),
     TEST_ENTRY(test_mprotect_split_node_failure_changes_nothing),
@@ -2845,6 +3401,11 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_shared_backing_identity),
     TEST_ENTRY(test_shared_backing_fill_race),
     TEST_ENTRY(test_shared_backing_fill_retry),
+    TEST_ENTRY(test_inode_shared_fault_and_uaccess),
+    TEST_ENTRY(test_shared_anon_fork_backing),
+    TEST_ENTRY(test_shared_anon_fork_backing_publish_fail),
+    TEST_ENTRY(test_shared_vma_retire),
+    TEST_ENTRY(test_shared_file_protect_ceiling),
 TEST_LIST_END
 
 int main(void)

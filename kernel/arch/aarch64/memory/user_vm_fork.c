@@ -142,6 +142,17 @@ static uint32_t clone_child_vm(const struct user_vm_leaf *leaf)
     return VM_USER_RO | VM_NO_EXEC;
 }
 
+/* Permission word for the child's borrowed shared-object page: the
+ * parent's logical permission verbatim (present) — an object page is
+ * never downgraded for COW, and a stash is restored as a stash. */
+static uint32_t clone_child_vm_backing(const struct user_vm_leaf *leaf,
+                                       const user_vm_page_t *pr)
+{
+    if (leaf->state == USER_VM_STASHED)
+        return VM_USER_RO | VM_NO_EXEC;
+    return pr->logical;
+}
+
 static void clone_child_clear(mm_t *child)
 {
     aarch64_user_vm_free_vmas(child);
@@ -196,9 +207,8 @@ int user_vm_clone_fork(mm_t *parent, mm_t *child, int (*publish)(void *),
             goto fail;
         }
         *cv = *pv;
-        if (cv->vm_file)
-            vfs_node_get(cv->vm_file);   /* the child fragment owns a ref */
         list_init(&cv->list);
+        aarch64_user_vm_vma_get_refs(cv);   /* the child fragment owns refs */
         vm_area_insert_sorted(child, cv);
     }
 
@@ -212,6 +222,14 @@ int user_vm_clone_fork(mm_t *parent, mm_t *child, int (*publish)(void *),
          * none) — never a COW reference on a device PA. */
         if (pr->source == USER_VM_PAGE_IO)
             continue;
+
+        /* Shared-object pages (inode MAP_SHARED): the child borrows
+         * the same PA under the parent's logical permission (or
+         * restores the stash).  No PMM COW reference is taken, the
+         * parent leaf is never downgraded and no privatization
+         * happens — the object, held alive by both VMAs' references,
+         * owns the PA. */
+        bool is_backing = (pr->source == USER_VM_PAGE_BACKING);
 
         struct clone_stage *st = kmalloc(sizeof(*st));
         user_vm_page_t *cr = kmalloc(sizeof(*cr));
@@ -241,35 +259,43 @@ int user_vm_clone_fork(mm_t *parent, mm_t *child, int (*publish)(void *),
             goto fail;
         }
 
-        st->old_refs = page_cow_refs(pr->pa);
-        if (pr->share == USER_VM_PAGE_PRIVATE) {
-            if (st->old_refs != 0) {
-                rc = -EINVAL;
-                goto fail;
-            }
-            st->first_share = true;
-        } else if (pr->share == USER_VM_PAGE_SHARED) {
-            if (st->old_refs == 0) {
-                rc = -EINVAL;
-                goto fail;
-            }
-            if (st->old_refs == UINT16_MAX) {
-                rc = -EOVERFLOW;
-                goto fail;
-            }
-            /* A shared writable leaf violates the hardware contract. */
-            if (st->parent_leaf.state == USER_VM_PRESENT &&
-                (st->parent_leaf.flags & VM_WRITE)) {
-                rc = -EINVAL;
-                goto fail;
-            }
+        if (is_backing) {
+            st->old_refs = 0;
+            st->first_share = false;
         } else {
-            rc = -EINVAL;
-            goto fail;
+            st->old_refs = page_cow_refs(pr->pa);
+            if (pr->share == USER_VM_PAGE_PRIVATE) {
+                if (st->old_refs != 0) {
+                    rc = -EINVAL;
+                    goto fail;
+                }
+                st->first_share = true;
+            } else if (pr->share == USER_VM_PAGE_SHARED) {
+                if (st->old_refs == 0) {
+                    rc = -EINVAL;
+                    goto fail;
+                }
+                if (st->old_refs == UINT16_MAX) {
+                    rc = -EOVERFLOW;
+                    goto fail;
+                }
+                /* A shared writable leaf violates the hardware contract. */
+                if (st->parent_leaf.state == USER_VM_PRESENT &&
+                    (st->parent_leaf.flags & VM_WRITE)) {
+                    rc = -EINVAL;
+                    goto fail;
+                }
+            } else {
+                rc = -EINVAL;
+                goto fail;
+            }
         }
 
         rc = arch_vmm_map_4k_new(child_root, pr->pa, pr->va,
-                                 clone_child_vm(&st->parent_leaf));
+                                 is_backing
+                                     ? clone_child_vm_backing(
+                                           &st->parent_leaf, pr)
+                                     : clone_child_vm(&st->parent_leaf));
         if (rc)
             goto fail;
         st->child_mapped = true;
@@ -283,8 +309,14 @@ int user_vm_clone_fork(mm_t *parent, mm_t *child, int (*publish)(void *),
     }
 
     /* Commit: one checked reference per page, then lower each parent
-     * writable leaf.  A commit-time mismatch halts the kernel. */
+     * writable leaf.  A commit-time mismatch halts the kernel.
+     * Shared-object pages are skipped entirely: both sides' VMA
+     * references keep the object (and its PAs) alive, so there is no
+     * reference to acquire and no parent permission to lower. */
     for (struct clone_stage *st = stages; st; st = st->next) {
+        if (st->parent->source == USER_VM_PAGE_BACKING)
+            continue;
+
         rc = pmm_cow_acquire(st->parent->pa, st->first_share);
         if (rc)
             goto fail;

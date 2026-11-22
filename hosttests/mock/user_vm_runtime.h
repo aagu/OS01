@@ -188,10 +188,14 @@ void          user_vm_test_irq_disable(void);
 typedef struct file file_t;
 struct file {
     int      type;
+    int      flags;          /* O_RDONLY / O_WRONLY / O_RDWR access mode */
     struct vfs_node *node;
 };
 #define FD_VFS 1
 #define FD_DEV 2
+#define O_RDONLY 0
+#define O_WRONLY 1
+#define O_RDWR   2
 
 typedef struct files_struct files_t;
 struct files_struct {
@@ -203,6 +207,7 @@ extern struct task_struct *current;
 
 files_t *user_vm_test_files(void);
 file_t  *files_get_file(files_t *fs, int fd);
+void     files_put_file(file_t *f);
 
 /* Fake VFS node + read for file-backed demand-fill tests. */
 struct vfs_node_test {
@@ -239,8 +244,10 @@ typedef int (*user_vm_test_read_fn)(struct vfs_node *node, uint64_t offset,
 void user_vm_test_set_vfs_read(user_vm_test_read_fn fn);
 
 /* Per-node backend read error injection: nonzero makes the default
- * read return this value. */
+ * read return this value (optionally only at/after a byte offset). */
 void user_vm_test_set_node_read_err(struct vfs_node *node, int err);
+void user_vm_test_set_node_read_err_from(struct vfs_node *node, int err,
+                                         uint64_t offset);
 
 /* Node reference accounting (registry nodes only). */
 int  user_vm_test_node_gets(struct vfs_node *node);
@@ -255,6 +262,11 @@ int user_vm_test_lock_violations(void);
 /* kmalloc/kfree balance for the same baseline assertions. */
 int user_vm_test_kmallocs(void);
 int user_vm_test_kfrees(void);
+
+/* Temporary fd-reference accounting: one get per mmap entry, one put
+ * at every exit. */
+int user_vm_test_fd_gets(void);
+int user_vm_test_fd_puts(void);
 
 /* Failed (injected) allocation attempts — the alloc counters count
  * calls, so net-baseline assertions subtract these. */
@@ -305,6 +317,7 @@ int      user_vm_test_leaf_count(void);
 int      user_vm_test_leaf_state_in(uint64_t *root, uint64_t va);
 uint64_t user_vm_test_leaf_pa_in(uint64_t *root, uint64_t va);
 uint32_t user_vm_test_leaf_vm_in(uint64_t *root, uint64_t va);
+int      user_vm_test_leaf_count_in(uint64_t *root);
 int      user_vm_test_replace_cow_calls(void);
 void     user_vm_test_on_replace_cow(void (*cb)(uint64_t old_pa));
 

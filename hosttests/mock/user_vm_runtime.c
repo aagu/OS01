@@ -452,6 +452,15 @@ uint32_t user_vm_test_leaf_vm_in(uint64_t *root, uint64_t va)
     return l ? l->vm : 0;
 }
 
+int user_vm_test_leaf_count_in(uint64_t *root)
+{
+    int n = 0;
+    for (int i = 0; i < MAX_LEAVES; i++)
+        if (g_leaves[i].used && g_leaves[i].root == root)
+            n++;
+    return n;
+}
+
 /* ══════════════════════════════════════════════════════════════
  * Transaction-layer boundary (M4 Task 3)
  * ══════════════════════════════════════════════════════════════ */
@@ -640,13 +649,30 @@ files_t *user_vm_policy_files(void)
 }
 
 /* One-slot table: the tests install fd 0 (files_get_file locks nothing
- * here — the mock table has no concurrency). */
+ * here — the mock table has no concurrency).  The get/put pair is
+ * counted so the mmap entry's single-reference protocol is visible to
+ * the baseline assertions. */
+static int g_fd_gets;
+static int g_fd_puts;
+
 file_t *files_get_file(files_t *fs, int fd)
 {
     if (!fs || fd < 0 || fd >= NOFILE)
         return NULL;
+    if (fs->fd[fd])
+        __atomic_add_fetch(&g_fd_gets, 1, __ATOMIC_RELAXED);
     return fs->fd[fd];
 }
+
+void files_put_file(file_t *f)
+{
+    (void)f;
+    if (f)
+        __atomic_add_fetch(&g_fd_puts, 1, __ATOMIC_RELAXED);
+}
+
+int user_vm_test_fd_gets(void) { return __atomic_load_n(&g_fd_gets, __ATOMIC_RELAXED); }
+int user_vm_test_fd_puts(void) { return __atomic_load_n(&g_fd_puts, __ATOMIC_RELAXED); }
 
 void user_vm_test_set_files(file_t *f)
 {
@@ -703,6 +729,7 @@ struct user_vm_test_node {
     const unsigned char *bytes;
     uint64_t             size;
     int                  read_err;
+    uint64_t             read_err_from;
     int                  gets;
     int                  puts;
     bool                 freed;
@@ -775,8 +802,20 @@ struct vfs_node *user_vm_test_make_mount_dir(struct vfs_mount *mount,
 void user_vm_test_set_node_read_err(struct vfs_node *node, int err)
 {
     struct user_vm_test_node *tn = test_node_of(node);
-    if (tn)
+    if (tn) {
         tn->read_err = err;
+        tn->read_err_from = 0;
+    }
+}
+
+void user_vm_test_set_node_read_err_from(struct vfs_node *node, int err,
+                                         uint64_t offset)
+{
+    struct user_vm_test_node *tn = test_node_of(node);
+    if (tn) {
+        tn->read_err = err;
+        tn->read_err_from = offset;
+    }
 }
 
 int  user_vm_test_node_gets(struct vfs_node *node)
@@ -829,7 +868,7 @@ static int default_vfs_read(struct vfs_node *node, uint64_t offset,
 {
     struct user_vm_test_node *tn = test_node_of(node);
     if (tn) {
-        if (tn->read_err)
+        if (tn->read_err && offset >= tn->read_err_from)
             return tn->read_err;
         if (!tn->bytes || offset >= tn->size)
             return 0;
@@ -945,6 +984,8 @@ void user_vm_test_reset(void)
     g_lock_violations = 0;
     g_kmalloc_count = 0;
     g_kfree_count = 0;
+    g_fd_gets = 0;
+    g_fd_puts = 0;
     spin_init(&g_alloc_lock);
 }
 
