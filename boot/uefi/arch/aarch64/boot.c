@@ -3,23 +3,18 @@
  * Kernel: validated ELF loaded at fixed PT_LOAD physical addresses
  *   inside the configured boot block (entry = AARCH64_KERNEL_ENTRY,
  *   see loader.h / boot_layout.h).
- * Handoff: boot_context at AARCH64_HANDOFF_BASE in a 31-page
- *   allocation; the firmware FDT is copied after the context, and the
- *   raw UEFI memory map is placed after that, up to the trampoline
- *   page @ AARCH64_TRAMPOLINE_BASE.
+ * Handoff: boot_context, firmware FDT copy, and raw UEFI memory map
+ *   are dynamically allocated below AARCH64_BOOT_MAP_END (disjoint
+ *   from the boot block) and passed by physical pointer; the 1-page
+ *   trampoline sits at AARCH64_TRAMPOLINE_BASE.
  * Memory map: raw UEFI descriptors (BOOT_MEMORY_FORMAT_UEFI_RAW).
  */
 #include <uefi.h>
 #include "../arch.h"
 #include "loader.h"
 
-/* AARCH64_HANDOFF_BASE / AARCH64_HANDOFF_END / AARCH64_TRAMPOLINE_BASE
- * come from the shared handoff_layout.h (via loader.h). The derived
- * page counts stay local since they depend on AARCH64_PAGE_SIZE. */
-#define AARCH64_HANDOFF_PAGES      ((AARCH64_HANDOFF_END - \
-                                     AARCH64_HANDOFF_BASE) / \
-                                    AARCH64_PAGE_SIZE)
-#define AARCH64_HANDOFF_DATA_PAGES (AARCH64_HANDOFF_PAGES - 1)
+#define AARCH64_MMAP_SLACK_ENTRIES 32u
+#define AARCH64_MMAP_MIN_PAGES     8u
 #define AARCH64_FDT_MAGIC          UINT32_C(0xd00dfeed)
 #define AARCH64_FDT_HEADER_SIZE    UINT32_C(40)
 
@@ -45,8 +40,11 @@ struct aarch64_fixed_allocation {
 
 static struct aarch64_fixed_allocation *kernel_allocations;
 static uint16_t kernel_allocation_count;
-static uint64_t handoff_cursor;
-static int aarch64_data_reserved;        /* AARCH64_HANDOFF_BASE, DATA_PAGES */
+static efi_physical_address_t aarch64_ctx_phys;
+static efi_physical_address_t aarch64_fdt_phys;
+static uintn_t aarch64_fdt_pages;
+static efi_physical_address_t aarch64_mmap_phys;
+static uintn_t aarch64_mmap_pages;
 static int aarch64_trampoline_reserved;  /* AARCH64_TRAMPOLINE_BASE, 1 page */
 
 static efi_serial_io_protocol_t *serial_io_protocol(void)
@@ -237,21 +235,63 @@ const char_t *arch_kernel_path(void)
     return L"\\kernel.elf";
 }
 
+static EFI_STATUS alloc_handoff_pages(uintn_t pages,
+                                      efi_physical_address_t *addr_out)
+{
+    uint64_t bytes;
+    efi_physical_address_t addr;
+    EFI_STATUS status;
+
+    if (!addr_out || pages == 0)
+        return EFI_INVALID_PARAMETER;
+    if ((uint64_t)pages > (~UINT64_C(0)) / AARCH64_PAGE_SIZE)
+        return EFI_OUT_OF_RESOURCES;
+    bytes = (uint64_t)pages * AARCH64_PAGE_SIZE;
+    if (bytes > AARCH64_BOOT_MAP_END)
+        return EFI_OUT_OF_RESOURCES;
+
+    /* Kernel M0 boot page tables only map [0, AARCH64_BOOT_MAP_END),
+     * and the boot block [AARCH64_BOOT_BLOCK_BASE, AARCH64_BOOT_BLOCK_END)
+     * is reserved for kernel ELF segments + trampoline. Allocate from
+     * the highest free pages below AARCH64_BOOT_MAP_END, retrying below
+     * AARCH64_BOOT_BLOCK_BASE if the first attempt lands inside B. */
+    addr = (efi_physical_address_t)(AARCH64_BOOT_MAP_END - 1);
+    status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData, pages, &addr);
+    if (!EFI_ERROR(status)) {
+        if (addr != 0 &&
+            (addr + bytes <= AARCH64_BOOT_BLOCK_BASE ||
+             addr >= AARCH64_BOOT_BLOCK_END)) {
+            *addr_out = addr;
+            return EFI_SUCCESS;
+        }
+        (void)BS->FreePages(addr, pages);
+        if (AARCH64_BOOT_BLOCK_BASE >= bytes + AARCH64_PAGE_SIZE) {
+            addr = (efi_physical_address_t)(AARCH64_BOOT_BLOCK_BASE - 1);
+            status = BS->AllocatePages(AllocateMaxAddress, EfiLoaderData,
+                                       pages, &addr);
+            if (!EFI_ERROR(status)) {
+                if (addr != 0 && addr + bytes <= AARCH64_BOOT_BLOCK_BASE) {
+                    *addr_out = addr;
+                    return EFI_SUCCESS;
+                }
+                (void)BS->FreePages(addr, pages);
+            }
+        }
+        return EFI_OUT_OF_RESOURCES;
+    }
+    return status;
+}
+
 efi_status_t arch_init_handoff(struct boot_context **ctx_out)
 {
     efi_physical_address_t addr;
     struct boot_context *ctx;
     EFI_STATUS status;
 
-    addr = (efi_physical_address_t)AARCH64_HANDOFF_BASE;
-    status = BS->AllocatePages(AllocateAddress, EfiLoaderData,
-                               (uintn_t)AARCH64_HANDOFF_DATA_PAGES, &addr);
-    if (EFI_ERROR(status) || addr != AARCH64_HANDOFF_BASE) {
-        if (!EFI_ERROR(status))
-            (void)BS->FreePages(addr, (uintn_t)AARCH64_HANDOFF_DATA_PAGES);
-        return EFI_ERROR(status) ? status : EFI_OUT_OF_RESOURCES;
-    }
-    aarch64_data_reserved = 1;
+    status = alloc_handoff_pages(1, &addr);
+    if (EFI_ERROR(status))
+        return status;
+    aarch64_ctx_phys = addr;
 
     addr = (efi_physical_address_t)AARCH64_TRAMPOLINE_BASE;
     status = BS->AllocatePages(AllocateAddress, EfiLoaderCode, 1, &addr);
@@ -263,13 +303,11 @@ efi_status_t arch_init_handoff(struct boot_context **ctx_out)
     }
     aarch64_trampoline_reserved = 1;
 
-    memset((void *)(uintptr_t)AARCH64_HANDOFF_BASE, 0,
-           (size_t)(AARCH64_HANDOFF_END - AARCH64_HANDOFF_BASE));
-    ctx = (struct boot_context *)(uintptr_t)AARCH64_HANDOFF_BASE;
+    memset((void *)(uintptr_t)aarch64_ctx_phys, 0, (size_t)AARCH64_PAGE_SIZE);
+    ctx = (struct boot_context *)(uintptr_t)aarch64_ctx_phys;
     boot_context_init(ctx);
     ctx->boot_cpu_id = read_mpidr();
     ctx->flags |= BOOT_CONTEXT_HAS_BOOT_CPU_ID;
-    handoff_cursor = align_up_8(AARCH64_HANDOFF_BASE + sizeof(*ctx));
 
     status = prepare_trampoline();   /* pre-EBS so failure is reportable */
     if (EFI_ERROR(status))
@@ -458,13 +496,20 @@ efi_status_t arch_fill_firmware(struct boot_context *ctx)
     firmware_fdt = find_fdt(&fdt_size);
     if (firmware_fdt) {
         struct aarch64_early_mmio_handoff early_mmio;
+        efi_physical_address_t fdt_phys = 0;
+        uintn_t fdt_pages = (uintn_t)(((uint64_t)fdt_size + AARCH64_PAGE_SIZE - 1) /
+                                      AARCH64_PAGE_SIZE);
 
-        if ((uint64_t)fdt_size > AARCH64_TRAMPOLINE_BASE - handoff_cursor)
-            return EFI_BUFFER_TOO_SMALL;
-        memcpy((void *)(uintptr_t)handoff_cursor, firmware_fdt, (size_t)fdt_size);
-        ctx->firmware.dtb = handoff_cursor;
+        status = alloc_handoff_pages(fdt_pages, &fdt_phys);
+        if (EFI_ERROR(status))
+            return status;
+        aarch64_fdt_phys = fdt_phys;
+        aarch64_fdt_pages = fdt_pages;
+        memset((void *)(uintptr_t)fdt_phys, 0,
+               (size_t)fdt_pages * (size_t)AARCH64_PAGE_SIZE);
+        memcpy((void *)(uintptr_t)fdt_phys, firmware_fdt, (size_t)fdt_size);
+        ctx->firmware.dtb = (uint64_t)fdt_phys;
         ctx->flags |= BOOT_CONTEXT_HAS_DTB;
-        handoff_cursor = align_up_8(handoff_cursor + (uint64_t)fdt_size);
 
         /* Derive the early console PA + Device window from the same
          * firmware FDT (fail-quiet: an unusable derivation leaves the
@@ -490,8 +535,55 @@ efi_status_t arch_fill_firmware(struct boot_context *ctx)
 void arch_memory_buffer(efi_physical_address_t *phys_out,
                         uint64_t *capacity_out)
 {
-    *phys_out = handoff_cursor;
-    *capacity_out = AARCH64_TRAMPOLINE_BASE - handoff_cursor;
+    uintn_t map_size = 0, map_key = 0, desc_size = 0;
+    uint32_t desc_version = 0;
+    uint64_t slack_bytes;
+    uint64_t total_bytes;
+    uintn_t pages;
+    efi_physical_address_t mmap_phys = 0;
+    EFI_STATUS status;
+
+    if (aarch64_mmap_phys) {
+        (void)BS->FreePages(aarch64_mmap_phys, aarch64_mmap_pages);
+        aarch64_mmap_phys = 0;
+        aarch64_mmap_pages = 0;
+    }
+
+    status = BS->GetMemoryMap(&map_size, NULL, &map_key,
+                              &desc_size, &desc_version);
+    if (status != EFI_BUFFER_TOO_SMALL || desc_size == 0) {
+        *phys_out = 0;
+        *capacity_out = 0;
+        return;
+    }
+
+    if ((uint64_t)desc_size > (~UINT64_C(0)) / AARCH64_MMAP_SLACK_ENTRIES) {
+        *phys_out = 0;
+        *capacity_out = 0;
+        return;
+    }
+    slack_bytes = (uint64_t)desc_size * AARCH64_MMAP_SLACK_ENTRIES;
+    if ((uint64_t)map_size > (~UINT64_C(0)) - slack_bytes) {
+        *phys_out = 0;
+        *capacity_out = 0;
+        return;
+    }
+    total_bytes = (uint64_t)map_size + slack_bytes;
+    pages = (uintn_t)((total_bytes + AARCH64_PAGE_SIZE - 1) / AARCH64_PAGE_SIZE);
+    if (pages < AARCH64_MMAP_MIN_PAGES)
+        pages = AARCH64_MMAP_MIN_PAGES;
+
+    status = alloc_handoff_pages(pages, &mmap_phys);
+    if (EFI_ERROR(status)) {
+        *phys_out = 0;
+        *capacity_out = 0;
+        return;
+    }
+
+    aarch64_mmap_phys = mmap_phys;
+    aarch64_mmap_pages = pages;
+    *phys_out = mmap_phys;
+    *capacity_out = (uint64_t)pages * AARCH64_PAGE_SIZE;
 }
 
 void arch_build_memory(struct boot_context *ctx,
@@ -514,10 +606,19 @@ void arch_release(void)
         (void)BS->FreePages((efi_physical_address_t)AARCH64_TRAMPOLINE_BASE, 1);
         aarch64_trampoline_reserved = 0;
     }
-    if (aarch64_data_reserved) {
-        (void)BS->FreePages((efi_physical_address_t)AARCH64_HANDOFF_BASE,
-                            (uintn_t)AARCH64_HANDOFF_DATA_PAGES);
-        aarch64_data_reserved = 0;
+    if (aarch64_mmap_phys) {
+        (void)BS->FreePages(aarch64_mmap_phys, aarch64_mmap_pages);
+        aarch64_mmap_phys = 0;
+        aarch64_mmap_pages = 0;
+    }
+    if (aarch64_fdt_phys) {
+        (void)BS->FreePages(aarch64_fdt_phys, aarch64_fdt_pages);
+        aarch64_fdt_phys = 0;
+        aarch64_fdt_pages = 0;
+    }
+    if (aarch64_ctx_phys) {
+        (void)BS->FreePages(aarch64_ctx_phys, 1);
+        aarch64_ctx_phys = 0;
     }
 }
 

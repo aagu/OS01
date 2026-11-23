@@ -433,17 +433,24 @@ void arch_early_init(const struct boot_context *bootctx)
     __asm__ __volatile__("msr vbar_el1, %0\n\tisb" :: "r"(vbar) : "memory");
 
     /* Task 3 layout evidence: the recorded entry (PC-relative adr
-     * _start from the low boot path) and the received context pointer
-     * must match the configured boot block — a kernel started with a
-     * loader paired to a different layout halts here, fail-closed.
-     * Only the OBSERVED values are printed, never the configuration
-     * constants. */
+     * _start from the low boot path) must match the configured boot
+     * block, and the dynamically allocated boot_context pointer must
+     * lie inside the early identity map [0, AARCH64_BOOT_MAP_END) and
+     * outside the kernel boot block [AARCH64_BOOT_BLOCK_BASE,
+     * AARCH64_BOOT_BLOCK_END). Only the OBSERVED values are printed,
+     * never the configuration constants. */
     {
         uint64_t observed_entry = aarch64_boot_observed_entry();
         uint64_t observed_context = (uint64_t)(uintptr_t)bootctx;
+        uint64_t ctx_end = observed_context + sizeof(*bootctx);
 
         if (observed_entry != (uint64_t)AARCH64_KERNEL_ENTRY ||
-            observed_context != (uint64_t)AARCH64_HANDOFF_BASE) {
+            observed_context == 0 ||
+            (observed_context & UINT64_C(7)) != 0 ||
+            ctx_end < observed_context ||
+            ctx_end > (uint64_t)AARCH64_BOOT_MAP_END ||
+            (observed_context < (uint64_t)AARCH64_BOOT_BLOCK_END &&
+             ctx_end > (uint64_t)AARCH64_BOOT_BLOCK_BASE)) {
             log_err("UEFI-A64: layout mismatch entry=%lx context=%lx\n",
                     (unsigned long)observed_entry,
                     (unsigned long)observed_context);

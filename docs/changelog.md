@@ -5,6 +5,13 @@
 
 ---
 
+## 2026-11-23
+
+- feat(aarch64,boot): **aarch64 handoff 动态分配，解除 128 KiB 窗口固化**（闭合 `docs/roadmap.md` P2 真机硬阻断「handoff 窗口容量固化（128 KiB）」）：
+  - **UEFI 引导器动态申请**（`boot/uefi/arch/aarch64/boot.c`）：移除 `AARCH64_HANDOFF_BASE` 固定 31 页窗口与 `handoff_cursor` 线性 bump；新增 `alloc_handoff_pages()` 通过 `AllocateMaxAddress` 在 `[0, AARCH64_BOOT_MAP_END)` 内且避开 `[AARCH64_BOOT_BLOCK_BASE, AARCH64_BOOT_BLOCK_END)` 分别按需申请 `boot_context`（1 页）、固件 FDT（按实际 `fdt_size` 向上取整页数）与 UEFI 内存图缓冲（先探测 `GetMemoryMap` 规模再加 32 项裕量按页申请），`arch_release()` 对应释放。`AARCH64_TRAMPOLINE_BASE` 仍保留在 `AARCH64_BOOT_BLOCK_END - 0x1000` 处的 1 页 `EfiLoaderCode`。
+  - **布局常量与内核校验解绑**（`kernel/include/arch/aarch64/boot_layout.h`、`kernel/arch/aarch64/linker.ld`、`boot/uefi/arch/aarch64/{elf.c,loader.h}`、`kernel/arch/aarch64/{boot/main.c,platform/dtb.c,memory/ram.c}`）：移除 `AARCH64_HANDOFF_BASE`/`AARCH64_HANDOFF_END`，链接器与 ELF 加载器上界改为 `AARCH64_TRAMPOLINE_BASE`；内核 `arch_early_init()`、`dtb_init()`、`aarch64_ram_init()` 改为校验传入物理指针位于 `[0, AARCH64_BOOT_MAP_END)`（M0 早期直接映射内）、对齐且不与 boot block 重叠。
+  - **测试同步与验收**：同步 `hosttests/cases/test_aarch64_boot_elf.c`、`qemutests/aarch64_uefi_smp.py` 与 `qemutests/test_aarch64_harness.py`（补入 `context` 落入 boot block 或 `>= 2 GiB` 的负例）；`make test-host`、`make test-static`、`make PROFILE=aarch64-clang KERNEL_SELFTEST=1 test-aarch64 MODE=smp`、`MODE=boot-contract` 及 2 核 QEMU 1 MiB 大 DTB 实机引导全绿。
+
 ## 2026-11-22
 
 - feat(aarch64,syscall): **aarch64 时间 syscall 组解禁**（闭合 `docs/roadmap.md` P2「能力齐平 — 时间 syscall 组」）：

@@ -36,7 +36,7 @@ int aarch64_page_interval(uint64_t paddr, uint64_t memsz,
 
     /* Every non-empty load image must sit inside the configured boot
      * block: byte range and rounded allocation pages within
-     * [AARCH64_KERNEL_ENTRY, AARCH64_HANDOFF_BASE). */
+     * [AARCH64_KERNEL_ENTRY, AARCH64_TRAMPOLINE_BASE). */
     if (paddr < AARCH64_KERNEL_ENTRY)
         return AARCH64_ELF_ERR_RANGE;
 
@@ -48,7 +48,7 @@ int aarch64_page_interval(uint64_t paddr, uint64_t memsz,
         return rc;
 
     rounded_end &= ~AARCH64_PAGE_MASK;
-    if (rounded_end > AARCH64_HANDOFF_BASE)
+    if (rounded_end > AARCH64_TRAMPOLINE_BASE)
         return AARCH64_ELF_ERR_RANGE;
 
     *pages_out = (rounded_end - *start_out) / AARCH64_PAGE_SIZE;

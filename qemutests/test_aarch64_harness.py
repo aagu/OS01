@@ -1690,7 +1690,7 @@ class LmaLayoutEvidenceTests(unittest.TestCase):
                          if l.startswith("UEFI-A64: RAM ranges="))
         lines[ram_index:ram_index] = [
             "UEFI-A64: boot map selftest OK",
-            "UEFI-A64: layout entry=0x42080000 context=0x421e0000",
+            "UEFI-A64: layout entry=0x42080000 context=0x43000000",
         ]
         cls.positive = "\n".join(lines) + "\n"
 
@@ -1700,10 +1700,22 @@ class LmaLayoutEvidenceTests(unittest.TestCase):
 
     def test_wrong_address_rejected(self):
         wrong = self.positive.replace(
-            "UEFI-A64: layout entry=0x42080000 context=0x421e0000",
-            "UEFI-A64: layout entry=0x40080000 context=0x401e0000")
+            "UEFI-A64: layout entry=0x42080000 context=0x43000000",
+            "UEFI-A64: layout entry=0x40080000 context=0x43000000")
         self.assertFalse(smp.lma_layout_evidence_ok(
             wrong, self.BASE, cpus=2, ram_mib=512))
+
+    def test_context_inside_boot_block_or_above_2g_rejected(self):
+        in_b = self.positive.replace(
+            "UEFI-A64: layout entry=0x42080000 context=0x43000000",
+            "UEFI-A64: layout entry=0x42080000 context=0x421e0000")
+        self.assertFalse(smp.lma_layout_evidence_ok(
+            in_b, self.BASE, cpus=2, ram_mib=512))
+        above_2g = self.positive.replace(
+            "UEFI-A64: layout entry=0x42080000 context=0x43000000",
+            "UEFI-A64: layout entry=0x42080000 context=0x80000000")
+        self.assertFalse(smp.lma_layout_evidence_ok(
+            above_2g, self.BASE, cpus=2, ram_mib=512))
 
     def test_zone_overlapping_b_rejected(self):
         # Move zone 0 (with its coverage/edge/walk bookkeeping) so it

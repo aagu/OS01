@@ -866,13 +866,20 @@ def lma_layout_evidence_ok(text: str, base: int, cpus: int,
     """
     text = text.replace("\r", "")
     entry = base + 0x80000
-    context = base + 0x1e0000
     layout = re.findall(
         r"^UEFI-A64: layout entry=(0x[0-9a-f]+) context=(0x[0-9a-f]+)$",
         text, re.MULTILINE)
     if len(layout) != 1:
         return False
-    if int(layout[0][0], 16) != entry or int(layout[0][1], 16) != context:
+    observed_entry = int(layout[0][0], 16)
+    observed_context = int(layout[0][1], 16)
+    if observed_entry != entry:
+        return False
+    if observed_context == 0 or (observed_context & 7) != 0:
+        return False
+    if observed_context >= 0x80000000:
+        return False
+    if base <= observed_context < base + 0x200000:
         return False
     if not re.search(r"^UEFI-A64: boot map selftest OK$", text, re.MULTILINE):
         return False

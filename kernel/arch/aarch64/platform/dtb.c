@@ -58,22 +58,25 @@ static __attribute__((noreturn)) void dtb_fatal(const char *reason)
 
 void dtb_init(const struct boot_context *handoff)
 {
-    /* Derived handoff bounds (shared layout header): the DTB copy may
-     * use the data pages of the handoff window but never the
-     * executable trampoline page. */
-    const uint64_t start = (uint64_t)AARCH64_HANDOFF_BASE;
-    const uint64_t end = (uint64_t)AARCH64_TRAMPOLINE_BASE;
+    /* Validate the dynamically allocated DTB buffer: must be 8-byte
+     * aligned, inside the M0 early identity map [0, AARCH64_BOOT_MAP_END),
+     * and disjoint from the kernel boot block. */
+    const uint64_t map_end = (uint64_t)AARCH64_BOOT_MAP_END;
+    const uint64_t b_start = (uint64_t)AARCH64_BOOT_BLOCK_BASE;
+    const uint64_t b_end = (uint64_t)AARCH64_BOOT_BLOCK_END;
     if (!boot_context_valid(handoff) || !(handoff->flags & BOOT_CONTEXT_HAS_DTB))
         dtb_fatal("UEFI handoff has no DTB");
     uint64_t addr = handoff->firmware.dtb;
-    /* Validate the header range before the first load, then the full copy.
-     * The last handoff page is executable trampoline storage, never DTB. */
-    if (addr < start || addr > end || 40 > end - addr || (addr & 7))
+    if (addr == 0 || addr >= map_end || 40 > map_end - addr || (addr & 7))
+        dtb_fatal("DTB header outside UEFI handoff copy");
+    if (addr < b_end && addr + 40 > b_start)
         dtb_fatal("DTB header outside UEFI handoff copy");
     const uint8_t *b = (const uint8_t *)(uintptr_t)addr;
     uint32_t size = (uint32_t)b[4] << 24 | (uint32_t)b[5] << 16 |
                     (uint32_t)b[6] << 8 | b[7];
-    if (size < 40 || size > end - addr)
+    if (size < 40 || size > map_end - addr)
+        dtb_fatal("DTB size outside UEFI handoff copy");
+    if (addr < b_end && addr + size > b_start)
         dtb_fatal("DTB size outside UEFI handoff copy");
     uint64_t bsp;
     __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(bsp));

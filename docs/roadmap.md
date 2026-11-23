@@ -13,7 +13,7 @@
 |-------|------|---------|------|
 | **P0** | 工程与测试基础设施 | 0 | flake 账本入库已于 2026-11-21 闭环（见 [`changelog.md`](changelog.md)） |
 | **P1** | 安全加固 | 2 | UBSan/KASan 后续项（v1 已于 2026-11-22 闭环）+ ASLR 剩余范围（栈基址随机化 / aarch64） |
-| **P2** | aarch64 适配 | 11 | 内存与执行体 0 · 能力齐平 6 · 架构统一 0 · 真机阻断 5 |
+| **P2** | aarch64 适配 | 10 | 内存与执行体 0 · 能力齐平 6 · 架构统一 0 · 真机阻断 4 |
 | **P2** | 架构治理 / 扩展性 | 0 | 新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填该节 |
 | **P3** | GUI | 7 | GUI-4/5/6 + 优化与验证 4 |
 | **P4** | 硬件适配 | 5 | USB 2 · NVMe · HPET · ACPI S3 |
@@ -81,7 +81,6 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 | 问题 | 位置 | 真机影响 | 状态 / 剩余解法 |
 |------|------|----------|----------|
 | DTB 形状校验（PL011 interrupts）与 GICv3 缺失 | `kernel/arch/aarch64/platform/dtb_parse.c:152-155`（PL011 interrupts 仍要求恰 3 cell + GIC_SPI=0 + IRQ_TYPE=LEVEL_HIGH）；GIC compatible 白名单只收 `arm,cortex-a15-gic` / `arm,gic-400`（`:133-134`）；全树无 `arm,gic-v3` | DTB 形状不同的板被拒；GICv3 平台无法启动 | ❌ **仍开放**：放宽 PL011 interrupts 形状校验 + GICv3 另列驱动任务 |
-| handoff 窗口容量固化（128 KiB） | 窗口定义 `kernel/include/arch/aarch64/boot_layout.h:45-47`（`AARCH64_HANDOFF_BASE = BOOT_BLOCK_END - 0x20000`）；固定址申请 `boot/uefi/arch/aarch64/boot.c:246-249`；`:462-463` `EFI_BUFFER_TOO_SMALL`（容量上界写死在 `:494`） | 128 KiB 总窗口对真机 DTB（数百 KiB 常见）偏小 → `EFI_BUFFER_TOO_SMALL` | ❌ **仍开放**：改为 LMA_end 后动态分配 + `boot_context` 传指针 |
 
 **条件阻断（能到早期启动，特定环节卡死/静默失效）**：
 
@@ -95,7 +94,7 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 经 `ID_AA64ISAR0_EL1.RNDR` 探测，输出 STRONG/WEAK/NONE），STRONG 池可用，无 RNDR 的板只剩 EFI_RNG_PROTOCOL
 （无 RngDxe 的板 random_init fail-closed）；`AARCH64_M1_SPARSE` 假设 0x4fe00000..0x50400000 是 RAM（仅自测宏）。
 
-**剩余解绑顺序**：按目标板补 Group-1 / spin-table → 放宽 PL011 / timer 形状校验 → GICv3 驱动与 handoff 动态容量 → 实机启动验证。
+**剩余解绑顺序**：按目标板补 Group-1 / spin-table → 放宽 PL011 / timer 形状校验 → GICv3 驱动 → 实机启动验证。
 
 ### 🧱 P2 架构治理 / 扩展性
 
@@ -200,6 +199,7 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 
 | 闭环项 | 日期 | 详情 |
 |--------|------|------|
+| **aarch64 handoff 动态分配（解除 128 KiB 窗口固化）**（`boot/uefi/arch/aarch64/boot.c` 改为在 `[0, AARCH64_BOOT_MAP_END)` 内且避开 boot block 动态 `AllocatePages(AllocateMaxAddress, EfiLoaderData, ...)` 分别分配 `boot_context`、DTB 与 UEFI 内存图；`boot_layout.h` 移除 `AARCH64_HANDOFF_BASE`/`END`，内核上界放宽至 `AARCH64_TRAMPOLINE_BASE`；2 核 QEMU 实测 1 MiB DTB 引导与 selftest 全绿） | 2026-11-23 | [changelog](changelog.md#2026-11-23) |
 | **aarch64 时间 syscall 组解禁**（`kernel/syscall/dispatch.c` 在 `OS01_HAS_USERSPACE=1` 下对 aarch64 开放 `sys_time_dispatch` 四项 `SYS_time`/`gettimeofday`/`nanosleep`/`times`，`kernel/Makefile` 纳入 `syscall/sys_time.c`；2 核 QEMU 实测 `/bin/timeit /bin/busybox sleep 1` 真睡 `real 1.021863`） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [syscall](syscall/syscall.md) |
 | **inode 级 `MAP_SHARED` 剩余五项闭环**（磁盘回写 `msync`/`fsync`/`sync`/拆卸落盘、fd I/O 读写与共享页双向覆盖对齐、`vfs_truncate` 撤页与尾页清零回收、POSIX `shm_open`/`shm_unlink` + `SYS_msync`/`SYS_fsync` ABI、`x86_64` 用户 VM 全链接入共享对象注册表） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [cow-mmap](memory/cow-mmap.md#3-跨进程-inode-级-map_shared2026-11-22aarch64) · [syscall](syscall/syscall.md) |
 | **USB boot M0 固件检查点退役**（`USB_BOOT_CASE=firmware` 子用例删除：过期的 `rc=-19` 预期失败断言、case 表与 make 白名单一并收敛；其正面证明——xHCI 枚举 + MSC 发布 + GUID 选盘 usba 根 + 两个分区标记——并入 `readonly` 的成功证据链，并同步 `mk/components/run.mk` 的帮助文本与三处过期注释） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [build](build/build.md) · [driver](driver/driver.md) |

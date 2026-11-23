@@ -160,7 +160,7 @@ SECTIONS
 
     _kernel_end = .;
     _kernel_lma_end = LOADADDR(.bss) + SIZEOF(.bss);
-    ASSERT(_kernel_lma_end <= AARCH64_HANDOFF_BASE, "kernel overlaps UEFI handoff")
+    ASSERT(_kernel_lma_end <= AARCH64_TRAMPOLINE_BASE, "kernel overlaps UEFI trampoline")
     ASSERT(_start == AARCH64_KERNEL_ENTRY, "aarch64 _start does not match the configured boot block entry")
 
     /* Sentinel: a couple of known symbols used by head.S to size .boot.bss

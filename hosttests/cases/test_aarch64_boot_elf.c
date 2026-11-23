@@ -68,7 +68,7 @@ struct elf_fixture {
 static void fill_valid_fixture(struct elf_fixture *f, uint64_t base)
 {
     uint64_t entry = base + UINT64_C(0x80000);
-    uint64_t handoff = base + UINT64_C(0x1e0000);
+    uint64_t trampoline = base + UINT64_C(0x1ff000);
 
     memset(f, 0, sizeof(*f));
     f->entry = entry;
@@ -91,10 +91,10 @@ static void fill_valid_fixture(struct elf_fixture *f, uint64_t base)
     f->segs[2].paddr = entry + UINT64_C(0x1800);
     f->segs[2].filesz = 0x800;
     f->segs[2].memsz = 0x800;
-    /* Final page abuts the handoff window exactly (legal boundary). */
+    /* Final page abuts the trampoline page exactly (legal boundary). */
     f->segs[3].flags = UINT32_C(6);
-    f->segs[3].vaddr = FIXTURE_PAGE_OFFSET + (handoff - UINT64_C(0x1000));
-    f->segs[3].paddr = handoff - UINT64_C(0x1000);
+    f->segs[3].vaddr = FIXTURE_PAGE_OFFSET + (trampoline - UINT64_C(0x1000));
+    f->segs[3].paddr = trampoline - UINT64_C(0x1000);
     f->segs[3].filesz = 0x1000;
     f->segs[3].memsz = 0x1000;
 }

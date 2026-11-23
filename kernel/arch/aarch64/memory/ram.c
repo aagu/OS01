@@ -94,20 +94,20 @@ int aarch64_ram_init(const struct boot_context *handoff)
                          &descriptor_bytes))
         ram_fatal("[smp] FATAL: descriptor byte count overflows\n");
 
-    /* Validate the descriptor buffer lies entirely inside the
-     * AArch64 handoff window. entries must be non-zero, and both
-     * entries and entries + descriptor_bytes must fit in
-     * [AARCH64_HANDOFF_BASE, AARCH64_TRAMPOLINE_BASE). */
+    /* Validate the dynamically allocated descriptor buffer lies inside
+     * the M0 early direct map [0, AARCH64_BOOT_MAP_END) and is
+     * disjoint from the kernel boot block. */
     entries_phys = handoff->memory.entries;
-    if (entries_phys < AARCH64_HANDOFF_BASE)
-        ram_fatal("[smp] FATAL: descriptor buffer below handoff base\n");
+    if (entries_phys == 0 || entries_phys >= AARCH64_BOOT_MAP_END)
+        ram_fatal("[smp] FATAL: descriptor buffer outside boot map\n");
 
-    if (entries_phys > (UINT64_C(0) - descriptor_bytes))
-        ram_fatal("[smp] FATAL: descriptor buffer end overflows\n");
+    if (descriptor_bytes > AARCH64_BOOT_MAP_END - entries_phys)
+        ram_fatal("[smp] FATAL: descriptor buffer crosses boot map end\n");
 
     entries_end = entries_phys + descriptor_bytes;
-    if (entries_end > AARCH64_TRAMPOLINE_BASE)
-        ram_fatal("[smp] FATAL: descriptor buffer crosses trampoline\n");
+    if (entries_phys < AARCH64_BOOT_BLOCK_END &&
+        entries_end > AARCH64_BOOT_BLOCK_BASE)
+        ram_fatal("[smp] FATAL: descriptor buffer overlaps boot block\n");
 
     /* Convert the descriptor physical address to a host pointer via
      * the high-half direct map (+ARCH_PAGE_OFFSET). We do NOT use

@@ -14,12 +14,12 @@
 
 #define AARCH64_PAGE_SIZE          UINT64_C(0x1000)
 
-/* The trampoline page must sit one page below the handoff window's end.
+/* The trampoline page must sit one page below the boot block's end.
  * A drift between the shared header's literal and this derived invariant
  * is a layout bug that bricks the BSP jump — lock them at compile time. */
 _Static_assert(AARCH64_TRAMPOLINE_BASE ==
-               (AARCH64_HANDOFF_END - AARCH64_PAGE_SIZE),
-               "AARCH64_TRAMPOLINE_BASE drifted from handoff end - page size");
+               (AARCH64_BOOT_BLOCK_END - AARCH64_PAGE_SIZE),
+               "AARCH64_TRAMPOLINE_BASE drifted from boot block end - page size");
 
 #define AARCH64_EI_MAG0            0
 #define AARCH64_EI_MAG1            1
