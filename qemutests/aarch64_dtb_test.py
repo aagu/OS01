@@ -99,10 +99,10 @@ int main(int argc, char **argv) {
         if (((unsigned char *)&out)[i]) return 4;
     memset(&out, 0xa5, sizeof(out));
     int rc = aarch64_dtb_parse(blob, (uint32_t)size, strtoull(argv[2], 0, 0), &out);
-    printf("%d %u %d %d %llx %llx %llx %u", rc, out.topology.cpu_count,
+    printf("%d %u %d %d %llx %llx %llx %u %u", rc, out.topology.cpu_count,
            out.topology.conduit, out.topology.psci_compatible,
            (unsigned long long)out.gicd_base, (unsigned long long)out.gicc_base,
-           (unsigned long long)out.pl011_base, out.cntp_ppi);
+           (unsigned long long)out.pl011_base, out.cntp_ppi, out.pl011_spi);
     for (unsigned i = 0; i < out.topology.cpu_count; ++i)
         printf(" %llx", (unsigned long long)out.topology.mpidr[i]);
     puts("");
@@ -128,7 +128,8 @@ def main():
         ('missing_device', fixture(missing='pl011'), 0, -4, []),
         ('missing_gic', fixture(missing='intc'), 0, -4, []),
         ('missing_timer', fixture(missing='timer'), 0, -4, []),
-        ('wrong_gicc', fixture(gicc=0x08020000), 0, -4, []),
+        ('custom_gicc', fixture(gicc=0x08020000), 0, 0, [0]),
+        ('zero_gicc', fixture(gicc=0x0), 0, -4, []),
         ('short_uart_reg', fixture(uart_size=0xfff), 0, -4, []),
         ('disabled_cpu_ignored', fixture(cpus=(0, 1), disabled=(1,)), 0, 0, [0]),
         ('duplicate_mpidr', fixture(cpus=(0, 0)), 0, -2, []),
@@ -148,6 +149,28 @@ def main():
     one_cell_devices[2][1][1][1] = ('reg', cells(0x08000000, 0x10000, 0x08010000, 0x10000))
     one_cell_devices[2][2][1][1] = ('reg', cells(0x09000000, 0x1000))
     cases.append(('one_cell_device_addresses', one_cell_devices, 0, 0, [0]))
+
+    def with_pl011_irq(irq_cells):
+        t = fixture()
+        t[2][2][1].append(('interrupts', cells(*irq_cells)))
+        return t
+
+    pl011_spi_expected = {
+        'pl011_spi_1_level_high': 33,
+        'pl011_spi_0': 32,
+        'pl011_spi_edge_trigger': 37,
+        'pl011_multi_interrupts': 34,
+        'pl011_4cell_degrades': 0,
+        'pl011_non_spi_degrades': 0,
+    }
+    cases.extend([
+        ('pl011_spi_1_level_high', with_pl011_irq((0, 1, 4)), 0, 0, [0]),
+        ('pl011_spi_0', with_pl011_irq((0, 0, 4)), 0, 0, [0]),
+        ('pl011_spi_edge_trigger', with_pl011_irq((0, 5, 1)), 0, 0, [0]),
+        ('pl011_multi_interrupts', with_pl011_irq((0, 2, 4, 0, 3, 4)), 0, 0, [0]),
+        ('pl011_4cell_degrades', with_pl011_irq((0, 1, 4, 0)), 0, 0, [0]),
+        ('pl011_non_spi_degrades', with_pl011_irq((1, 1, 4)), 0, 0, [0]),
+    ])
     encoded = [(n, flatten(t), bsp, rc, ids) for n, t, bsp, rc, ids in cases]
     bad = flatten(fixture())
     struct.pack_into('>I', bad, 68, 0xffffffff)  # first property's length
@@ -197,8 +220,10 @@ def main():
             assert int(result[0]) == expected_rc, (name, result)
             if expected_rc == 0:
                 assert int(result[1]) == len(expected_ids), (name, result)
-                assert [int(x, 16) for x in result[8:]] == expected_ids, (name, result)
-                assert result[4:8] == ['8000000', '8010000', '9000000', '30'], (name, result)
+                assert [int(x, 16) for x in result[9:]] == expected_ids, (name, result)
+                expected_gicc = '8020000' if name == 'custom_gicc' else '8010000'
+                assert result[4:8] == ['8000000', expected_gicc, '9000000', '30'], (name, result)
+                assert int(result[8]) == pl011_spi_expected.get(name, 0), (name, result)
                 conduit = {'one_cpu_no_psci': ['0', '0'], 'smc_conduit': ['1', '1']}
                 assert result[2:4] == conduit.get(name, ['2', '1']), (name, result)
             print('PASS', name)

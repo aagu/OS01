@@ -7,6 +7,11 @@
 
 ## 2026-11-23
 
+- fix(aarch64,dtb): **放宽 PL011 `interrupts` 形状校验，将 GICv3 拆分为独立驱动任务**（闭合 `docs/roadmap.md` P2「DTB 形状校验（PL011 interrupts）与 GICv3 缺失」中的 DTB 校验部分）：
+  - **PL011 `interrupts` 放宽与优雅降级**（`kernel/arch/aarch64/platform/dtb_parse.c`）：`arm,pl011` 节点不再因 `interrupts` 缺失、非 12 字节、`nr == 0`（SPI 0 / INTID 32）或非 `IRQ_TYPE_LEVEL_HIGH(4)` 而返回 `-4` 拒启；当 `interrupts` 为 3-cell `GIC_SPI(0)` 列表（`len >= 12 && len % 12 == 0`、`nr < 988`）时提取首项 INTID `32 + nr`，其余形状将 `pl011_spi` 置 `0` 交由 `console.c` 降级为只输出控制台。
+  - **GICv3 拆分**：在 `docs/roadmap.md` 将 `GICv3 驱动缺失` 保留为独立硬件驱动任务。
+  - **验收**：`python3 qemutests/aarch64_dtb_test.py` 41/41 PASS（含无 `interrupts`、SPI 0、边沿触发、多条目、4-cell 降级、非 SPI 降级及 `custom_gicc`/`zero_gicc` 用例）、`make PROFILE=aarch64-clang KERNEL_SELFTEST=1 test-aarch64 MODE=smp`、`make test-host` 全绿。
+
 - feat(aarch64,boot): **aarch64 handoff 动态分配，解除 128 KiB 窗口固化**（闭合 `docs/roadmap.md` P2 真机硬阻断「handoff 窗口容量固化（128 KiB）」）：
   - **UEFI 引导器动态申请**（`boot/uefi/arch/aarch64/boot.c`）：移除 `AARCH64_HANDOFF_BASE` 固定 31 页窗口与 `handoff_cursor` 线性 bump；新增 `alloc_handoff_pages()` 通过 `AllocateMaxAddress` 在 `[0, AARCH64_BOOT_MAP_END)` 内且避开 `[AARCH64_BOOT_BLOCK_BASE, AARCH64_BOOT_BLOCK_END)` 分别按需申请 `boot_context`（1 页）、固件 FDT（按实际 `fdt_size` 向上取整页数）与 UEFI 内存图缓冲（先探测 `GetMemoryMap` 规模再加 32 项裕量按页申请），`arch_release()` 对应释放。`AARCH64_TRAMPOLINE_BASE` 仍保留在 `AARCH64_BOOT_BLOCK_END - 0x1000` 处的 1 页 `EfiLoaderCode`。
   - **布局常量与内核校验解绑**（`kernel/include/arch/aarch64/boot_layout.h`、`kernel/arch/aarch64/linker.ld`、`boot/uefi/arch/aarch64/{elf.c,loader.h}`、`kernel/arch/aarch64/{boot/main.c,platform/dtb.c,memory/ram.c}`）：移除 `AARCH64_HANDOFF_BASE`/`AARCH64_HANDOFF_END`，链接器与 ELF 加载器上界改为 `AARCH64_TRAMPOLINE_BASE`；内核 `arch_early_init()`、`dtb_init()`、`aarch64_ram_init()` 改为校验传入物理指针位于 `[0, AARCH64_BOOT_MAP_END)`（M0 早期直接映射内）、对齐且不与 boot block 重叠。

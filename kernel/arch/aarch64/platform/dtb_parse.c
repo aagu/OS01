@@ -143,19 +143,23 @@ static int finish_node(struct parse_state *s, const struct node *n, uint32_t dep
     }
     if (contains(n->compatible, "arm,pl011")) {
         uint64_t base = 0;
-        /* interrupts = <GIC_SPI(0) nr IRQ_TYPE_LEVEL_HIGH(4)>: 3 be32 words
-         * QEMU virt pl011: <0x00 0x01 0x04> → SPI 33. The parse keeps
-         * INTID = 32 + nr; validation rejects any shape that would force
-         * the consumer to hardcode the wire (R6). */
+        /* interrupts is optional / board-shaped: when present as 3-cell
+         * GIC_SPI(0) entries <0 nr flags> with nr < 988 (INTID 32..1019),
+         * extract the first entry's SPI INTID; otherwise degrade
+         * pl011_spi to 0 so console.c falls back to output-only rather
+         * than failing boot. */
         if (s->uart || (n->status.data && !exact(n->status, "okay") && !exact(n->status, "ok")) ||
-            !device_reg_base(n, 0, &base) || base == 0 ||
-            n->interrupts.len != 12 ||
-            be32(n->interrupts.data) != 0 ||
-            be32(n->interrupts.data + 4) == 0 ||
-            be32(n->interrupts.data + 8) != 4) return -4;
+            !device_reg_base(n, 0, &base) || base == 0) return -4;
         s->uart = true;
         s->info.pl011_base = base;
-        s->info.pl011_spi = 32u + be32(n->interrupts.data + 4);
+        if (n->interrupts.data && n->interrupts.len >= 12 &&
+            (n->interrupts.len % 12) == 0 &&
+            be32(n->interrupts.data) == 0 &&
+            be32(n->interrupts.data + 4) < 988) {
+            s->info.pl011_spi = 32u + be32(n->interrupts.data + 4);
+        } else {
+            s->info.pl011_spi = 0;
+        }
         if (n->clock_frequency > 0) {
             s->info.pl011_clock = n->clock_frequency;
         } else if (n->clocks.data && n->clocks.len >= 4) {

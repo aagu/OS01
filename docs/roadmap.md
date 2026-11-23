@@ -80,7 +80,7 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 
 | 问题 | 位置 | 真机影响 | 状态 / 剩余解法 |
 |------|------|----------|----------|
-| DTB 形状校验（PL011 interrupts）与 GICv3 缺失 | `kernel/arch/aarch64/platform/dtb_parse.c:152-155`（PL011 interrupts 仍要求恰 3 cell + GIC_SPI=0 + IRQ_TYPE=LEVEL_HIGH）；GIC compatible 白名单只收 `arm,cortex-a15-gic` / `arm,gic-400`（`:133-134`）；全树无 `arm,gic-v3` | DTB 形状不同的板被拒；GICv3 平台无法启动 | ❌ **仍开放**：放宽 PL011 interrupts 形状校验 + GICv3 另列驱动任务 |
+| GICv3 驱动缺失 | `kernel/arch/aarch64/platform/dtb_parse.c:133-134` 的 GIC compatible 白名单只收 `arm,cortex-a15-gic` / `arm,gic-400`；全树无 `arm,gic-v3` / GICR / `ICC_*_EL1` 驱动 | GICv3 平台无法启动 | ❌ **仍开放**：GICv3 独立驱动任务（同行的 PL011 `interrupts` 形状校验已于 2026-11-23 放宽闭环） |
 
 **条件阻断（能到早期启动，特定环节卡死/静默失效）**：
 
@@ -94,7 +94,7 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 经 `ID_AA64ISAR0_EL1.RNDR` 探测，输出 STRONG/WEAK/NONE），STRONG 池可用，无 RNDR 的板只剩 EFI_RNG_PROTOCOL
 （无 RngDxe 的板 random_init fail-closed）；`AARCH64_M1_SPARSE` 假设 0x4fe00000..0x50400000 是 RAM（仅自测宏）。
 
-**剩余解绑顺序**：按目标板补 Group-1 / spin-table → 放宽 PL011 / timer 形状校验 → GICv3 驱动 → 实机启动验证。
+**剩余解绑顺序**：按目标板补 Group-1 / spin-table → 放宽 timer 形状校验 → GICv3 驱动 → 实机启动验证。
 
 ### 🧱 P2 架构治理 / 扩展性
 
@@ -199,6 +199,7 @@ QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、
 
 | 闭环项 | 日期 | 详情 |
 |--------|------|------|
+| **aarch64 PL011 DTB `interrupts` 形状校验放宽（与 GICv3 拆分）**（`kernel/arch/aarch64/platform/dtb_parse.c` 对 `arm,pl011` 不再要求恰 12 字节且 `nr != 0` 且 `flags == 4`：识别 3-cell `GIC_SPI(0)`（含 SPI 0、任意触发标志、多条目取首项，`nr < 988`），缺失或非 3-cell/非 SPI 形状时 `pl011_spi` 降级为 0 供 `console.c` 退回只输出模式；`GICv3 驱动缺失` 在 roadmap 单列跟踪；`qemutests/aarch64_dtb_test.py` 41/41 PASS） | 2026-11-23 | [changelog](changelog.md#2026-11-23) |
 | **aarch64 handoff 动态分配（解除 128 KiB 窗口固化）**（`boot/uefi/arch/aarch64/boot.c` 改为在 `[0, AARCH64_BOOT_MAP_END)` 内且避开 boot block 动态 `AllocatePages(AllocateMaxAddress, EfiLoaderData, ...)` 分别分配 `boot_context`、DTB 与 UEFI 内存图；`boot_layout.h` 移除 `AARCH64_HANDOFF_BASE`/`END`，内核上界放宽至 `AARCH64_TRAMPOLINE_BASE`；2 核 QEMU 实测 1 MiB DTB 引导与 selftest 全绿） | 2026-11-23 | [changelog](changelog.md#2026-11-23) |
 | **aarch64 时间 syscall 组解禁**（`kernel/syscall/dispatch.c` 在 `OS01_HAS_USERSPACE=1` 下对 aarch64 开放 `sys_time_dispatch` 四项 `SYS_time`/`gettimeofday`/`nanosleep`/`times`，`kernel/Makefile` 纳入 `syscall/sys_time.c`；2 核 QEMU 实测 `/bin/timeit /bin/busybox sleep 1` 真睡 `real 1.021863`） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [syscall](syscall/syscall.md) |
 | **inode 级 `MAP_SHARED` 剩余五项闭环**（磁盘回写 `msync`/`fsync`/`sync`/拆卸落盘、fd I/O 读写与共享页双向覆盖对齐、`vfs_truncate` 撤页与尾页清零回收、POSIX `shm_open`/`shm_unlink` + `SYS_msync`/`SYS_fsync` ABI、`x86_64` 用户 VM 全链接入共享对象注册表） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [cow-mmap](memory/cow-mmap.md#3-跨进程-inode-级-map_shared2026-11-22aarch64) · [syscall](syscall/syscall.md) |
