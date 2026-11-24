@@ -18,9 +18,8 @@
 #include <sys/time.h>
 #include <time.h>
 
-/* OS01's kernel has no RTC yet: time() answers the epoch, while
- * clock_gettime(CLOCK_REALTIME) reports the time since boot.  The
- * applet uses the latter so that it prints a clock that moves. */
+/* Read the current wall-clock time from the kernel (RTC-backed when
+ * available, falling back to time()). */
 static time_t wall_clock(void)
 {
     struct timespec ts;

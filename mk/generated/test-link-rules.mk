@@ -78,6 +78,12 @@ $(TEST_BLD)/test_smp_boot_unified.o: $(TEST_CASES)/test_smp_boot_unified.c
 $(TEST_BLD)/test_smp_boot_unified.elf: $(TEST_BLD)/test_smp_boot_unified.o $(LINK_GROUP_smp-boot-unified)
 	$(HOST_CC) $(LINK_LDFLAGS_smp-boot-unified) -o $@ $^
 
+$(TEST_BLD)/test_timekeeping.o: $(TEST_CASES)/test_timekeeping.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_timekeeping)),$(LINK_CFLAGS_timekeeping),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_timekeeping.elf: $(TEST_BLD)/test_timekeeping.o $(LINK_GROUP_timekeeping)
+	$(HOST_CC) $(LINK_LDFLAGS_timekeeping) -o $@ $^
+
 $(TEST_BLD)/test_usb_hid_report.o: $(TEST_CASES)/test_usb_hid_report.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_usb-hid-report)),$(LINK_CFLAGS_usb-hid-report),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@

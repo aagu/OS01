@@ -115,6 +115,7 @@ __attribute__((noreturn)) void arch_syscall_exit(uint64_t status)
 }
 int64_t arch_syscall_fork(void *arch_frame) { (void)arch_frame; return -ENOSYS; }
 uint64_t arch_clocksource_read_ns(void) { return 0; }
+uint64_t timekeeping_real_ns(void) { return 0; }
 
 static int g_wake_calls = 0;
 void task_wake(task_t *t)

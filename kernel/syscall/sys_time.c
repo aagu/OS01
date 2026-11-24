@@ -5,6 +5,7 @@
 #include <memory/uaccess.h>
 #include <uapi/time.h>
 #include <arch/clocksource.h>
+#include <time/timekeeping.h>
 #include <string.h>
 
 // ── nanosleep blocker condition ────────────────────────────
@@ -22,24 +23,27 @@ int64_t sys_time_dispatch(syscall_ctx_t *ctx)
     int64_t syscall_result = -EINVAL;
     switch (ctx->nr) {
     case SYS_time: {
-        // time(time_t *tloc) → 0 (Jan 1 1970 for MVP).
-        // NULL → skip; otherwise copy_to_user_ft writes 0 to tloc.
+        // time(time_t *tloc) → wall-clock seconds since Unix epoch.
+        uint64_t sec = timekeeping_real_ns() / 1000000000ULL;
         uint64_t *tloc = (uint64_t *)ctx->args[0];
         if (tloc) {
-            uint64_t zero = 0;
-            ssize_t r = copy_to_user_ft(tloc, &zero, sizeof(zero));
+            ssize_t r = copy_to_user_ft(tloc, &sec, sizeof(sec));
             if (r < 0) { syscall_result = r; break; }
         }
-        syscall_result = 0;
+        syscall_result = (int64_t)sec;
         break;
     }
     case SYS_gettimeofday: {
         // gettimeofday(struct timeval *tv, struct timezone *tz) → 0.
         // Both pointers may be NULL (POSIX).
+        uint64_t ns = timekeeping_real_ns();
         struct timeval *tv = (struct timeval *)ctx->args[0];
         struct timezone *tz = (struct timezone *)ctx->args[1];
         if (tv) {
-            struct timeval ktv = { 0, 0 };
+            struct timeval ktv = {
+                .tv_sec  = ns / 1000000000ULL,
+                .tv_usec = (ns % 1000000000ULL) / 1000ULL,
+            };
             ssize_t r = copy_to_user_ft(tv, &ktv, sizeof(ktv));
             if (r < 0) { syscall_result = r; break; }
         }

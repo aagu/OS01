@@ -7,6 +7,7 @@
 #include <memory/slab.h>
 #include <memory/uaccess.h>
 #include <arch/clocksource.h>
+#include <time/timekeeping.h>
 #include <arch/spinlock.h>
 #include <arch/syscall.h>
 #include <kernel.h>
@@ -65,16 +66,18 @@ int64_t sys_native_getppid(syscall_ctx_t *ctx)
 int64_t sys_native_clock_gettime(syscall_ctx_t *ctx)
 {
     // clock_gettime(clockid_t clk_id, struct timespec *tp)
-    // OS01 has no real RTC wall clock yet (gettimeofday returns 0),
-    // so both CLOCK_REALTIME and CLOCK_MONOTONIC report the same
-    // monotonic clocksource time (clocksource_read_ns, ns).
+    // CLOCK_REALTIME reports RTC-anchored wall clock (falling back to
+    // monotonic uptime when no RTC is available); CLOCK_MONOTONIC
+    // reports monotonic clocksource time.
     uint64_t clk_id = ctx->args[0];
     struct timespec *tp = (struct timespec *)ctx->args[1];
     if (clk_id != CLOCK_REALTIME && clk_id != CLOCK_MONOTONIC)
         return -EINVAL;
     if (!tp)
         return -EFAULT;
-    uint64_t ns = arch_clocksource_read_ns();
+    uint64_t ns = (clk_id == CLOCK_REALTIME)
+                ? timekeeping_real_ns()
+                : arch_clocksource_read_ns();
     struct timespec kts = {
         .tv_sec  = ns / 1000000000ULL,
         .tv_nsec = ns % 1000000000ULL,

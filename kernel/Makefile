@@ -131,6 +131,8 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_boot.c \
                    memory/vm_area.c memory/shared_backing.c \
                    percpu/percpu.c \
                    time/clocksource.c time/tick.c time/timer.c \
+                   time/timekeeping.c \
+                   driver/rtc.c \
                    intr/softirq.c \
                    sched/core.c sched/boot.c sched/kthread.c sched/diag.c \
                    sched/context_return.c \

@@ -14,7 +14,8 @@
 
 #include <arch/rtc.h>        // arch_rtc_read / arch_rtc_write
 #include <arch/io.h>         // arch_inb / arch_outb (port I/O)
-#include <driver/rtc.h>             // datetime_t
+#include <arch/irq.h>        // arch_local_irq_save / arch_local_irq_restore
+#include <driver/rtc.h>      // datetime_t
 
 // PC-AT CMOS RTC port pair. Local to this file -- never escape.
 #define CMOS_ADDR 0x70u
@@ -25,8 +26,11 @@
 // doesn't straddle an update cycle and yield garbage.
 #define CMOS_STA_A_UIP  (1u << 7)
 
+// Bit 1 of register B selects 24-hour (1) vs 12-hour (0) mode.
 // Bit 2 of register B selects binary (1) vs BCD (0) encoding.
+#define CMOS_STA_B_24H  (1u << 1)
 #define CMOS_STA_B_BIN  (1u << 2)
+#define CMOS_HOUR_PM    0x80u
 
 // CMOS register indices for date/time. Local to MC146818.
 #define CMOS_REG_SECOND    0x00u
@@ -37,56 +41,99 @@
 #define CMOS_REG_YEAR      0x09u
 #define CMOS_REG_STATUS_A  0x0Au
 #define CMOS_REG_STATUS_B  0x0Bu
+#define CMOS_REG_CENTURY   0x32u
 
 // BCD→binary: two-digit packed BCD → 0..99.
 #define BCD2BIN(v)  ((uint8_t)(((v) & 0x0fu) + (((v) >> 4) & 0x0fu) * 10u))
 
-static inline bool cmos_is_updating(void)
-{
-    return (arch_inb(CMOS_ADDR) & (unsigned)CMOS_STA_A_UIP) != 0;
-}
-
 static inline uint8_t cmos_read(uint8_t reg)
 {
+    arch_irq_state_t flags = arch_local_irq_save();
     arch_outb(CMOS_ADDR, (uint8_t)(0x80u | reg));   // 0x80 = NMI disable bit
-    return arch_inb(CMOS_DATA);
+    uint8_t val = arch_inb(CMOS_DATA);
+    arch_local_irq_restore(flags);
+    return val;
 }
 
 static inline void cmos_write(uint8_t reg, uint8_t val)
 {
+    arch_irq_state_t flags = arch_local_irq_save();
     arch_outb(CMOS_ADDR, (uint8_t)(0x80u | reg));
     arch_outb(CMOS_DATA, val);
+    arch_local_irq_restore(flags);
+}
+
+static inline bool cmos_is_updating(void)
+{
+    return (cmos_read(CMOS_REG_STATUS_A) & CMOS_STA_A_UIP) != 0;
+}
+
+static void cmos_sample_raw(datetime_t *raw, uint8_t *status_b)
+{
+    while (cmos_is_updating()) { /* spin */ }
+
+    raw->second  = cmos_read(CMOS_REG_SECOND);
+    raw->minute  = cmos_read(CMOS_REG_MINUTE);
+    raw->hour    = cmos_read(CMOS_REG_HOUR);
+    raw->day     = cmos_read(CMOS_REG_DAY);
+    raw->month   = cmos_read(CMOS_REG_MONTH);
+    raw->year    = cmos_read(CMOS_REG_YEAR);
+    raw->century = cmos_read(CMOS_REG_CENTURY);
+    *status_b    = cmos_read(CMOS_REG_STATUS_B);
+}
+
+static bool cmos_raw_equal(const datetime_t *a, const datetime_t *b)
+{
+    return a->second  == b->second  &&
+           a->minute  == b->minute  &&
+           a->hour    == b->hour    &&
+           a->day     == b->day     &&
+           a->month   == b->month   &&
+           a->year    == b->year    &&
+           a->century == b->century;
 }
 
 bool arch_rtc_read(datetime_t *out)
 {
-    // Wait until the RTC is not in the middle of an update.
-    while (cmos_is_updating()) { /* spin */ }
+    datetime_t cur, prev;
+    uint8_t status_b = 0;
 
-    uint8_t second = cmos_read(CMOS_REG_SECOND);
-    uint8_t minute = cmos_read(CMOS_REG_MINUTE);
-    uint8_t hour   = cmos_read(CMOS_REG_HOUR);
-    uint8_t day    = cmos_read(CMOS_REG_DAY);
-    uint8_t month  = cmos_read(CMOS_REG_MONTH);
-    uint8_t year   = cmos_read(CMOS_REG_YEAR);
-    uint8_t status_b = cmos_read(CMOS_REG_STATUS_B);
-
-    if ((status_b & CMOS_STA_B_BIN) == 0) {
-        second = BCD2BIN(second);
-        minute = BCD2BIN(minute);
-        hour   = BCD2BIN(hour);
-        day    = BCD2BIN(day);
-        month  = BCD2BIN(month);
-        year   = BCD2BIN(year);
+    cmos_sample_raw(&cur, &status_b);
+    for (int tries = 0; tries < 8; tries++) {
+        prev = cur;
+        cmos_sample_raw(&cur, &status_b);
+        if (cmos_raw_equal(&cur, &prev))
+            break;
     }
 
-    out->century = 0;   // CMOS doesn't carry century; ignored.
-    out->year    = year;
-    out->month   = month;
-    out->day     = day;
-    out->hour    = hour;
-    out->minute  = minute;
-    out->second  = second;
+    uint8_t hour_pm = cur.hour & CMOS_HOUR_PM;
+    uint8_t hour_val = (status_b & CMOS_STA_B_24H) ? cur.hour
+                                                   : (uint8_t)(cur.hour & ~CMOS_HOUR_PM);
+
+    if ((status_b & CMOS_STA_B_BIN) == 0) {
+        cur.second  = BCD2BIN(cur.second);
+        cur.minute  = BCD2BIN(cur.minute);
+        hour_val    = BCD2BIN(hour_val);
+        cur.day     = BCD2BIN(cur.day);
+        cur.month   = BCD2BIN(cur.month);
+        cur.year    = BCD2BIN(cur.year);
+        cur.century = BCD2BIN(cur.century);
+    }
+
+    if ((status_b & CMOS_STA_B_24H) == 0) {
+        if (hour_pm && hour_val < 12u)
+            hour_val = (uint8_t)(hour_val + 12u);
+        else if (!hour_pm && hour_val == 12u)
+            hour_val = 0u;
+    }
+
+    out->century = (cur.century >= 19u && cur.century <= 21u) ? cur.century : 0u;
+    out->year    = cur.year;
+    out->month   = cur.month;
+    out->day     = cur.day;
+    out->hour    = hour_val;
+    out->minute  = cur.minute;
+    out->second  = cur.second;
     return true;
 }
 

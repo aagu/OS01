@@ -118,3 +118,14 @@ $(TEST_BLD)/aarch64_cpu_features_production.o: $(TESTS_DIR)/kernel/arch/aarch64/
 LINK_CFLAGS_cpu-features = -I$(TESTS_DIR)/kernel/include $(FRAMEWORK_INC)
 LINK_GROUP_cpu-features := $(TEST_BLD)/x86_cpu_features_production.o \
                            $(TEST_BLD)/aarch64_cpu_features_production.o
+
+# Wall-clock timekeeping
+$(TEST_BLD)/timekeeping_production.o: $(TESTS_DIR)/kernel/time/timekeeping.c \
+		$(TESTS_DIR)/kernel/include/time/timekeeping.h \
+		$(TESTS_DIR)/kernel/include/driver/rtc.h \
+		$(TESTS_DIR)/kernel/include/arch/clocksource.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -I$(TESTS_DIR)/kernel/include -c $< -o $@
+
+LINK_CFLAGS_timekeeping = -I$(TESTS_DIR)/kernel/include $(FRAMEWORK_INC)
+LINK_GROUP_timekeeping := $(TEST_BLD)/timekeeping_production.o

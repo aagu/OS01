@@ -603,6 +603,15 @@ void test_time_conversion(void)
             } while (b == a && ++spins < 1000);
             CHECK3(b > a, "time wall clock moves",
                    "CLOCK_REALTIME advances");
+            struct timeval tv;
+            time_t tnow = time(NULL);
+            int gt_ok = (gettimeofday(&tv, NULL) == 0);
+            int64_t diff_gt = gt_ok ? ((int64_t)tv.tv_sec - (int64_t)ts2.tv_sec) : 999;
+            int64_t diff_t  = (int64_t)tnow - (int64_t)ts2.tv_sec;
+            CHECK3(gt_ok && diff_gt >= -2 && diff_gt <= 2 &&
+                   diff_t >= -2 && diff_t <= 2,
+                   "time wall clock apis agree",
+                   "time/gettimeofday/CLOCK_REALTIME match");
         } else {
             skip_case("no-clock-gettime");
         }
