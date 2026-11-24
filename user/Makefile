@@ -191,20 +191,23 @@ $(PTLS_PLAIN_OBJ): $(PTLS_DIR)/ptls_probe.c $(USER_COMPILE_KEY)
 	@mkdir -p $(dir $@)
 	$(EFFECTIVE_CC) $(PTLS_BASE_CFLAGS) -fno-pic -fno-pie -DPTLS_PLAIN -c $< -o $@
 
-$(PTLS_EXEC_ELF): $(PTLS_ENTRY_OBJ) $(PTLS_EXEC_OBJ) $(PTLS_DIR)/ptls_exec.ld
+$(PTLS_EXEC_ELF): $(PTLS_ENTRY_OBJ) $(PTLS_EXEC_OBJ) $(PTLS_DIR)/ptls_exec.ld \
+                  $(USER_LINK_KEY)
 	@mkdir -p $(dir $@)
 	$(TARGET_LD) -m elf_x86_64 -static -T $(PTLS_DIR)/ptls_exec.ld \
 		-o $@ $(PTLS_ENTRY_OBJ) $(PTLS_EXEC_OBJ)
 	$(OBJ_CPY) --strip-debug $@
 
-$(PTLS_PIE_ELF): $(PTLS_ENTRY_OBJ) $(PTLS_PIE_OBJ) $(PTLS_DIR)/ptls_pie.ld
+$(PTLS_PIE_ELF): $(PTLS_ENTRY_OBJ) $(PTLS_PIE_OBJ) $(PTLS_DIR)/ptls_pie.ld \
+                 $(USER_LINK_KEY)
 	@mkdir -p $(dir $@)
 	$(TARGET_LD) -m elf_x86_64 -static -pie --no-dynamic-linker \
 		-z max-page-size=4096 -z text -z norelro --pack-dyn-relocs=none \
 		-T $(PTLS_DIR)/ptls_pie.ld -o $@ $(PTLS_ENTRY_OBJ) $(PTLS_PIE_OBJ)
 	$(OBJ_CPY) --strip-debug $@
 
-$(PTLS_PLAIN_ELF): $(PTLS_ENTRY_OBJ) $(PTLS_PLAIN_OBJ) $(OS01_ROOT)/libc/arch/x86_64/user.ld
+$(PTLS_PLAIN_ELF): $(PTLS_ENTRY_OBJ) $(PTLS_PLAIN_OBJ) $(OS01_ROOT)/libc/arch/x86_64/user.ld \
+                   $(USER_LINK_KEY)
 	@mkdir -p $(dir $@)
 	$(TARGET_LD) -m elf_x86_64 -static -T $(OS01_ROOT)/libc/arch/x86_64/user.ld \
 		-o $@ $(PTLS_ENTRY_OBJ) $(PTLS_PLAIN_OBJ)
