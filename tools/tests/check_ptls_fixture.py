@@ -192,21 +192,33 @@ def check_all(tc: Toolchain, exec_elf: str, pie_elf: str, plain_elf: str) -> Non
 # emit output the parser accepts, while PATH is stripped to an empty
 # directory — so any residual PATH lookup fails the test.
 #
-# The interpreter is launched through a /bin/sh exec shim instead of a
-# #! line: a shebang cannot carry an interpreter path containing
-# spaces (the kernel splits it), and the selftest deliberately runs
-# with such a path.  The shim line is adjacent string literals, so the
-# same file stays valid Python past the sh exec.
+# Every fake tool is a *pair* of files, never one file read as two
+# languages: a #!/bin/sh wrapper that execs the configured interpreter
+# on a separate Python implementation, passing the tool name as the
+# first argument.  The sh wrapper stays because a shebang cannot carry
+# an interpreter path containing spaces (the kernel splits it), but
+# its quoting is only ever seen by /bin/sh, and the implementation is
+# only ever seen by Python.
+#
+# The selftest repeats the case underneath working directories whose
+# names carry the characters that broke the old single-file shim:
+# spaces, a literal backslash-x followed by a non-hex character (a
+# truncated \xXX escape when read as Python), and a literal \x41
+# (which Python would silently decode to "A").
 
-_FAKE_READELF = r'''#!/bin/sh
-"exec" {python} "$0" "$@"
-import os, sys
-flags = [a for a in sys.argv[1:-1] if a.startswith("-")]
-base = os.path.basename(sys.argv[-1])
+_FAKE_IMPL = r'''import os, sys
+
+tool, argv = sys.argv[1], sys.argv[2:]
 log = os.environ.get("FAKE_TOOL_LOG")
 if log:
     with open(log, "a") as f:
-        f.write("%s %s\\n" % (os.path.basename(sys.argv[0]), " ".join(sys.argv[1:])))
+        f.write("%s %s\\n" % (tool, " ".join(argv)))
+base = os.path.basename(argv[-1])
+if tool == "fake-objdump":
+    if base == "{exec}" and "-d" in argv[:-1]:
+        print("  400000: 64 48 8b 04 25 00 00 00 00  movq %fs:0x0, %rax")
+    raise SystemExit(0)
+flags = [a for a in argv[:-1] if a.startswith("-")]
 OUT = {{
 "{exec}": {{
  "-hW": """ELF Header:
@@ -259,23 +271,31 @@ key = flags[0] if flags else ""
 print(OUT.get(base, {{}}).get(key, ""), end="")
 '''
 
-_FAKE_OBJDUMP = r'''#!/bin/sh
-"exec" {python} "$0" "$@"
-import os, sys
-base = os.path.basename(sys.argv[-1])
-log = os.environ.get("FAKE_TOOL_LOG")
-if log:
-    with open(log, "a") as f:
-        f.write("%s %s\\n" % (os.path.basename(sys.argv[0]), " ".join(sys.argv[1:])))
-if base == "{exec}" and "-d" in sys.argv[1:-1]:
-    print("  400000: 64 48 8b 04 25 00 00 00 00  movq %fs:0x0, %rax")
-'''
+
+def _write_tool(tools: Path, impl: Path, python: Path, name: str) -> Path:
+    """Write a sh shim that starts *python* on *impl* as tool *name*."""
+    path = tools / name
+    path.write_text("#!/bin/sh\nexec %s %s %s \"$@\"\n"
+                    % (shlex.quote(str(python)),
+                       shlex.quote(str(impl)),
+                       name))
+    path.chmod(0o755)
+    return path
 
 
-def run_selftest() -> int:
+# Directory names the selftest must survive underneath the work root.
+_SELFTEST_CASE_DIRS = (
+    "plain",
+    "tmp with spaces",
+    "tmp\\xz",         # literal \x + non-hex: truncated \xXX escape
+    "tmp\\x41 space",  # literal \x41: silently decoded as "A"
+)
+
+
+def _selftest_case(parent: Path) -> None:
     names = {"exec": "ptls_exec.elf", "pie": "ptls_pie.elf",
              "plain": "ptls_plain.elf"}
-    with tempfile.TemporaryDirectory() as tmp:
+    with tempfile.TemporaryDirectory(dir=parent) as tmp:
         root = Path(tmp)
         tools = root / "tools"
         empty_path = root / "empty-path"
@@ -283,23 +303,17 @@ def run_selftest() -> int:
         empty_path.mkdir()
         for n in names.values():
             (root / n).touch()
-        readelf = tools / "fake-readelf"
-        objdump = tools / "fake-objdump"
         # Reproduce a Python installation under a directory with spaces
-        # (e.g. a symlink planted on PATH): the wrappers must still start.
+        # (e.g. a symlink planted on PATH): the shims must still start.
         py_dir = root / "python with spaces"
         py_dir.mkdir()
         python = py_dir / "python3"
         python.symlink_to(sys.executable)
-        python_arg = shlex.quote(str(python))
-        if not python_arg.startswith("'"):
-            # The shim line must also parse as adjacent Python literals.
-            python_arg = "'" + python_arg + "'"
-        subs = {"python": python_arg, **names}
-        readelf.write_text(_FAKE_READELF.format(**subs))
-        objdump.write_text(_FAKE_OBJDUMP.format(**subs))
-        readelf.chmod(0o755)
-        objdump.chmod(0o755)
+
+        impl = tools / "fake-tool-impl.py"
+        impl.write_text(_FAKE_IMPL.format(**names))
+        readelf = _write_tool(tools, impl, python, "fake-readelf")
+        objdump = _write_tool(tools, impl, python, "fake-objdump")
         log = root / "invocations.log"
 
         old_path = os.environ.get("PATH")
@@ -335,6 +349,14 @@ def run_selftest() -> int:
                 os.environ.pop("FAKE_TOOL_LOG", None)
             else:
                 os.environ["FAKE_TOOL_LOG"] = old_log
+
+
+def run_selftest() -> int:
+    with tempfile.TemporaryDirectory() as base:
+        for name in _SELFTEST_CASE_DIRS:
+            parent = Path(base) / name
+            parent.mkdir()
+            _selftest_case(parent)
     print("check_ptls_fixture selftest: OK")
     return 0
 
