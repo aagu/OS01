@@ -29,6 +29,7 @@ from __future__ import annotations
 import argparse
 import os
 import re
+import shlex
 import subprocess
 import sys
 import tempfile
@@ -190,8 +191,15 @@ def check_all(tc: Toolchain, exec_elf: str, pie_elf: str, plain_elf: str) -> Non
 # tools (absolute paths) stand in for llvm-readelf/llvm-objdump and
 # emit output the parser accepts, while PATH is stripped to an empty
 # directory — so any residual PATH lookup fails the test.
+#
+# The interpreter is launched through a /bin/sh exec shim instead of a
+# #! line: a shebang cannot carry an interpreter path containing
+# spaces (the kernel splits it), and the selftest deliberately runs
+# with such a path.  The shim line is adjacent string literals, so the
+# same file stays valid Python past the sh exec.
 
-_FAKE_READELF = r'''#!{python}
+_FAKE_READELF = r'''#!/bin/sh
+"exec" {python} "$0" "$@"
 import os, sys
 flags = [a for a in sys.argv[1:-1] if a.startswith("-")]
 base = os.path.basename(sys.argv[-1])
@@ -251,7 +259,8 @@ key = flags[0] if flags else ""
 print(OUT.get(base, {{}}).get(key, ""), end="")
 '''
 
-_FAKE_OBJDUMP = r'''#!{python}
+_FAKE_OBJDUMP = r'''#!/bin/sh
+"exec" {python} "$0" "$@"
 import os, sys
 base = os.path.basename(sys.argv[-1])
 log = os.environ.get("FAKE_TOOL_LOG")
@@ -276,7 +285,17 @@ def run_selftest() -> int:
             (root / n).touch()
         readelf = tools / "fake-readelf"
         objdump = tools / "fake-objdump"
-        subs = {"python": sys.executable, **names}
+        # Reproduce a Python installation under a directory with spaces
+        # (e.g. a symlink planted on PATH): the wrappers must still start.
+        py_dir = root / "python with spaces"
+        py_dir.mkdir()
+        python = py_dir / "python3"
+        python.symlink_to(sys.executable)
+        python_arg = shlex.quote(str(python))
+        if not python_arg.startswith("'"):
+            # The shim line must also parse as adjacent Python literals.
+            python_arg = "'" + python_arg + "'"
+        subs = {"python": python_arg, **names}
         readelf.write_text(_FAKE_READELF.format(**subs))
         objdump.write_text(_FAKE_OBJDUMP.format(**subs))
         readelf.chmod(0o755)
