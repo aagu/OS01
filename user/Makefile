@@ -214,6 +214,7 @@ $(PTLS_PLAIN_ELF): $(PTLS_ENTRY_OBJ) $(PTLS_PLAIN_OBJ) $(OS01_ROOT)/libc/arch/x8
 PTLS_CHECK_STAMP := $(BUILD_DIR)/.ptls-fixtures.checked
 $(PTLS_CHECK_STAMP): $(PTLS_FIXTURES) $(OS01_ROOT)/tools/tests/check_ptls_fixture.py
 	python3 $(OS01_ROOT)/tools/tests/check_ptls_fixture.py \
+		--readelf $(LLVM_READELF) --objdump $(LLVM_OBJDUMP) \
 		--exec $(PTLS_EXEC_ELF) --pie $(PTLS_PIE_ELF) --plain $(PTLS_PLAIN_ELF)
 	@touch $@
 endif
