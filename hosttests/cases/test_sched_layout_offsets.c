@@ -29,7 +29,8 @@
 #define X86_RECORDED_TRAP_NR_OFF    56
 #define X86_RECORDED_ERROR_CODE_OFF 64
 #define X86_RECORDED_SCHED_FLAGS_OFF 72
-#define X86_RECORDED_THREAD_SIZE    80
+#define X86_RECORDED_FS_BASE_OFF    80
+#define X86_RECORDED_THREAD_SIZE    88
 
 static void suite_x86_thread_offsets(void)
 {
@@ -44,6 +45,7 @@ static void suite_x86_thread_offsets(void)
     assert_eq(X86_RECORDED_TRAP_NR_OFF,     (int)__builtin_offsetof(thread_t, trap_nr));
     assert_eq(X86_RECORDED_ERROR_CODE_OFF,  (int)__builtin_offsetof(thread_t, error_code));
     assert_eq(X86_RECORDED_SCHED_FLAGS_OFF, (int)__builtin_offsetof(thread_t, sched_flags));
+    assert_eq(X86_RECORDED_FS_BASE_OFF,     (int)__builtin_offsetof(thread_t, fs_base));
     assert_eq(X86_RECORDED_THREAD_SIZE,     (int)sizeof(thread_t));
 }
 

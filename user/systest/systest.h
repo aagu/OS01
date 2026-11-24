@@ -64,6 +64,7 @@ int run_startup_probe_case(char **argv, char **envp, int expect_code);
 void test_41_exec_via_symlink(void);
 void test_42_getdents_dt_lnk(void);
 void test_access(void);
+void test_arch_prctl_fs(void);
 void test_aslr_mmap_exec_randomized(void);
 void test_aslr_mmap_fixed_and_bounds(void);
 void test_aslr_mmap_fork_inherit(void);

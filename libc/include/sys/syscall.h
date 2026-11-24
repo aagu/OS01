@@ -90,6 +90,7 @@
 #define SYS_setrlimit     76   // setrlimit(resource, rlim)
 #define SYS_msync         77   // msync(addr, length, flags)
 #define SYS_fsync         78   // fsync(fd)
+#define SYS_arch_prctl    79   // arch_prctl(op, arg) — raw FS base control
 
 // Compile-time cross-check: libc SYS_* values must mirror kernel/include/uapi/syscall.h.
 // If the kernel side changes these numbers, update this assertion or libc will
@@ -101,6 +102,7 @@ _Static_assert(SYS_lstat     == 73, "SYS_lstat drift vs kernel/include/uapi/sysc
 _Static_assert(SYS_fstatat   == 74, "SYS_fstatat drift vs kernel/include/uapi/syscall.h");
 _Static_assert(SYS_getrlimit == 75, "SYS_getrlimit drift vs kernel/include/uapi/syscall.h");
 _Static_assert(SYS_setrlimit == 76, "SYS_setrlimit drift vs kernel/include/uapi/syscall.h");
+_Static_assert(SYS_arch_prctl == 79, "SYS_arch_prctl drift vs kernel/include/uapi/syscall.h");
 
 // ── Generic syscall helper ─────────────────────────────────
 // The declarations below are given C language linkage so a C++ consumer

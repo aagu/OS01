@@ -59,6 +59,7 @@ const compat_syscall_nr_t linux_x86_64_table[LINUX_X86_64_NR_MAX] = {
     [97]  = SYS_getrlimit,
     [102] = SYS_getppid,       // historical alias
     [110] = SYS_getppid,       // getppid
+    [158] = SYS_arch_prctl,    // arch_prctl(op, arg)
     [160] = SYS_setrlimit,
     [162] = SYS_nanosleep,
     [164] = SYS_getifaddr,

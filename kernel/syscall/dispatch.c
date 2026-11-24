@@ -33,7 +33,7 @@ int64_t sys_native_clock_gettime(syscall_ctx_t *ctx);
  * are the entries every architecture serves, so the AArch64 port
  * compiles this very table with OS01_SYSCALL_A64_SUBSET=1 and hides
  * every other entry instead of carrying a second, divergent table. */
-static const syscall_entry_t syscall_table[SYS_fsync + 1] = {
+static const syscall_entry_t syscall_table[SYS_arch_prctl + 1] = {
     [SYS_exit] = { sys_native_exit, "exit" },
     [SYS_getpid] = { sys_native_getpid, "getpid" },
     [SYS_getppid] = { sys_native_getppid, "getppid" },
@@ -125,6 +125,7 @@ static const syscall_entry_t syscall_table[SYS_fsync + 1] = {
     [SYS_sync] = { sys_misc_dispatch, "sync" },
     [SYS_reboot] = { sys_misc_dispatch, "reboot" },
     [SYS_uname] = { sys_misc_dispatch, "uname" },
+    [SYS_arch_prctl] = { sys_misc_dispatch, "arch_prctl" },
     [SYS_socket] = { sys_net_dispatch, "socket" },
     [SYS_connect] = { sys_net_dispatch, "connect" },
     [SYS_sendto] = { sys_net_dispatch, "sendto" },

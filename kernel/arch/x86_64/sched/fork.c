@@ -538,7 +538,11 @@ uint64_t do_fork(pt_regs_t *regs, uint64_t clone_flags __attribute__((unused)),
     child_regs->rax = 0;
 
     thd->rsp0 = (uint64_t)tsk + STACK_SIZE;
-    thd->fs   = KERNEL_DS;
+    /* Inherit the caller's live FS selector and base (including a
+     * manual arch_prctl value) before the child is enqueued.  The
+     * helper saves/restores IRQ state itself and reads both halves in
+     * one local execution context. */
+    x86_snapshot_user_fs(thd);
     thd->gs   = KERNEL_DS;
 
     if (!(tsk->flags & PF_KTHREAD)) {

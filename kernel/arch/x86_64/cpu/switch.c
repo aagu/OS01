@@ -5,6 +5,8 @@
 #include <arch/x86_64/gate.h>
 #include <arch/cpu.h>
 #include <arch/x86_64/tss.h>
+#include <arch/x86_64/msr.h>
+#include <arch/irq.h>
 #include <core/printk.h>
 #include <log/log.h>
 
@@ -121,6 +123,38 @@ void arch_task_prepare_first_switch(task_t *t, void (*idle_entry)(void))
         t->thread->rip = (uint64_t)idle_entry;
 }
 
+/* ── FS base ownership (arch_prctl / PT_TLS) ───────────────────
+ * The FS selector alone does not describe a user base: loading it
+ * reloads the hidden base from the GDT.  The live base lives in the
+ * IA32_FS_BASE MSR and travels in thread_t.fs_base. */
+
+uint64_t x86_read_fs_base(void)
+{
+    return rdmsr(IA32_FS_BASE);
+}
+
+/* Caller already disabled local IRQs and validated `base` as a user
+ * address.  A user base is carried by a null selector plus the MSR. */
+void x86_install_current_user_fs(thread_t *thread, uint64_t base)
+{
+    thread->fs_base = base;
+    uint64_t zero = 0;
+    __asm__ __volatile__("movq %0, %%fs" :: "a"(zero));
+    wrmsr(IA32_FS_BASE, base);
+}
+
+/* Fork helper: snapshot the caller's live selector and base into the
+ * child before it is enqueued.  Owns its IRQ window. */
+void x86_snapshot_user_fs(thread_t *child_thread)
+{
+    arch_irq_state_t flags = arch_local_irq_save();
+    uint64_t sel;
+    child_thread->fs_base = rdmsr(IA32_FS_BASE);
+    __asm__ __volatile__("movq %%fs, %0" : "=a"(sel));
+    child_thread->fs = sel;
+    arch_local_irq_restore(flags);
+}
+
 /**
  * __switch_to — architecture-specific context switch
  *
@@ -164,12 +198,18 @@ void __switch_to(task_t *prev, task_t *next)
               cpu->tss->ist4, cpu->tss->ist5, cpu->tss->ist6,
               cpu->tss->ist7);
 
-    // Save/restore FS selector (used by kernel threads).
-    // GS base is per-CPU and set ONCE via MSR — never
-    // touch it here (loading a non-null GS selector would
+    // Save/restore FS state (used by kernel threads and by a user
+    // FS base set through arch_prctl).  The selector alone is not
+    // enough: loading it reloads the hidden base from the GDT, so the
+    // IA32_FS_BASE MSR must travel with the thread too.  Saving reads
+    // the MSR before the selector; restoring loads the selector first
+    // and then writes the MSR.  GS base is per-CPU and set ONCE via
+    // MSR — never touch it here (loading a non-null GS selector would
     // reload the base from the GDT, clobbering the MSR).
+    prev->thread->fs_base = rdmsr(IA32_FS_BASE);
     __asm__ __volatile__("movq %%fs, %0 \n\t":"=a"(prev->thread->fs));
     __asm__ __volatile__("movq %0, %%fs \n\t"::"a"(next->thread->fs));
+    wrmsr(IA32_FS_BASE, next->thread->fs_base);
 
     // Switch page table if the next task has its own address space
     if (next->thread->cr3 && next->thread->cr3 != prev->thread->cr3) {

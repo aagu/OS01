@@ -193,13 +193,14 @@ int main(void)
      * out-of-range number, and a high-bit polluted number. */
     if (syscall_has_handler(SYS_socket) || syscall_has_handler(SYS_getpeername) ||
         syscall_has_handler(SYS_futex) ||
+        syscall_has_handler(SYS_arch_prctl) ||
         syscall_has_handler(UINT64_MAX) ||
         syscall_has_handler((1ULL << 32) | SYS_getpid)) {
         fprintf(stderr, "AArch64 subset exposes an unsupported syscall\n");
         return 1;
     }
     const uint64_t hidden[] = {
-        SYS_socket, SYS_getpeername, SYS_futex, UINT64_MAX,
+        SYS_socket, SYS_getpeername, SYS_futex, SYS_arch_prctl, UINT64_MAX,
         (1ULL << 32) | SYS_getpid,
     };
     for (unsigned i = 0; i < sizeof(hidden) / sizeof(hidden[0]); i++) {
@@ -219,6 +220,14 @@ int main(void)
         !syscall_name(SYS_getpeername) ||
         strcmp(syscall_name(SYS_getpeername), "getpeername") != 0)
         return 1;
+    /* arch_prctl is a real x86-only misc entry: number 79, trace name
+     * "arch_prctl", reached through sys_misc_dispatch with both
+     * arguments intact. */
+    if (!syscall_has_handler(SYS_arch_prctl) || !syscall_name(SYS_arch_prctl) ||
+        strcmp(syscall_name(SYS_arch_prctl), "arch_prctl") != 0) {
+        fprintf(stderr, "native syscall 79 must be arch_prctl\n");
+        return 1;
+    }
     ctx.nr = 62;
     if (syscall_dispatch(&ctx) != -EINVAL)
         return 1;
@@ -242,6 +251,7 @@ int main(void)
         SYS_exit, SYS_getpid, SYS_exec, SYS_fork, SYS_waitpid, SYS_getppid,
         SYS_umask, SYS_kill, SYS_signal, SYS_sigprocmask, SYS_sigreturn,
         SYS_setpgid, SYS_getpgid, SYS_setsid, SYS_getsid,
+        SYS_arch_prctl,
     };
     for (unsigned i = 0; i < sizeof(calls) / sizeof(calls[0]); i++) {
         ctx = (syscall_ctx_t){ .nr = calls[i],

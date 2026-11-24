@@ -479,6 +479,8 @@ static const test_case_t tests[] = {
     {"aslr_mmap_fork_inherit",    "aslr mmap fork inherit",    test_aslr_mmap_fork_inherit,    1, 0},
     {"aslr_mmap_fixed_and_bounds","aslr mmap fixed and bounds",test_aslr_mmap_fixed_and_bounds,1, 0},
     {"aslr_pie",                  "aslr static pie",           test_aslr_pie,                  1, 0},
+    // ── PT_TLS: raw arch_prctl + FS base lifecycle ──
+    {"arch_prctl_fs",             "arch_prctl FS base",        test_arch_prctl_fs,             1, 0},
 };
 
 // ── CLI: --list ────────────────────────────────────────────

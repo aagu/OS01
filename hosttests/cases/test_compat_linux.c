@@ -61,7 +61,7 @@ int main(void)
 
     /* 2. Null context guard */
     if (compat_linux_dispatch(NULL) != -EINVAL) {
-        fprintf(stderr, "FAIL: compat_linux_dispatch(NULL) must return -EINVAL\n");
+        printf("FAIL: compat_linux_dispatch(NULL) must return -EINVAL\n");
         return 1;
     }
 
@@ -71,31 +71,31 @@ int main(void)
     // Out of bounds
     ctx = (syscall_ctx_t){ .nr = LINUX_X86_64_NR_MAX };
     if (compat_linux_dispatch(&ctx) != -ENOSYS || compat_linux_has_syscall(ctx.nr)) {
-        fprintf(stderr, "FAIL: out-of-bounds linux nr %lu must return -ENOSYS\n", ctx.nr);
+        printf("FAIL: out-of-bounds linux nr %lu must return -ENOSYS\n", ctx.nr);
         return 1;
     }
 
     ctx = (syscall_ctx_t){ .nr = 999 };
     if (compat_linux_dispatch(&ctx) != -ENOSYS || compat_linux_has_syscall(ctx.nr)) {
-        fprintf(stderr, "FAIL: linux nr 999 must return -ENOSYS\n", ctx.nr);
+        printf("FAIL: linux nr 999 must return -ENOSYS\n", ctx.nr);
         return 1;
     }
 
     // Unmapped entry (e.g. Linux nr 7 = poll)
     ctx = (syscall_ctx_t){ .nr = 7 };
     if (compat_linux_dispatch(&ctx) != -ENOSYS || compat_linux_has_syscall(ctx.nr)) {
-        fprintf(stderr, "FAIL: unmapped linux nr 7 must return -ENOSYS\n");
+        printf("FAIL: unmapped linux nr 7 must return -ENOSYS\n");
         return 1;
     }
 
     // Explicit unsupported sentinel (Linux nr 25 = mremap)
     ctx = (syscall_ctx_t){ .nr = 25 };
     if (compat_linux_dispatch(&ctx) != -ENOSYS || compat_linux_has_syscall(ctx.nr)) {
-        fprintf(stderr, "FAIL: unsupported linux nr 25 must return -ENOSYS\n");
+        printf("FAIL: unsupported linux nr 25 must return -ENOSYS\n");
         return 1;
     }
     if (compat_linux_lookup_nr(25) != COMPAT_UNSUPPORTED) {
-        fprintf(stderr, "FAIL: lookup_nr(25) must return COMPAT_UNSUPPORTED\n");
+        printf("FAIL: lookup_nr(25) must return COMPAT_UNSUPPORTED\n");
         return 1;
     }
 
@@ -159,6 +159,7 @@ int main(void)
         { 231, SYS_exit },
         { 262, SYS_fstatat },
         { 318, SYS_getrandom },
+        { 158, SYS_arch_prctl },  /* arch_prctl */
     };
 
     mock_dispatch_return = 12345;
@@ -167,11 +168,11 @@ int main(void)
         compat_syscall_nr_t exp_nr = test_mappings[i].expected_os_nr;
 
         if (!compat_linux_has_syscall(l_nr)) {
-            fprintf(stderr, "FAIL: compat_linux_has_syscall(%lu) returned false\n", l_nr);
+            printf("FAIL: compat_linux_has_syscall(%lu) returned false\n", l_nr);
             return 1;
         }
         if (compat_linux_lookup_nr(l_nr) != exp_nr) {
-            fprintf(stderr, "FAIL: compat_linux_lookup_nr(%lu) = %d, expected %d\n",
+            printf("FAIL: compat_linux_lookup_nr(%lu) = %d, expected %d\n",
                     l_nr, compat_linux_lookup_nr(l_nr), exp_nr);
             return 1;
         }
@@ -183,20 +184,41 @@ int main(void)
         last_dispatched_ctx = NULL;
         int64_t ret = compat_linux_dispatch(&ctx);
         if (ret != 12345 || last_dispatched_ctx != &ctx || ctx.nr != (uint64_t)exp_nr) {
-            fprintf(stderr, "FAIL: compat_linux_dispatch(%lu) did not remap to %d correctly (got ret=%ld, ctx.nr=%lu)\n",
+            printf("FAIL: compat_linux_dispatch(%lu) did not remap to %d correctly (got ret=%ld, ctx.nr=%lu)\n",
                     l_nr, exp_nr, (long)ret, (unsigned long)ctx.nr);
             return 1;
         }
     }
 
-    /* 5. Test domain adapter: rt_sigaction (nr 13) */
+    /* 5. arch_prctl: Linux 158 remaps to native 79 with the option and
+     * value untouched. */
+    if (!compat_linux_has_syscall(158) ||
+        compat_linux_lookup_nr(158) != SYS_arch_prctl) {
+        printf("FAIL: linux nr 158 must map to native 79\n");
+        return 1;
+    }
+    ctx = (syscall_ctx_t){
+        .nr = 158,
+        .args = { 0x1002, 0x0000000020401000ULL, 0xdeadbeef, 4, 5, 6 },
+    };
+    last_dispatched_ctx = NULL;
+    if (compat_linux_dispatch(&ctx) != 12345 ||
+        last_dispatched_ctx != &ctx || ctx.nr != SYS_arch_prctl ||
+        ctx.args[0] != 0x1002 ||
+        ctx.args[1] != 0x0000000020401000ULL ||
+        ctx.args[2] != 0xdeadbeef) {
+        printf("FAIL: linux nr 158 did not reach native 79 intact\n");
+        return 1;
+    }
+
+    /* 6. Test domain adapter: rt_sigaction (nr 13) */
     // sigsetsize != 8 must return -EINVAL
     ctx = (syscall_ctx_t){
         .nr = 13,
         .args = { 2, 0x1000, 0x2000, 4 }, // arg[3] = 4 (invalid)
     };
     if (compat_linux_dispatch(&ctx) != -EINVAL) {
-        fprintf(stderr, "FAIL: rt_sigaction with sigsetsize != 8 must fail with -EINVAL\n");
+        printf("FAIL: rt_sigaction with sigsetsize != 8 must fail with -EINVAL\n");
         return 1;
     }
 
@@ -207,7 +229,7 @@ int main(void)
     };
     last_dispatched_ctx = NULL;
     if (compat_linux_dispatch(&ctx) != 12345 || ctx.nr != SYS_signal) {
-        fprintf(stderr, "FAIL: rt_sigaction with sigsetsize == 8 must remap to SYS_signal\n");
+        printf("FAIL: rt_sigaction with sigsetsize == 8 must remap to SYS_signal\n");
         return 1;
     }
 
@@ -218,7 +240,7 @@ int main(void)
     };
     last_dispatched_ctx = NULL;
     if (compat_linux_dispatch(&ctx) != 12345 || ctx.nr != SYS_waitpid) {
-        fprintf(stderr, "FAIL: wait4 must remap to SYS_waitpid\n");
+        printf("FAIL: wait4 must remap to SYS_waitpid\n");
         return 1;
     }
 
@@ -226,7 +248,7 @@ int main(void)
     task_nofile_init(&compat_fake_task);
     compat_fake_task.pid = 42;
     if (!compat_linux_has_syscall(302)) {
-        fprintf(stderr, "FAIL: compat_linux_has_syscall(302) returned false\n");
+        printf("FAIL: compat_linux_has_syscall(302) returned false\n");
         return 1;
     }
     ctx = (syscall_ctx_t){
@@ -234,7 +256,7 @@ int main(void)
         .args = { 999, OS01_RLIMIT_NOFILE, 0, 0 }, // pid=999 (other) -> ESRCH
     };
     if (compat_linux_dispatch(&ctx) != -ESRCH) {
-        fprintf(stderr, "FAIL: prlimit64 with other pid must fail with -ESRCH\n");
+        printf("FAIL: prlimit64 with other pid must fail with -ESRCH\n");
         return 1;
     }
     ctx = (syscall_ctx_t){
@@ -242,7 +264,7 @@ int main(void)
         .args = { 0, 999, 0, 0 }, // invalid resource -> EINVAL
     };
     if (compat_linux_dispatch(&ctx) != -EINVAL) {
-        fprintf(stderr, "FAIL: prlimit64 with bad resource must fail with -EINVAL\n");
+        printf("FAIL: prlimit64 with bad resource must fail with -EINVAL\n");
         return 1;
     }
     ctx = (syscall_ctx_t){
@@ -250,7 +272,7 @@ int main(void)
         .args = { 0, OS01_RLIMIT_NOFILE, 0, 0 }, // self query -> 0
     };
     if (compat_linux_dispatch(&ctx) != 0) {
-        fprintf(stderr, "FAIL: prlimit64 query must succeed with 0\n");
+        printf("FAIL: prlimit64 query must succeed with 0\n");
         return 1;
     }
 

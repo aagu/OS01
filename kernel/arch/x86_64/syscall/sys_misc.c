@@ -13,6 +13,8 @@
 #include <memory/shared_backing.h>
 #include <log/log.h>
 #include <arch/x86_64/uaccess.h>
+#include <arch/x86_64/user_layout.h>
+#include <arch/irq.h>
 
 int64_t sys_misc_dispatch(syscall_ctx_t *ctx)
 {
@@ -78,6 +80,33 @@ int64_t sys_misc_dispatch(syscall_ctx_t *ctx)
         ssize_t r = copy_to_user_ft(buf, &kuts, sizeof(kuts));
         if (r < 0) { syscall_result = r; break; }
         syscall_result = 0;
+        break;
+    }
+    case SYS_arch_prctl: {
+        /* arch_prctl(op, arg): op is the full 64-bit operation code.
+         * ARCH_SET_FS accepts an inclusive low-half address; a null FS
+         * selector plus the IA32_FS_BASE MSR carries the value. */
+        uint64_t op  = ctx->args[0];
+        uint64_t arg = ctx->args[1];
+
+        if (op == ARCH_SET_FS) {
+            if (arg > X86_USER_ADDR_LIMIT) {
+                syscall_result = -EPERM;
+                break;
+            }
+            task_t *cur = arch_current_task();
+            arch_irq_state_t flags = arch_local_irq_save();
+            x86_install_current_user_fs(cur->thread, arg);
+            arch_local_irq_restore(flags);
+            syscall_result = 0;
+        } else if (op == ARCH_GET_FS) {
+            uint64_t base = x86_read_fs_base();
+            ssize_t r = copy_to_user_ft((void *)(uintptr_t)arg, &base,
+                                        sizeof(base));
+            syscall_result = r < 0 ? (int64_t)r : 0;
+        } else {
+            syscall_result = -EINVAL;
+        }
         break;
     }
     default:

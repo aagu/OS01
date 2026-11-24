@@ -45,6 +45,12 @@ typedef struct thread_struct
     // RFLAGS-as-RIP).  Saved in thread so each task restores its
     // own state when switched back in.
     uint64_t sched_flags;
+
+    /* User FS base (IA32_FS_BASE), saved by the switch path.  The FS
+     * *selector* above reloads the hidden base from the GDT on every
+     * switch, so the real base must travel with the thread.  Kernel
+     * tasks and idle threads keep 0. */
+    uint64_t fs_base;
 } thread_t;
 
 /* ── Layout pin: offsets must not drift (series constraint) ── */
@@ -58,7 +64,19 @@ _Static_assert(offsetof(thread_t, cr2)         == 48, "x86 thread_t cr2 offset d
 _Static_assert(offsetof(thread_t, trap_nr)     == 56, "x86 thread_t trap_nr offset drift");
 _Static_assert(offsetof(thread_t, error_code)  == 64, "x86 thread_t error_code offset drift");
 _Static_assert(offsetof(thread_t, sched_flags) == 72, "x86 thread_t sched_flags offset drift");
-_Static_assert(sizeof(thread_t) == 80, "x86 thread_t size drift");
+_Static_assert(offsetof(thread_t, fs_base)     == 80, "x86 thread_t fs_base offset drift");
+_Static_assert(sizeof(thread_t) == 88, "x86 thread_t size drift");
+
+/* ── FS base helpers (PT_TLS / arch_prctl) ─────────────────────
+ * x86_read_fs_base: live IA32_FS_BASE of the current CPU.
+ * x86_install_current_user_fs: the caller has local IRQs disabled and
+ *   passes an already-validated user base; loads a null FS selector,
+ *   then writes the MSR, and records the value in `thread`.
+ * x86_snapshot_user_fs: fork helper; saves/restores IRQ state itself
+ *   and copies the caller's live selector + base into the child. */
+uint64_t x86_read_fs_base(void);
+void x86_install_current_user_fs(thread_t *thread, uint64_t base);
+void x86_snapshot_user_fs(thread_t *child_thread);
 
 /* ── Current task ──────────────────────────────────────────────
  * task_t lives at the base of its task_union, so masking RSP against

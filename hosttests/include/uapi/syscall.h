@@ -103,6 +103,11 @@
 #define SYS_setrlimit     76   // setrlimit(resource, rlim)
 #define SYS_msync         77   // msync(addr, length, flags)
 #define SYS_fsync         78   // fsync(fd)
+#define SYS_arch_prctl    79   // arch_prctl(op, arg) — raw FS base control
+
+// ── arch_prctl(2) operations (Linux x86_64 UAPI values) ────
+#define ARCH_SET_FS       0x1002
+#define ARCH_GET_FS       0x1003
 
 // ── reboot(2) commands ──────────────────────────────────────
 #define RB_AUTOBOOT    0x01234567
