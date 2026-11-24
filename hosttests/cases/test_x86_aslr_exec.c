@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include <arch/irq.h>
 #include <arch/x86_64/aslr.h>
 #include <arch/x86_64/elf_image.h>
 #include <sys/auxv.h>
@@ -69,6 +70,38 @@ static int fs_install_calls = 0;
 static uint64_t fs_install_base = 0;
 static thread_t *fs_install_thread = NULL;
 static int fs_install_at_switch = -1;
+
+/* Exec commit-window event order (plan: IRQ save -> CR3 switch ->
+ * FS install -> IRQ restore, all inside one IRQ-disabled window). */
+enum exec_event {
+    EV_IRQ_SAVE = 1,
+    EV_SWITCH_MM,
+    EV_FS_INSTALL,
+    EV_IRQ_RESTORE,
+};
+#define EXEC_EVENT_MAX 16
+static int g_events[EXEC_EVENT_MAX];
+static int g_event_count = 0;
+
+static void record_event(int ev)
+{
+    if (g_event_count < EXEC_EVENT_MAX)
+        g_events[g_event_count++] = ev;
+}
+
+/* Strong definitions consumed by the OS01_HOST_TEST weak hooks in
+ * <arch/irq.h>; they make the commit window's masking observable. */
+arch_irq_state_t arch_host_test_irq_save(void)
+{
+    record_event(EV_IRQ_SAVE);
+    return 1;
+}
+
+void arch_host_test_irq_restore(arch_irq_state_t flags)
+{
+    (void)flags;
+    record_event(EV_IRQ_RESTORE);
+}
 
 void *__wrap_malloc(size_t sz)
 {
@@ -178,6 +211,7 @@ void aslr_exec_record_switch_mm(uint64_t *pgdir)
 {
     switch_mm_calls++;
     switch_mm_last_pgdir = pgdir;
+    record_event(EV_SWITCH_MM);
 }
 
 void x86_install_current_user_fs(thread_t *thread, uint64_t base)
@@ -186,6 +220,7 @@ void x86_install_current_user_fs(thread_t *thread, uint64_t base)
     fs_install_base = base;
     fs_install_thread = thread;
     fs_install_at_switch = switch_mm_calls;
+    record_event(EV_FS_INSTALL);
     thread->fs = 0;
     thread->fs_base = base;
 }
@@ -387,6 +422,7 @@ static void reset_exec_fixture(void)
     fs_install_base = 0;
     fs_install_thread = NULL;
     fs_install_at_switch = -1;
+    g_event_count = 0;
     g_mock_elf_rc = 0;
     g_mock_elf_is_pie = false;
     g_mock_elf_entry = 0x401000UL;
@@ -491,6 +527,14 @@ TEST_FUNC(test_exec_aslr_strong_success)
     assert_true(fs_install_thread == &g_current_thread);
     assert_eq(0, (int)g_current_thread.fs);
     assert_eq(0x20600040ULL, g_current_thread.fs_base);
+    /* The FS install must be inside the IRQ-disabled commit window:
+     * irq_save -> CR3 switch -> FS install -> irq_restore.  A FS
+     * install moved after the restore changes this exact sequence. */
+    assert_eq(4, g_event_count);
+    assert_eq(EV_IRQ_SAVE, g_events[0]);
+    assert_eq(EV_SWITCH_MM, g_events[1]);
+    assert_eq(EV_FS_INSTALL, g_events[2]);
+    assert_eq(EV_IRQ_RESTORE, g_events[3]);
 }
 
 TEST_FUNC(test_exec_aslr_entropy_fail_preserves_old_mm)

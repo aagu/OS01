@@ -1014,7 +1014,8 @@ $(TEST_BLD)/test_boot_services_spawn.elf: \
 ASLR_EXEC_HOST_CFLAGS := -I$(TEST_MOCK)/aslr_exec $(BOOT3_HOST_CFLAGS)
 
 $(TEST_BLD)/aslr_exec_exec_production.o: $(TESTS_DIR)/kernel/arch/x86_64/sched/exec.c \
-		$(TEST_MOCK)/aslr_exec/arch/x86_64/mmu.h
+		$(TEST_MOCK)/aslr_exec/arch/x86_64/mmu.h \
+		$(TEST_MOCK)/aslr_exec/arch/irq.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(ASLR_EXEC_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
 
@@ -1030,7 +1031,8 @@ $(TEST_BLD)/aslr_exec_mm_production.o: $(TESTS_DIR)/kernel/memory/mm.c \
 	$(HOST_CC) $(ASLR_EXEC_HOST_CFLAGS) -ffunction-sections -fdata-sections -c $< -o $@
 
 $(TEST_BLD)/test_x86_aslr_exec.o: $(TEST_CASES)/test_x86_aslr_exec.c \
-		$(TEST_MOCK)/aslr_exec/arch/x86_64/mmu.h
+		$(TEST_MOCK)/aslr_exec/arch/x86_64/mmu.h \
+		$(TEST_MOCK)/aslr_exec/arch/irq.h
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(ASLR_EXEC_HOST_CFLAGS) -I$(TEST_INC) -c $< -o $@
 
