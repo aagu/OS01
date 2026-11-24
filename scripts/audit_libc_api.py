@@ -470,6 +470,9 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "mmap",
         "munmap",
         "mprotect",
+        "msync",
+        "shm_open",
+        "shm_unlink",
     ],
     "sys/param.h": [],
     "sys/prctl.h": [
@@ -613,6 +616,7 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "rename",
         "truncate",
         "ftruncate",
+        "fsync",
         "getppid",
         "getpid",
         "_exit",
