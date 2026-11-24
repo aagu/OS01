@@ -117,9 +117,11 @@ int x86_elf_pie_prepare(vfs_node_t *node,
         const elf64_phdr_t *ph = &phdrs[i];
         switch (ph->p_type) {
         case PT_INTERP:
-        case PT_TLS:
         case PT_GNU_RELRO:
             return -ENOEXEC;
+        /* PT_TLS is validated and instantiated by the x86-private TLS
+         * helper after this image check (the header itself carries no
+         * PT_LOAD geometry). */
         case PT_GNU_STACK:
             if (ph->p_flags & PF_X)
                 return -ENOEXEC;

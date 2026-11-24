@@ -319,3 +319,44 @@ void test_arch_prctl_fs(void)
 
     munmap(pages, 0x2000);
 }
+
+/* ── PT_TLS loader / spawn / exec acceptance ──────────────────── */
+
+static int run_user_image(const char *path)
+{
+    pid_t pid = fork();
+    if (pid == 0) {
+        char *argv[] = { (char *)path, NULL };
+        exec(path, argv, NULL);
+        _exit(127);
+    }
+    if (pid < 0)
+        return -1;
+    int st = -1;
+    if (waitpid(pid, &st, 0) != pid)
+        return -1;
+    if ((st & 0x7f) != 0)
+        return -2;                       /* killed by a signal */
+    return (st >> 8) & 0xff;
+}
+
+void test_pt_tls_exec(void)
+{
+    /* ET_EXEC chain: initial template, manual FS, fork isolation,
+     * failed-exec preservation, TLS->TLS re-exec, TLS->plain clear. */
+    int rc = run_user_image("/bin/ptls_exec");
+    CHECKF(rc == 0, "pt_tls_exec ET_EXEC lifecycle",
+           "template/fork/failed-exec/re-exec/plain chain (rc=%d)",
+           "template/fork/failed-exec/re-exec/plain chain (rc=%d)", rc);
+
+    /* Static PIE: .tdata initialised + .tbss zero, local-exec access. */
+    rc = run_user_image("/bin/ptls_pie");
+    CHECKF(rc == 0, "pt_tls_exec static PIE template",
+           "tdata+tbss local-exec (rc=%d)",
+           "tdata+tbss local-exec (rc=%d)", rc);
+
+    /* A missing image is rejected by exec (child reports 127). */
+    rc = run_user_image("/bin/ptls_missing");
+    CHECK3(rc == 127, "pt_tls_exec exec rejection",
+           "missing image exits 127");
+}

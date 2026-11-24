@@ -57,6 +57,9 @@ static uint64_t last_prepared_frame_rip = 0;
 static uint64_t last_prepared_frame_cs = 0;
 static uint64_t enqueue_observed_rsp = 0;
 static uint64_t enqueue_observed_rip = 0;
+static uint64_t enqueue_observed_fs = 0;
+static uint64_t enqueue_observed_fs_base = 0;
+static uint64_t mock_elf_fs_base = 0;
 
 /* Lock sequence tracking */
 enum {
@@ -95,6 +98,17 @@ void vfs_node_put(vfs_node_t *node) { (void)node; }
 int elf_validate(vfs_node_t *node) { (void)node; return 0; }
 int elf_detect_abi(vfs_node_t *node) { (void)node; return 0; }
 #include <arch/x86_64/elf_image.h>
+
+/* exec.c's sys_exec installs FS in its commit window; spawn must not
+ * touch the creator (or anyone else's) FS state. */
+static int fs_install_calls = 0;
+void x86_install_current_user_fs(thread_t *thread, uint64_t base)
+{
+    (void)thread;
+    (void)base;
+    fs_install_calls++;
+}
+
 int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
 {
     (void)node;
@@ -104,6 +118,7 @@ int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
         out_image->phdr = 0;
         out_image->phnum = 0;
         out_image->is_pie = false;
+        out_image->fs_base = mock_elf_fs_base;
     }
     return 0;
 }
@@ -273,6 +288,8 @@ void enqueue_task(task_t *task, percpu_t *rq)
     prepare_calls_at_enqueue = prepare_user_entry_calls;
     enqueue_observed_rsp = task->thread->rsp;
     enqueue_observed_rip = task->thread->rip;
+    enqueue_observed_fs = task->thread->fs;
+    enqueue_observed_fs_base = task->thread->fs_base;
 }
 
 void __wrap_sched_notify_remote(task_t *tsk)
@@ -305,6 +322,10 @@ static void reset_spawn_fixture(void)
     last_prepared_frame_cs = 0;
     enqueue_observed_rsp = 0;
     enqueue_observed_rip = 0;
+    enqueue_observed_fs = 0;
+    enqueue_observed_fs_base = 0;
+    mock_elf_fs_base = 0;
+    fs_install_calls = 0;
     lock_event_count = 0;
     inject_locked_recheck_fail_cpu = -1;
     mock_vfs_bootstrap_active = false;
@@ -369,6 +390,7 @@ static void test_target_eligibility(void)
     percpu_data[1].online = 1;
     percpu_data[1].scheduler_ok = 1;
 
+    mock_elf_fs_base = 0x20600040ULL;   /* static TLS thread pointer */
     ret = spawn_user_task("/bin/init", NULL);
     assert_eq(1, ret);
     assert_eq(1, enqueue_task_calls);
@@ -377,6 +399,11 @@ static void test_target_eligibility(void)
     if (user_init_task) {
         assert_eq(1, user_init_task->cpu);
     }
+    /* FS state was written before the child became visible: null
+     * selector plus the image's TP (the creator's MSR is untouched). */
+    assert_eq(0UL, enqueue_observed_fs);
+    assert_eq(0x20600040ULL, enqueue_observed_fs_base);
+    assert_eq(0, fs_install_calls);   /* creator's FS is untouched */
 
     /* 5. AP online but scheduler_ok=0: not eligible */
     reset_spawn_fixture();

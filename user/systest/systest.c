@@ -481,6 +481,7 @@ static const test_case_t tests[] = {
     {"aslr_pie",                  "aslr static pie",           test_aslr_pie,                  1, 0},
     // ── PT_TLS: raw arch_prctl + FS base lifecycle ──
     {"arch_prctl_fs",             "arch_prctl FS base",        test_arch_prctl_fs,             1, 0},
+    {"pt_tls_exec",               "PT_TLS load/spawn/exec",    test_pt_tls_exec,               1, 0},
 };
 
 // ── CLI: --list ────────────────────────────────────────────

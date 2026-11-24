@@ -54,6 +54,23 @@ elf_load_pte_record_t *stubs_find_mapping(uint64_t vaddr);
 void stubs_rng_reset(void);
 void stubs_rng_push(bool ok, uint64_t first_u64_le);
 
+/* Pre-place page-table state ahead of elf_load: an arbitrary 4 KiB
+ * descriptor (e.g. PAGE_USER | PAGE_PROTNONE), or a 2 MiB user block
+ * covering va.  Both simulate "occupied target" rejection cases. */
+void stubs_put_pte(uint64_t vaddr, uint64_t pte);
+void stubs_put_2m(uint64_t vaddr);
+/* Raw descriptor of the slot (0 when absent) — sees PROT_NONE. */
+uint64_t stubs_peek_pte(uint64_t vaddr);
+/* Clear one slot (simulates a disappeared source leaf). */
+void stubs_clear_pte(uint64_t vaddr);
+/* Backing bytes of one mapped record, or NULL. */
+void *stubs_page_backing(uint64_t vaddr);
+
+/* Size-targeted kmalloc failure (mock_kernel.c).  count = ordinal of
+ * the matching allocation that fails; 0 disables. */
+extern int host_mock_kmalloc_fail_size;
+extern int host_mock_kmalloc_fail_count;
+
 #include <fs/vfs.h>
 
 int       vfs_read(vfs_node_t *node, uint64_t offset,

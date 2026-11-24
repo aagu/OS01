@@ -42,6 +42,10 @@
 #include <string.h>
 #include <stdbool.h>
 #include <arch/x86_64/vmm.h>
+#include <arch/x86_64/user_layout.h>
+#include <memory/vma.h>
+#include <memory/vm_area.h>
+#include <kernel.h>
 
 /* ── Page-size constants used directly (avoid pulling more headers
  *    just for the masks) ─────────────────────────────────────── */
@@ -143,6 +147,281 @@ static void write_snapshot_bytes(uint64_t *pgd, uint64_t dst_va,
     }
 }
 
+/* ════════════════════════════════════════════════════════════════
+ * Static TLS (PT_TLS, Variant II)
+ * ════════════════════════════════════════════════════════════════
+ * One private anonymous RW/NX span at X86_USER_STACK_END.  The thread
+ * pointer sits after the image's TBSS padding; the template is copied
+ * from the already-loaded image (through the target page tables, not
+ * through a user pointer).  `fs_base == 0` means "no TLS". */
+
+#define X86_TLS_SPAN_MAX   0x10000ULL     /* 64 KiB page-rounded cap */
+#define X86_TLS_MAX_PAGES  (X86_TLS_SPAN_MAX / PAGE_4K_SIZE)
+
+typedef struct {
+    uint64_t image_vaddr;   /* PT_TLS link VA (template source) */
+    uint64_t filesz;        /* template bytes to copy */
+    uint64_t block_start;   /* template destination (TP - D) */
+    uint64_t fs_base;       /* thread pointer; 0 = no TLS */
+    uint64_t map_end;       /* exclusive end of the anonymous span */
+} x86_elf_tls_t;
+
+static int x86_elf_tls_describe(const elf64_ehdr_t *ehdr,
+                                const elf64_phdr_t *phdrs,
+                                uint64_t file_size,
+                                x86_elf_tls_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    const bool is_pie = ehdr->e_type == ET_DYN;
+
+    const elf64_phdr_t *tls = NULL;
+    bool has_interp = false, has_dynamic = false;
+    for (uint16_t i = 0; i < ehdr->e_phnum; i++) {
+        const elf64_phdr_t *ph = &phdrs[i];
+        if (ph->p_type == PT_TLS) {
+            if (tls)
+                return -ENOEXEC;            /* duplicate header */
+            tls = ph;
+        } else if (ph->p_type == PT_INTERP) {
+            has_interp = true;
+        } else if (ph->p_type == PT_DYNAMIC) {
+            has_dynamic = true;
+        }
+    }
+    if (!tls)
+        return 0;                            /* fs_base stays 0 */
+
+    /* A TLS-bearing ET_EXEC is a self-contained static image. */
+    if (!is_pie && (has_interp || has_dynamic))
+        return -ENOEXEC;
+
+    if (tls->p_memsz == 0 || tls->p_filesz > tls->p_memsz)
+        return -ENOEXEC;
+
+    /* Link VA window (exclusive end may equal the upper bound). */
+    if (tls->p_vaddr > UINT64_MAX - tls->p_memsz)
+        return -ENOEXEC;
+    uint64_t vend = tls->p_vaddr + tls->p_memsz;
+    if (is_pie) {
+        if (vend > X86_USER_PIE_LINK_END)
+            return -ENOEXEC;
+    } else {
+        if (tls->p_vaddr < X86_USER_MIN_ADDR ||
+            vend > X86_USER_HEAP_LIMIT)
+            return -ENOEXEC;
+    }
+
+    /* Normalised alignment: 0/1 mean 1; otherwise a power of two
+     * no larger than one page. */
+    uint64_t A = tls->p_align;
+    if (A <= 1)
+        A = 1;
+    else if (A > PAGE_4K_SIZE || (A & (A - 1)) != 0)
+        return -ENOEXEC;
+    uint64_t r = tls->p_vaddr % A;
+
+    /* A non-empty template must be file-bounded, congruent and
+     * covered verbatim by one PT_LOAD's file interval.  A pure .tbss
+     * (p_filesz == 0) is not read at all. */
+    if (tls->p_filesz > 0) {
+        if (tls->p_offset > UINT64_MAX - tls->p_filesz)
+            return -ENOEXEC;
+        if (tls->p_offset + tls->p_filesz > file_size)
+            return -ENOEXEC;
+        if ((tls->p_offset % A) != r)
+            return -ENOEXEC;
+
+        bool covered = false;
+        for (uint16_t i = 0; i < ehdr->e_phnum && !covered; i++) {
+            const elf64_phdr_t *ph = &phdrs[i];
+            if (ph->p_type != PT_LOAD || ph->p_filesz == 0)
+                continue;
+            if (tls->p_vaddr < ph->p_vaddr)
+                continue;
+            if (ph->p_vaddr > UINT64_MAX - ph->p_filesz)
+                continue;
+            uint64_t delta = tls->p_vaddr - ph->p_vaddr;
+            if (delta > UINT64_MAX - tls->p_filesz)
+                continue;
+            if (tls->p_vaddr + tls->p_filesz > ph->p_vaddr + ph->p_filesz)
+                continue;
+            if (ph->p_offset > UINT64_MAX - delta)
+                continue;
+            if (ph->p_offset + delta != tls->p_offset)
+                continue;
+            covered = true;
+        }
+        if (!covered)
+            return -ENOEXEC;
+    }
+
+    /* Variant II: D = align_up(memsz + r, A) - r;
+     * TP = B + align_up(D, max(A, 8)); template at TP - D. */
+    if (tls->p_memsz > UINT64_MAX - r)
+        return -ENOEXEC;
+    uint64_t sum = tls->p_memsz + r;
+    if (sum > UINT64_MAX - (A - 1))
+        return -ENOEXEC;
+    uint64_t D = ((sum + A - 1) & ~(A - 1)) - r;
+
+    uint64_t step = A > 8 ? A : 8;
+    if (D > UINT64_MAX - (step - 1))
+        return -ENOEXEC;
+    uint64_t tp_off = (D + step - 1) & ~(step - 1);
+
+    if (X86_USER_STACK_END > UINT64_MAX - tp_off)
+        return -ENOEXEC;
+    uint64_t TP = X86_USER_STACK_END + tp_off;
+
+    if (TP > UINT64_MAX - 8)
+        return -ENOEXEC;
+    uint64_t tp8 = TP + 8;
+    if (tp8 > UINT64_MAX - (PAGE_4K_SIZE - 1))
+        return -ENOEXEC;
+    uint64_t map_end = (tp8 + PAGE_4K_SIZE - 1) & PAGE_4K_MASK;
+
+    if (map_end - X86_USER_STACK_END > X86_TLS_SPAN_MAX)
+        return -ENOEXEC;
+
+    out->image_vaddr = tls->p_vaddr;
+    out->filesz      = tls->p_filesz;
+    out->block_start = TP - D;
+    out->fs_base     = TP;
+    out->map_end     = map_end;
+    return 0;
+}
+
+/* Locate the physical address backing one loaded page of the target
+ * mm.  The source of a TLS copy is the freshly loaded image, so a
+ * missing leaf means the image is inconsistent: -ENOEXEC. */
+static int tls_page_pa(uint64_t *pgd, uint64_t va, uint64_t *pa_out,
+                       uint64_t *off_out)
+{
+    uint64_t *pte = vmm_pt_walk(pgd, va & PAGE_4K_MASK, 0, 0);
+    if (!pte || !(*pte & PAGE_FLAGS_VALID_BIT))
+        return -ENOEXEC;
+    *pa_out  = x86_pte_4k_pa(*pte);
+    *off_out = va & (PAGE_4K_SIZE - 1);
+    return 0;
+}
+
+/* Copy the template from src (image VA) to dst (TLS span VA) one page
+ * chunk at a time, through page tables only. */
+static int x86_elf_tls_copy(uint64_t *pgd, uint64_t src, uint64_t dst,
+                            uint64_t len)
+{
+    while (len > 0) {
+        uint64_t src_pa, src_off, dst_pa, dst_off;
+        int rc = tls_page_pa(pgd, src, &src_pa, &src_off);
+        if (rc != 0)
+            return rc;
+        rc = tls_page_pa(pgd, dst, &dst_pa, &dst_off);
+        if (rc != 0)
+            return rc;
+
+        uint64_t chunk = PAGE_4K_SIZE - src_off;
+        if (chunk > PAGE_4K_SIZE - dst_off)
+            chunk = PAGE_4K_SIZE - dst_off;
+        if (chunk > len)
+            chunk = len;
+
+        memcpy((void *)((uintptr_t)Phy_To_Virt(dst_pa) + dst_off),
+               (const void *)((uintptr_t)Phy_To_Virt(src_pa) + src_off),
+               chunk);
+        src += chunk;
+        dst += chunk;
+        len -= chunk;
+    }
+    return 0;
+}
+
+static int x86_elf_tls_map(mm_t *mm, uint64_t bias, const x86_elf_tls_t *tls)
+{
+    if (!tls || tls->fs_base == 0)
+        return 0;
+
+    uint64_t *pgd = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
+    uint64_t start = X86_USER_STACK_END;
+    uint64_t end   = tls->map_end;
+
+    /* No overlapping VMA anywhere in the span. */
+    for (list_t *p = mm->vma_list.next; p != &mm->vma_list; p = p->next) {
+        vma_t *v = container_of(p, vma_t, list);
+        if (start < v->vm_end && v->vm_start < end)
+            return -ENOEXEC;
+    }
+
+    /* No occupied leaf: a PROT_NONE stash, a 2 MiB block, or any
+     * other present descriptor is a collision. */
+    for (uint64_t pg = start; pg < end; pg += PAGE_4K_SIZE) {
+        if (x86_vmm_has_2m(pgd, pg))
+            return -ENOEXEC;
+        uint64_t *pte = vmm_pt_walk(pgd, pg, 0, 0);
+        if (pte && *pte)
+            return -ENOEXEC;
+    }
+
+    vma_t *vma = (vma_t *)kmalloc(sizeof(vma_t));
+    if (!vma)
+        return -ENOMEM;
+
+    uint64_t mapped[X86_TLS_MAX_PAGES];
+    int n_mapped = 0;
+    int rc = 0;
+
+    for (uint64_t pg = start; pg < end; pg += PAGE_4K_SIZE) {
+        uint64_t phys = alloc_4k_page();
+        if (!phys) {
+            rc = -ENOMEM;
+            goto undo;
+        }
+        memset((void *)Phy_To_Virt(phys), 0, PAGE_4K_SIZE);
+        if (x86_vmm_map_4k(pgd, phys, pg,
+                           PAGE_USER_PTE | PAGE_NO_EXEC) != 0) {
+            free_4k_page(phys);
+            rc = -ENOMEM;
+            goto undo;
+        }
+        mapped[n_mapped++] = pg;
+    }
+
+    rc = x86_elf_tls_copy(pgd, bias + tls->image_vaddr,
+                          tls->block_start, tls->filesz);
+    if (rc != 0)
+        goto undo;
+
+    /* TP self-pointer: mov %fs:0 / address-of-__thread data both read
+     * the thread pointer from [TP, TP+8). */
+    {
+        uint64_t tp = tls->fs_base;
+        uint64_t dst_pa, dst_off;
+        rc = tls_page_pa(pgd, tp, &dst_pa, &dst_off);
+        if (rc != 0)
+            goto undo;
+        memcpy((void *)((uintptr_t)Phy_To_Virt(dst_pa) + dst_off),
+               &tp, sizeof(tp));
+    }
+
+    vma->vm_start = start;
+    vma->vm_end   = end;
+    vma->vm_flags = VMA_ANON | VMA_PROT_READ | VMA_PROT_WRITE;
+    vma->vm_pgoff = 0;
+    vma->vm_file  = NULL;
+    vma->vm_shared_backing = NULL;
+    list_init(&vma->list);
+    vm_area_insert_sorted(mm, vma);
+    return 0;
+
+undo:
+    for (int i = 0; i < n_mapped; i++) {
+        uint64_t old = x86_vmm_take_4k(pgd, mapped[i]);
+        if (old)
+            x86_vmm_release_owned_4k(old);
+    }
+    kfree(vma);
+    return rc;
+}
+
 int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
 {
     if (!out_image)
@@ -168,6 +447,18 @@ int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
         return -ENOEXEC;
     }
 
+    uint64_t file_size = vfs_node_live_size(node);
+
+    /* The program-header table must lie inside the file before any
+     * allocation or read (checked addition — e_phoff is 64-bit). */
+    if (phnum > 0) {
+        uint64_t ph_table_sz = (uint64_t)phnum * sizeof(elf64_phdr_t);
+        if (ehdr.e_phoff > UINT64_MAX - ph_table_sz ||
+            ehdr.e_phoff + ph_table_sz > file_size) {
+            return -ENOEXEC;
+        }
+    }
+
     /* ── 2. Pre-read every program header BEFORE any allocation. */
     elf64_phdr_t *phdrs = NULL;
     if (phnum > 0) {
@@ -188,7 +479,6 @@ int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
     }
 
     /* ── 3. Validate layout (ET_DYN static-PIE vs ET_EXEC) ──── */
-    uint64_t file_size = vfs_node_live_size(node);
     bool is_pie = false;
     uint64_t bias = 0;
     x86_elf_pie_t pie;
@@ -200,12 +490,6 @@ int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
             kfree(phdrs);
             return prc;
         }
-        int brc = x86_aslr_get_pie_bias(&bias);
-        if (brc != 0) {
-            x86_elf_pie_dispose(&pie);
-            kfree(phdrs);
-            return brc;
-        }
         is_pie = true;
     } else {
         elf_layout_t layout;
@@ -213,6 +497,26 @@ int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
         if (ret != 0) {
             kfree(phdrs);
             return -ENOEXEC;
+        }
+    }
+
+    /* TLS validation runs after the image check and before the PIE
+     * bias snapshot (nothing is allocated on failure). */
+    x86_elf_tls_t tls;
+    ret = x86_elf_tls_describe(&ehdr, phdrs, file_size, &tls);
+    if (ret != 0) {
+        if (is_pie)
+            x86_elf_pie_dispose(&pie);
+        kfree(phdrs);
+        return ret;
+    }
+
+    if (is_pie) {
+        int brc = x86_aslr_get_pie_bias(&bias);
+        if (brc != 0) {
+            x86_elf_pie_dispose(&pie);
+            kfree(phdrs);
+            return brc;
         }
     }
 
@@ -360,14 +664,22 @@ int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
         }
     }
 
+    /* ── 7.6 Static TLS: last fallible load step.  The helper owns
+     * its temporary VMA and leaf rollback; on failure the PT_LOAD
+     * leaves are released by the common rollback below. ─── */
+    rc = x86_elf_tls_map(mm, bias, &tls);
+    if (rc != 0)
+        goto rollback;
+
     /* ── 8. Success: publish code bounds + image descriptor. ─── */
     if (start_code == UINT64_MAX) start_code = 0;
     mm->start_code = start_code;
     mm->end_code   = end_code;
-    out_image->entry  = bias + ehdr.e_entry;
-    out_image->phdr   = is_pie ? (bias + pie.link_phdr_vaddr) : 0;
-    out_image->phnum  = phnum;
-    out_image->is_pie = is_pie;
+    out_image->entry   = bias + ehdr.e_entry;
+    out_image->phdr    = is_pie ? (bias + pie.link_phdr_vaddr) : 0;
+    out_image->phnum   = phnum;
+    out_image->is_pie  = is_pie;
+    out_image->fs_base = tls.fs_base;
 
     if (is_pie)
         x86_elf_pie_dispose(&pie);

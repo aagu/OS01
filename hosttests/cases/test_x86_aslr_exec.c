@@ -64,6 +64,12 @@ static int task_comm_apply_exec_calls = 0;
 static int switch_mm_calls = 0;
 static uint64_t *switch_mm_last_pgdir = NULL;
 
+/* FS install recorder (exec commit window). */
+static int fs_install_calls = 0;
+static uint64_t fs_install_base = 0;
+static thread_t *fs_install_thread = NULL;
+static int fs_install_at_switch = -1;
+
 void *__wrap_malloc(size_t sz)
 {
     void *p = __real_malloc(sz);
@@ -174,6 +180,16 @@ void aslr_exec_record_switch_mm(uint64_t *pgdir)
     switch_mm_last_pgdir = pgdir;
 }
 
+void x86_install_current_user_fs(thread_t *thread, uint64_t base)
+{
+    fs_install_calls++;
+    fs_install_base = base;
+    fs_install_thread = thread;
+    fs_install_at_switch = switch_mm_calls;
+    thread->fs = 0;
+    thread->fs_base = base;
+}
+
 void *arch_this_cpu_ptr(void) { return &percpu_data[0]; }
 pid_t alloc_pid(void) { return 42; }
 bool vfs_bootstrap_active(void) { return false; }
@@ -213,6 +229,7 @@ static bool g_mock_elf_is_pie = false;
 static uint64_t g_mock_elf_entry = 0x401000UL;
 static uint64_t g_mock_elf_phdr = 0;
 static uint64_t g_mock_elf_phnum = 0;
+static uint64_t g_mock_elf_fs_base = 0;
 
 int elf_validate(vfs_node_t *node) { (void)node; return 0; }
 uint32_t elf_detect_abi(vfs_node_t *node) { (void)node; return 0; }
@@ -237,6 +254,7 @@ int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
         out_image->phdr = g_mock_elf_is_pie ? (bias + g_mock_elf_phdr) : 0;
         out_image->phnum = g_mock_elf_phnum;
         out_image->is_pie = g_mock_elf_is_pie;
+        out_image->fs_base = g_mock_elf_fs_base;
     }
     return 0;
 }
@@ -365,11 +383,16 @@ static void reset_exec_fixture(void)
     task_comm_apply_exec_calls = 0;
     switch_mm_calls = 0;
     switch_mm_last_pgdir = NULL;
+    fs_install_calls = 0;
+    fs_install_base = 0;
+    fs_install_thread = NULL;
+    fs_install_at_switch = -1;
     g_mock_elf_rc = 0;
     g_mock_elf_is_pie = false;
     g_mock_elf_entry = 0x401000UL;
     g_mock_elf_phdr = 0;
     g_mock_elf_phnum = 0;
+    g_mock_elf_fs_base = 0;
 }
 
 /* ── Tests ── */
@@ -443,6 +466,7 @@ TEST_FUNC(test_exec_aslr_strong_success)
     uint64_t r1 = 0x000000000abcdef1ULL;
     uint64_t r2 = 0x000000000fedcba2ULL;
     reset_rng_seq(true, r1, true, r2);
+    g_mock_elf_fs_base = 0x20600040ULL;   /* static TLS thread pointer */
 
     pt_regs_t regs;
     memset(&regs, 0, sizeof(regs));
@@ -459,6 +483,14 @@ TEST_FUNC(test_exec_aslr_strong_success)
     assert_eq(1, vma_free_all_calls);
     assert_eq(1, vmm_free_user_map_calls);
     assert_eq(1, kfree_old_mm_calls);
+    /* FS install ran exactly once, after the CR3 switch, with the new
+     * image's TP, and the saved selector is the null user selector. */
+    assert_eq(1, fs_install_calls);
+    assert_eq(0x20600040ULL, fs_install_base);
+    assert_eq(1, fs_install_at_switch);
+    assert_true(fs_install_thread == &g_current_thread);
+    assert_eq(0, (int)g_current_thread.fs);
+    assert_eq(0x20600040ULL, g_current_thread.fs_base);
 }
 
 TEST_FUNC(test_exec_aslr_entropy_fail_preserves_old_mm)
@@ -480,6 +512,7 @@ TEST_FUNC(test_exec_aslr_entropy_fail_preserves_old_mm)
     int64_t rc = sys_exec("/bin/sh", &regs, argv, envp);
     assert_eq(-EAGAIN, rc);
     assert_eq(0, switch_mm_calls);
+    assert_eq(0, fs_install_calls);
     assert_true(g_current.mm == old_mm);
     assert_eq(0x0000401234500000ULL, old_mm->mmap_base);
     assert_eq(0, task_comm_apply_exec_calls);

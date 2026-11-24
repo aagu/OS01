@@ -153,8 +153,75 @@ $(ASLR_B_EXEC_ELF): $(ASLR_B_EXEC_OBJ) $(OS01_ROOT)/libc/arch/x86_64/user.ld
 endif
 endif
 
+# ── PT_TLS acceptance fixtures (x86_64 systest only) ──────────
+# Freestanding probes: no libc, raw int $0x80.  ptls_exec is a
+# TinyGo-shaped pure-.tbss ET_EXEC, ptls_pie exercises .tdata + .tbss
+# inside the static-PIE whitelist, ptls_plain has no PT_TLS at all.
+PTLS_FIXTURES :=
+ifeq ($(OS01_SYSTEST),1)
+ifneq ($(USER_ARCH),aarch64)
+PTLS_DIR       := systest/fixtures
+PTLS_ENTRY_OBJ := $(OBJ_DIR)/systest/fixtures/ptls_entry.o
+PTLS_EXEC_OBJ  := $(OBJ_DIR)/systest/fixtures/ptls_exec.o
+PTLS_PIE_OBJ   := $(OBJ_DIR)/systest/fixtures/ptls_pie.o
+PTLS_PLAIN_OBJ := $(OBJ_DIR)/systest/fixtures/ptls_plain.o
+PTLS_EXEC_ELF  := $(BUILD_DIR)/ptls_exec.elf
+PTLS_PIE_ELF   := $(BUILD_DIR)/ptls_pie.elf
+PTLS_PLAIN_ELF := $(BUILD_DIR)/ptls_plain.elf
+PTLS_FIXTURES  := $(PTLS_EXEC_ELF) $(PTLS_PIE_ELF) $(PTLS_PLAIN_ELF)
+
+PTLS_BASE_CFLAGS := --target=x86_64-unknown-none -ffreestanding \
+                    -fno-stack-protector -fno-asynchronous-unwind-tables \
+                    -ftls-model=local-exec -O2 -Wall -Wextra
+
+$(PTLS_ENTRY_OBJ): $(PTLS_DIR)/ptls_entry.S $(USER_COMPILE_KEY)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) --target=x86_64-unknown-none -ffreestanding \
+		-fno-pic -fno-pie -c $< -o $@
+
+$(PTLS_EXEC_OBJ): $(PTLS_DIR)/ptls_probe.c $(USER_COMPILE_KEY)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(PTLS_BASE_CFLAGS) -fno-pic -fno-pie -DPTLS_EXEC -c $< -o $@
+
+$(PTLS_PIE_OBJ): $(PTLS_DIR)/ptls_probe.c $(USER_COMPILE_KEY)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(PTLS_BASE_CFLAGS) -fPIE -DPTLS_PIE -c $< -o $@
+
+$(PTLS_PLAIN_OBJ): $(PTLS_DIR)/ptls_probe.c $(USER_COMPILE_KEY)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(PTLS_BASE_CFLAGS) -fno-pic -fno-pie -DPTLS_PLAIN -c $< -o $@
+
+$(PTLS_EXEC_ELF): $(PTLS_ENTRY_OBJ) $(PTLS_EXEC_OBJ) $(PTLS_DIR)/ptls_exec.ld
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) -m elf_x86_64 -static -T $(PTLS_DIR)/ptls_exec.ld \
+		-o $@ $(PTLS_ENTRY_OBJ) $(PTLS_EXEC_OBJ)
+	$(OBJ_CPY) --strip-debug $@
+
+$(PTLS_PIE_ELF): $(PTLS_ENTRY_OBJ) $(PTLS_PIE_OBJ) $(PTLS_DIR)/ptls_pie.ld
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) -m elf_x86_64 -static -pie --no-dynamic-linker \
+		-z max-page-size=4096 -z text -z norelro --pack-dyn-relocs=none \
+		-T $(PTLS_DIR)/ptls_pie.ld -o $@ $(PTLS_ENTRY_OBJ) $(PTLS_PIE_OBJ)
+	$(OBJ_CPY) --strip-debug $@
+
+$(PTLS_PLAIN_ELF): $(PTLS_ENTRY_OBJ) $(PTLS_PLAIN_OBJ) $(OS01_ROOT)/libc/arch/x86_64/user.ld
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) -m elf_x86_64 -static -T $(OS01_ROOT)/libc/arch/x86_64/user.ld \
+		-o $@ $(PTLS_ENTRY_OBJ) $(PTLS_PLAIN_OBJ)
+	$(OBJ_CPY) --strip-debug $@
+
+# Structural gate: the ELF shape the probe behaviour relies on.
+PTLS_CHECK_STAMP := $(BUILD_DIR)/.ptls-fixtures.checked
+$(PTLS_CHECK_STAMP): $(PTLS_FIXTURES) $(OS01_ROOT)/tools/tests/check_ptls_fixture.py
+	python3 $(OS01_ROOT)/tools/tests/check_ptls_fixture.py \
+		--exec $(PTLS_EXEC_ELF) --pie $(PTLS_PIE_ELF) --plain $(PTLS_PLAIN_ELF)
+	@touch $@
+endif
+endif
+
 .PHONY: all clean
-all: $(PROGRAMS) $(RUNTIME_PROBE_ELF) $(ASLR_B_EXEC_ELF) $(DOOM_ARCHIVE)
+all: $(PROGRAMS) $(RUNTIME_PROBE_ELF) $(ASLR_B_EXEC_ELF) $(PTLS_FIXTURES) \
+     $(PTLS_CHECK_STAMP) $(DOOM_ARCHIVE)
 
 $(OBJ_DIR)/%.o: %.c $(USER_COMPILE_KEY)
 	@mkdir -p $(dir $@)

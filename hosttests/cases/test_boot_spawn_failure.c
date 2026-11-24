@@ -69,6 +69,15 @@ void vfs_node_put(vfs_node_t *node)
 
 int elf_validate(vfs_node_t *node) { (void)node; return 0; }
 #include <arch/x86_64/elf_image.h>
+
+/* exec.c records the FS install; these tests never exercise a TLS
+ * image, so the hook is a no-op. */
+void x86_install_current_user_fs(thread_t *thread, uint64_t base)
+{
+    (void)thread;
+    (void)base;
+}
+
 int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
 {
     (void)node;

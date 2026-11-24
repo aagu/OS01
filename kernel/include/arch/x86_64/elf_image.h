@@ -14,6 +14,9 @@ typedef struct {
     uint64_t phdr;
     uint64_t phnum;
     bool     is_pie;
+    /* Static TLS thread pointer (Variant II).  0 means the image has
+     * no PT_TLS; the loader installed nothing at the TLS window. */
+    uint64_t fs_base;
 } x86_elf_image_t;
 
 /**

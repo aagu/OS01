@@ -107,6 +107,57 @@ elf_load_pte_record_t *stubs_find_mapping(uint64_t vaddr)
     return rec;
 }
 
+void stubs_put_pte(uint64_t vaddr, uint64_t pte)
+{
+    elf_load_pte_record_t *rec = sparse_lookup(vaddr, true);
+    if (!rec)
+        abort();
+    rec->vaddr = vaddr & ~0xFFFULL;
+    rec->pte   = pte;
+    rec->phys  = pte & ~0xFFFULL;
+    rec->flags = pte;
+}
+
+void stubs_put_2m(uint64_t vaddr)
+{
+    elf_load_pte_record_t *rec = sparse_lookup(vaddr & ~0x1FFFFFULL, true);
+    if (!rec)
+        abort();
+    rec->vaddr = vaddr & ~0x1FFFFFULL;
+    rec->pte   = PAGE_USER | PAGE_WRITE | PAGE_VALID | PAGE_HUGE;
+    rec->phys  = 0x40000000ULL;   /* opaque marker */
+    rec->flags = rec->pte;
+}
+
+uint64_t stubs_peek_pte(uint64_t vaddr)
+{
+    elf_load_pte_record_t *rec = sparse_lookup(vaddr, false);
+    return rec ? rec->pte : 0;
+}
+
+void stubs_clear_pte(uint64_t vaddr)
+{
+    elf_load_pte_record_t *rec = sparse_lookup(vaddr, false);
+    if (!rec)
+        return;
+    rec->pte = 0;
+    rec->phys = 0;
+    rec->flags = 0;
+}
+
+void *stubs_page_backing(uint64_t vaddr)
+{
+    elf_load_pte_record_t *rec = sparse_lookup(vaddr, false);
+    if (!rec || !(rec->pte & PAGE_VALID))
+        return NULL;
+    for (int i = 0; i < ELF_LOAD_PAGE_POOL_SIZE; i++) {
+        if (elf_load_page_pool[i].backing &&
+            elf_load_page_pool[i].phys == x86_pte_4k_pa(rec->pte))
+            return elf_load_page_pool[i].backing;
+    }
+    return NULL;
+}
+
 /* ── Page allocator pool (lazy on-demand backing) ── */
 page_pool_record_t elf_load_page_pool[ELF_LOAD_PAGE_POOL_SIZE];
 
@@ -183,9 +234,24 @@ uint64_t *vmm_pt_walk(uint64_t *pgdir, uint64_t virt,
     (void)pgdir; (void)flags;
     elf_load_pte_record_t *rec = sparse_lookup(virt, allocate != 0);
     if (!rec) return NULL;
-    if (!(rec->pte & PAGE_VALID) && !allocate)
-        return NULL;
+    /* allocate=0 returns the slot whenever the *table entry* exists —
+     * a PROT_NONE / software-bit-only leaf is an occupied slot and
+     * must be visible to absence checks, matching production
+     * vmm_pt_walk (it returns &pte_table[l3] for present tables). */
     return &rec->pte;
+}
+
+/* 2 MiB block query over the sparse table: a record keyed by the
+ * 2 MiB-aligned address and flagged PAGE_HUGE covers every 4 KiB
+ * address in the block. */
+bool x86_vmm_has_2m(uint64_t *root, uint64_t va)
+{
+    (void)root;
+    elf_load_pte_record_t *rec = sparse_lookup(va & ~0x1FFFFFULL, false);
+    if (!rec)
+        return false;
+    return (rec->pte & (PAGE_VALID | PAGE_HUGE | PAGE_USER)) ==
+           (PAGE_VALID | PAGE_HUGE | PAGE_USER);
 }
 
 int x86_vmm_map_4k(uint64_t *pgdir, uint64_t phys,

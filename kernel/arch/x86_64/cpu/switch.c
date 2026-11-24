@@ -138,6 +138,7 @@ uint64_t x86_read_fs_base(void)
 void x86_install_current_user_fs(thread_t *thread, uint64_t base)
 {
     thread->fs_base = base;
+    thread->fs = 0;          /* user base lives in the MSR, not a selector */
     uint64_t zero = 0;
     __asm__ __volatile__("movq %0, %%fs" :: "a"(zero));
     wrmsr(IA32_FS_BASE, base);

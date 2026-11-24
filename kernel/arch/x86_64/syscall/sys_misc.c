@@ -13,8 +13,10 @@
 #include <memory/shared_backing.h>
 #include <log/log.h>
 #include <arch/x86_64/uaccess.h>
-#include <arch/x86_64/user_layout.h>
 #include <arch/irq.h>
+/* X86_USER_ADDR_LIMIT arrives through <sched/task.h> (user_layout.h is
+ * pulled by the x86 branch there); handler hygiene forbids a direct
+ * per-architecture include here. */
 
 int64_t sys_misc_dispatch(syscall_ctx_t *ctx)
 {

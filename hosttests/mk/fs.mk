@@ -252,6 +252,16 @@ $(TEST_BLD)/elf_load_stubs.o: $(TEST_MOCK)/elf_load/elf_load_stubs.c \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(ELF_LOAD_HOST_CFLAGS) -c $< -o $@
 
+# Shared VMA list primitives, compiled with the same forced-include
+# runtime header so the loader, the test and the list walker all see
+# the same simulated mm_t (vma_list offset).
+$(TEST_BLD)/elf_load_vm_area.o: $(TESTS_DIR)/kernel/memory/vm_area.c \
+		$(TESTS_DIR)/kernel/include/memory/vm_area.h \
+		$(TESTS_DIR)/kernel/include/memory/vma.h \
+		$(TEST_MOCK)/elf_load/elf_load_stubs.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(ELF_LOAD_HOST_CFLAGS) -c $< -o $@
+
 $(TEST_BLD)/test_elf_load_4k.o: $(TEST_CASES)/test_elf_load_4k.c \
 		$(TEST_MOCK)/elf_load/elf_load_stubs.h
 	@mkdir -p $(TEST_BLD)
@@ -262,6 +272,7 @@ $(TEST_BLD)/test_elf_load_4k.elf: $(TEST_BLD)/test_elf_load_4k.o \
 		$(TEST_BLD)/elf_pie_production.o \
 		$(TEST_BLD)/elf_load_aslr_production.o \
 		$(TEST_BLD)/elf_load_stubs.o \
+		$(TEST_BLD)/elf_load_vm_area.o \
 		$(TEST_BLD)/elf_layout.o \
 		$(MOCK_OBJS)
 	$(HOST_CC) -o $@ $^

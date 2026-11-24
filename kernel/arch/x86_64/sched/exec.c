@@ -604,10 +604,14 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     regs->rsi     = user_arg_ptr;
     regs->rdx     = user_env_ptr;          // envp (NULL for argv==NULL spawn)
 
-    // 8. Thread context for switch_to / __switch_to
-    thd->rsp0 = (uint64_t)tsk + STACK_SIZE;
-    thd->fs   = KERNEL_DS;
-    thd->gs   = KERNEL_DS;
+    // 8. Thread context for switch_to / __switch_to.  The first switch
+    // loads the user FS selector (null: the base lives in the MSR) and
+    // the image's static-TLS thread pointer.  The creator's MSR is
+    // untouched until this task is actually switched in.
+    thd->rsp0    = (uint64_t)tsk + STACK_SIZE;
+    thd->fs      = 0;
+    thd->fs_base = elf_img.fs_base;
+    thd->gs      = KERNEL_DS;
     arch_task_prepare_user_entry(tsk, regs);
 
     // ── PUBLISH (single release point, spec §5.1) ────────────
@@ -793,6 +797,11 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     current->mm = new_mm;
     current->thread->cr3 = (uint64_t)new_mm->pgdir;
     arch_switch_mm(new_mm->pgdir);
+    /* Same IRQ-disabled window: install the new image's FS state (a
+     * null selector plus the static-TLS TP, or 0 for no TLS).  A
+     * failed exec never reaches this point, so the old FS base,
+     * selector and TLS bytes survive. */
+    x86_install_current_user_fs(current->thread, elf_img.fs_base);
     arch_local_irq_restore(irq_flags);
 
     // The old hierarchy is private and is no longer active on this CPU.

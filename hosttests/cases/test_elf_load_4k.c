@@ -42,6 +42,9 @@
 #include <arch/x86_64/elf_image.h>
 #include <arch/x86_64/aslr.h>
 #include <arch/x86_64/user_layout.h>
+#include <memory/vma.h>
+#include <memory/vm_area.h>
+#include <kernel.h>            /* container_of for the VMA fixture walk */
 
 /* Production sched/task.h is required for the real mm_struct — the
  * loader dereferences mm->pgdir, mm->start_code, mm->end_code. */
@@ -148,12 +151,25 @@ static void setup_fixture(uint64_t file_size, uint64_t fake_pgd)
 
     memset(&fixture_mm, 0, sizeof(fixture_mm));
     fixture_mm.pgdir = (uint64_t *)fake_pgd;
+    list_init(&fixture_mm.vma_list);
+
+    host_mock_kmalloc_fail_size = 0;
+    host_mock_kmalloc_fail_count = 0;
 
     stubs_reset();
 }
 
 static void teardown_fixture(void)
 {
+    /* Free any VMA node the TLS install inserted (the page ledger is
+     * reset afterwards, so the order matters). */
+    while (fixture_mm.vma_list.next != &fixture_mm.vma_list) {
+        list_t *pos = fixture_mm.vma_list.next;
+        list_del(pos);
+        kfree(container_of(pos, vma_t, list));
+    }
+    host_mock_kmalloc_fail_size = 0;
+    host_mock_kmalloc_fail_count = 0;
     stubs_reset();
 }
 
@@ -1553,6 +1569,652 @@ TEST_FUNC(test_pie_phdr_snapshot)
     teardown_fixture();
 }
 
+/* ══════════════════════════════════════════════════════════════
+ * PT_TLS — Variant II static TLS
+ * ══════════════════════════════════════════════════════════════ */
+
+#define TLS_B  X86_USER_STACK_END
+
+typedef struct {
+    uint32_t    type;
+    uint32_t    flags;
+    uint64_t    vaddr;
+    uint64_t    filesz;
+    uint64_t    memsz;
+    uint64_t    align;
+    const void *data;      /* appended to the file image */
+    int         off_ref;   /* -1 = raw offset; else index into phs[] */
+    uint64_t    off_delta;
+    uint64_t    offset;    /* raw p_offset when off_ref < 0 */
+} phdr_spec_t;
+
+static size_t build_elf_raw(uint32_t e_type, uint64_t entry,
+                            const phdr_spec_t *phs, int n_ph)
+{
+    memset(elf_buf, 0, ELF_MAX_BYTES);
+    elf64_ehdr_t *e = (elf64_ehdr_t *)elf_buf;
+    e->e_ident[EI_MAG0] = ELFMAG0;
+    e->e_ident[EI_MAG1] = ELFMAG1;
+    e->e_ident[EI_MAG2] = ELFMAG2;
+    e->e_ident[EI_MAG3] = ELFMAG3;
+    e->e_ident[EI_CLASS] = ELFCLASS64;
+    e->e_ident[EI_DATA] = ELFDATA2LSB;
+    e->e_ident[EI_VERSION] = 1;
+    e->e_type = e_type;
+    e->e_machine = EM_X86_64;
+    e->e_version = 1;
+    e->e_entry = entry;
+    e->e_phoff = sizeof(elf64_ehdr_t);
+    e->e_ehsize = sizeof(elf64_ehdr_t);
+    e->e_phentsize = sizeof(elf64_phdr_t);
+    e->e_phnum = (uint16_t)n_ph;
+
+    elf64_phdr_t *ph = (elf64_phdr_t *)(elf_buf + sizeof(elf64_ehdr_t));
+    uint64_t data_off = sizeof(elf64_ehdr_t) +
+                        (uint64_t)n_ph * sizeof(elf64_phdr_t);
+    uint64_t assigned[16] = {0};
+    for (int i = 0; i < n_ph; i++) {
+        ph[i].p_type   = phs[i].type;
+        ph[i].p_flags  = phs[i].flags;
+        ph[i].p_vaddr  = phs[i].vaddr;
+        ph[i].p_filesz = phs[i].filesz;
+        ph[i].p_memsz  = phs[i].memsz;
+        ph[i].p_align  = phs[i].align;
+        ph[i].p_offset = phs[i].offset;
+        if (phs[i].data && phs[i].filesz > 0) {
+            /* Each segment's file data starts on a page boundary so a
+             * PT_TLS template's p_offset/p_vaddr congruence (mod
+             * p_align) can hold for page-aligned load VAs. */
+            data_off = (data_off + 0xFFFULL) & ~0xFFFULL;
+            ph[i].p_offset = data_off;
+            memcpy(elf_buf + data_off, phs[i].data, (size_t)phs[i].filesz);
+            assigned[i] = data_off;
+            data_off += phs[i].filesz;
+        } else if (phs[i].off_ref >= 0) {
+            ph[i].p_offset = assigned[phs[i].off_ref] + phs[i].off_delta;
+        }
+    }
+    return (size_t)data_off;
+}
+
+static const uint8_t g_code_byte = 0xC3;
+
+/* Two leading PT_LOADs: RX code at 0x400000 and a file-backed R load
+ * at 0x500000 that carries the TLS template. */
+static int tls_case_base(phdr_spec_t *phs, const uint8_t *tpl, uint64_t tpl_sz)
+{
+    phs[0] = (phdr_spec_t){ .type = PT_LOAD, .flags = PF_R | PF_X,
+                            .vaddr = 0x400000, .filesz = 1, .memsz = 0x1000,
+                            .data = &g_code_byte, .off_ref = -1 };
+    if (tpl_sz == 0)
+        return 1;   /* no template: a zero-sized PT_LOAD is invalid */
+    phs[1] = (phdr_spec_t){ .type = PT_LOAD, .flags = PF_R,
+                            .vaddr = 0x500000, .filesz = tpl_sz,
+                            .memsz = tpl_sz, .data = tpl, .off_ref = -1 };
+    return 2;
+}
+
+static phdr_spec_t tls_valid_spec(uint64_t vaddr, uint64_t filesz,
+                                  uint64_t memsz, uint64_t align)
+{
+    return (phdr_spec_t){ .type = PT_TLS, .flags = PF_R,
+                          .vaddr = vaddr, .filesz = filesz, .memsz = memsz,
+                          .align = align, .off_ref = 1,
+                          .off_delta = vaddr - 0x500000 };
+}
+
+static int load_image(uint64_t file_size, x86_elf_image_t *img)
+{
+    setup_fixture(file_size, 0x100000);
+    memset(img, 0x55, sizeof(*img));
+    return elf_load(&fixture_node, &fixture_mm, img);
+}
+
+static uint64_t tls_byte(uint64_t va)
+{
+    /* Presence is asserted once per test via assert_tls_leaf; the
+     * byte helper stays side-effect free so a missing page yields a
+     * single failure, not one per byte. */
+    void *b = stubs_page_backing(va & ~0xFFFULL);
+    if (!b)
+        return 0;
+    return ((const uint8_t *)b)[va & 0xFFF];
+}
+
+static uint64_t tls_u64(uint64_t va)
+{
+    uint64_t v = 0;
+    for (int i = 0; i < 8; i++)
+        v |= tls_byte(va + (uint64_t)i) << (i * 8);
+    return v;
+}
+
+static void assert_tls_leaf(uint64_t va)
+{
+    elf_load_pte_record_t *rec = stubs_find_mapping(va);
+    assert_not_null(rec);
+    if (!rec)
+        return;
+    assert_true((rec->flags & PAGE_USER_BIT) != 0);
+    assert_true((rec->flags & PAGE_VALID_BIT) != 0);
+    assert_true((rec->flags & PAGE_WRITE_BIT) != 0);
+    assert_true((rec->flags & PAGE_NO_EXEC_BIT) != 0);
+}
+
+static int vma_count(void)
+{
+    int n = 0;
+    for (list_t *p = fixture_mm.vma_list.next; p != &fixture_mm.vma_list;
+         p = p->next)
+        n++;
+    return n;
+}
+
+static vma_t *find_vma(uint64_t start)
+{
+    for (list_t *p = fixture_mm.vma_list.next; p != &fixture_mm.vma_list;
+         p = p->next) {
+        vma_t *v = container_of(p, vma_t, list);
+        if (v->vm_start == start)
+            return v;
+    }
+    return NULL;
+}
+
+/* Every byte in [lo, hi) is zero except the TP self-pointer. */
+static void assert_zero_except_tp(uint64_t lo, uint64_t hi, uint64_t tp)
+{
+    for (uint64_t va = lo; va < hi; va++) {
+        if (va >= tp && va < tp + 8)
+            continue;
+        assert_eq(0UL, tls_byte(va));
+    }
+}
+
+static void assert_no_tls_leftovers(void)
+{
+    assert_eq(0, vma_count());
+    assert_eq(0UL, stubs_peek_pte(TLS_B));
+}
+
+/* 1. Variant II layout: A=64, r=16, memsz=17 -> D=48, TP=B+64. */
+TEST_FUNC(test_tls_etexec_variant_ii)
+{
+    static uint8_t load[0x100];
+    const uint8_t tpl[5] = { 0x11, 0x22, 0x33, 0x44, 0x55 };
+    memcpy(load + 0x10, tpl, sizeof(tpl));
+
+    phdr_spec_t phs[4];
+    int n = tls_case_base(phs, load, sizeof(load));
+    phs[n++] = tls_valid_spec(0x500010, sizeof(tpl), 17, 64);
+    size_t sz = build_elf_raw(ET_EXEC, 0x400000, phs, n);
+
+    x86_elf_image_t img;
+    assert_eq(0, load_image(sz, &img));
+    assert_eq(0x20600040UL, img.fs_base);
+
+    assert_tls_leaf(TLS_B);
+    assert_null(stubs_find_mapping(TLS_B + 0x1000));
+
+    for (int i = 0; i < 5; i++)
+        assert_eq(tpl[i], tls_byte(TLS_B + 0x10 + (uint64_t)i));
+    for (uint64_t va = TLS_B + 0x15; va < TLS_B + 0x40; va++)
+        assert_eq(0UL, tls_byte(va));
+    assert_eq(0x20600040UL, tls_u64(TLS_B + 0x40));   /* TP self-pointer */
+    for (uint64_t va = TLS_B + 0x48; va < TLS_B + 0x1000; va++)
+        assert_eq(0UL, tls_byte(va));
+
+    vma_t *v = find_vma(TLS_B);
+    assert_not_null(v);
+    if (!v) {
+        teardown_fixture();
+        return;
+    }
+    assert_eq(TLS_B, v->vm_start);
+    assert_eq(TLS_B + 0x1000, v->vm_end);
+    assert_true((v->vm_flags & VMA_ANON) != 0);
+    assert_true((v->vm_flags & VMA_PROT_READ) != 0);
+    assert_true((v->vm_flags & VMA_PROT_WRITE) != 0);
+    assert_eq(1, vma_count());
+
+    /* TLS is outside the image code bounds. */
+    assert_eq(0x400000UL, fixture_mm.start_code);
+    assert_eq(0x500100UL, fixture_mm.end_code);
+
+    teardown_fixture();
+}
+
+/* 2. p_align 0 and 1 are normalised to 1: memsz=9 -> TP=B+16. */
+TEST_FUNC(test_tls_align_zero_and_one)
+{
+    for (uint64_t align = 0; align <= 1; align++) {
+        phdr_spec_t phs[3];
+        int n = tls_case_base(phs, (const uint8_t *)"\0", 0);
+        phs[n++] = (phdr_spec_t){ .type = PT_TLS, .flags = PF_R,
+                                  .vaddr = 0x500000, .filesz = 0,
+                                  .memsz = 9, .align = align,
+                                  .off_ref = -1, .offset = 0 };
+        size_t sz = build_elf_raw(ET_EXEC, 0x400000, phs, n);
+
+        x86_elf_image_t img;
+        assert_eq(0, load_image(sz, &img));
+        assert_eq(0x20600010UL, img.fs_base);
+        assert_tls_leaf(TLS_B);
+        assert_zero_except_tp(TLS_B, TLS_B + 0x1000, 0x20600010UL);
+        teardown_fixture();
+    }
+}
+
+/* 3. TinyGo sample shape: pure .tbss, memsz=8, filesz=0,
+ *    p_offset=UINT64_MAX (never read). */
+TEST_FUNC(test_tls_pure_tbss_tinygo_shape)
+{
+    phdr_spec_t phs[3];
+    int n = tls_case_base(phs, (const uint8_t *)"\0", 0);
+    phs[n++] = (phdr_spec_t){ .type = PT_TLS, .flags = PF_R,
+                              .vaddr = 0x500000, .filesz = 0, .memsz = 8,
+                              .align = 8, .off_ref = -1,
+                              .offset = UINT64_MAX };
+    size_t sz = build_elf_raw(ET_EXEC, 0x400000, phs, n);
+
+    x86_elf_image_t img;
+    assert_eq(0, load_image(sz, &img));
+    assert_eq(0x20600008UL, img.fs_base);
+    assert_tls_leaf(TLS_B);
+    assert_zero_except_tp(TLS_B, TLS_B + 0x1000, 0x20600008UL);
+    teardown_fixture();
+}
+
+/* 4. Template copy crosses a source page and a destination page. */
+TEST_FUNC(test_tls_template_cross_page)
+{
+    static uint8_t load[0x1008];
+    for (size_t i = 0; i < sizeof(load); i++)
+        load[i] = (uint8_t)(i * 7 + 1);
+
+    phdr_spec_t phs[3];
+    int n = tls_case_base(phs, load, sizeof(load));
+    phs[n++] = tls_valid_spec(0x500000, sizeof(load), sizeof(load), 1);
+    size_t sz = build_elf_raw(ET_EXEC, 0x400000, phs, n);
+
+    x86_elf_image_t img;
+    assert_eq(0, load_image(sz, &img));
+    assert_eq(TLS_B + 0x1008, img.fs_base);   /* D = 0x1008, TP = B+D */
+    assert_tls_leaf(TLS_B);
+    assert_tls_leaf(TLS_B + 0x1000);
+    for (uint64_t i = 0; i < sizeof(load); i++)
+        assert_eq(load[i], tls_byte(TLS_B + i));
+    /* The TP self-pointer sits immediately after the template. */
+    assert_eq(TLS_B + 0x1008, tls_u64(TLS_B + 0x1008));
+    for (uint64_t va = TLS_B + 0x1010; va < TLS_B + 0x2000; va++)
+        assert_eq(0UL, tls_byte(va));
+    teardown_fixture();
+}
+
+/* 5. The page-rounded span cap is exactly 64 KiB. */
+TEST_FUNC(test_tls_64k_span_boundary)
+{
+    /* 65528 bytes + TP self-pointer rounds to exactly 64 KiB. */
+    phdr_spec_t phs[3];
+    int n = tls_case_base(phs, (const uint8_t *)"\0", 0);
+    phs[n++] = (phdr_spec_t){ .type = PT_TLS, .flags = PF_R,
+                              .vaddr = 0x500000, .filesz = 0,
+                              .memsz = 65528, .align = 1,
+                              .off_ref = -1, .offset = 0 };
+    size_t sz = build_elf_raw(ET_EXEC, 0x400000, phs, n);
+
+    x86_elf_image_t img;
+    assert_eq(0, load_image(sz, &img));
+    assert_eq(TLS_B + 65528, img.fs_base);
+    for (uint64_t off = 0; off < 0x10000; off += 0x1000)
+        assert_tls_leaf(TLS_B + off);
+    assert_null(stubs_find_mapping(TLS_B + 0x10000));
+    vma_t *span = find_vma(TLS_B);
+    assert_not_null(span);
+    if (span)
+        assert_eq(TLS_B + 0x10000, span->vm_end);
+    teardown_fixture();
+
+    /* One byte more must be rejected before any allocation. */
+    n = tls_case_base(phs, (const uint8_t *)"\0", 0);
+    phs[n++] = (phdr_spec_t){ .type = PT_TLS, .flags = PF_R,
+                              .vaddr = 0x500000, .filesz = 0,
+                              .memsz = 65529, .align = 1,
+                              .off_ref = -1, .offset = 0 };
+    sz = build_elf_raw(ET_EXEC, 0x400000, phs, n);
+    assert_eq(-ENOEXEC, load_image(sz, &img));
+    assert_eq(0, elf_load_state.total_allocs);
+    assert_no_tls_leftovers();
+    teardown_fixture();
+}
+
+static void expect_tls_reject(const phdr_spec_t *phs, int n_ph)
+{
+    size_t sz = build_elf_raw(ET_EXEC, 0x400000, phs, n_ph);
+    x86_elf_image_t img;
+    assert_eq(-ENOEXEC, load_image(sz, &img));
+    x86_elf_image_t sentinel;
+    memset(&sentinel, 0x55, sizeof(sentinel));
+    assert_eq(0, memcmp(&img, &sentinel, sizeof(img)));
+    assert_eq(0, elf_load_state.total_allocs);
+    assert_eq(0, elf_load_state.total_maps);
+    assert_no_tls_leftovers();
+    teardown_fixture();
+}
+
+/* 6. Malformed PT_TLS headers are rejected with no image leaves. */
+TEST_FUNC(test_tls_rejects_malformed)
+{
+    static uint8_t load[0x20];
+    phdr_spec_t phs[5];
+
+    /* duplicate */
+    int n = tls_case_base(phs, load, sizeof(load));
+    phs[n++] = tls_valid_spec(0x500000, 8, 16, 8);
+    phs[n++] = tls_valid_spec(0x500000, 8, 16, 8);
+    expect_tls_reject(phs, n);
+
+    /* empty (memsz == 0) */
+    n = tls_case_base(phs, load, sizeof(load));
+    phs[n++] = tls_valid_spec(0x500000, 8, 0, 8);
+    expect_tls_reject(phs, n);
+
+    /* filesz > memsz */
+    n = tls_case_base(phs, load, sizeof(load));
+    phs[n++] = tls_valid_spec(0x500000, 16, 8, 8);
+    expect_tls_reject(phs, n);
+
+    /* non-power-of-two align */
+    n = tls_case_base(phs, load, sizeof(load));
+    phs[n++] = tls_valid_spec(0x500000, 8, 16, 3);
+    expect_tls_reject(phs, n);
+
+    /* p_align above the 4096 cap */
+    n = tls_case_base(phs, load, sizeof(load));
+    phs[n++] = tls_valid_spec(0x500000, 8, 16, 8192);
+    expect_tls_reject(phs, n);
+
+    /* vaddr + memsz overflow */
+    n = tls_case_base(phs, load, sizeof(load));
+    phs[n++] = (phdr_spec_t){ .type = PT_TLS, .flags = PF_R,
+                              .vaddr = UINT64_MAX - 7, .filesz = 0,
+                              .memsz = 16, .align = 8,
+                              .off_ref = -1, .offset = 0 };
+    expect_tls_reject(phs, n);
+
+    /* below the ET_EXEC user window */
+    n = tls_case_base(phs, load, sizeof(load));
+    phs[n++] = (phdr_spec_t){ .type = PT_TLS, .flags = PF_R,
+                              .vaddr = 0x300000, .filesz = 0, .memsz = 16,
+                              .align = 8, .off_ref = -1, .offset = 0 };
+    expect_tls_reject(phs, n);
+
+    /* past X86_USER_HEAP_LIMIT */
+    n = tls_case_base(phs, load, sizeof(load));
+    phs[n++] = (phdr_spec_t){ .type = PT_TLS, .flags = PF_R,
+                              .vaddr = X86_USER_HEAP_LIMIT - 4, .filesz = 0,
+                              .memsz = 8, .align = 8,
+                              .off_ref = -1, .offset = 0 };
+    expect_tls_reject(phs, n);
+}
+
+/* 7. File-template rules: offset consistency, coverage, EOF, align. */
+TEST_FUNC(test_tls_rejects_file_template)
+{
+    static uint8_t load[0x20];
+    phdr_spec_t phs[5];
+
+    /* p_offset disagrees with the PT_LOAD-derived offset while the
+     * mod-p_align congruence still holds. */
+    int n = tls_case_base(phs, load, sizeof(load));
+    phs[n] = tls_valid_spec(0x500008, 8, 16, 8);
+    phs[n].off_delta += 0x10;   /* derived 0x1008, header says 0x1010 */
+    n++;
+    expect_tls_reject(phs, n);
+
+    /* TLS vaddr outside every file-backed PT_LOAD */
+    n = tls_case_base(phs, load, sizeof(load));
+    phs[n] = tls_valid_spec(0x600000, 8, 16, 8);
+    phs[n].off_delta = 0;   /* p_offset itself is in range */
+    n++;
+    expect_tls_reject(phs, n);
+
+    /* p_offset + filesz beyond EOF */
+    n = tls_case_base(phs, load, sizeof(load));
+    phs[n++] = (phdr_spec_t){ .type = PT_TLS, .flags = PF_R,
+                              .vaddr = 0x500000, .filesz = 0x1000, .memsz = 0x1000,
+                              .align = 1, .off_ref = -1, .offset = 0xFFF0 };
+    expect_tls_reject(phs, n);
+
+    /* p_offset and p_vaddr disagree modulo p_align */
+    n = tls_case_base(phs, load, sizeof(load));
+    phs[n++] = (phdr_spec_t){ .type = PT_TLS, .flags = PF_R,
+                              .vaddr = 0x500001, .filesz = 8, .memsz = 16,
+                              .align = 64, .off_ref = 1, .off_delta = 2 };
+    expect_tls_reject(phs, n);
+}
+
+/* 8. TLS-bearing ET_EXEC rejects PT_INTERP and PT_DYNAMIC. */
+TEST_FUNC(test_tls_rejects_etexec_interp_dynamic)
+{
+    static uint8_t load[0x20];
+    phdr_spec_t phs[5];
+
+    int n = tls_case_base(phs, load, sizeof(load));
+    phs[n++] = (phdr_spec_t){ .type = PT_INTERP, .flags = PF_R,
+                              .vaddr = 0x500000, .filesz = 4, .memsz = 4,
+                              .align = 1, .off_ref = -1, .offset = 0 };
+    phs[n++] = tls_valid_spec(0x500000, 8, 16, 8);
+    expect_tls_reject(phs, n);
+
+    n = tls_case_base(phs, load, sizeof(load));
+    phs[n++] = (phdr_spec_t){ .type = PT_DYNAMIC, .flags = PF_R | PF_W,
+                              .vaddr = 0x500000, .filesz = 16, .memsz = 16,
+                              .align = 8, .off_ref = -1, .offset = 0 };
+    phs[n++] = tls_valid_spec(0x500000, 8, 16, 8);
+    expect_tls_reject(phs, n);
+}
+
+/* 9. PIE: PT_TLS is now allowed; RELATIVE patching lands in the
+ *    template copy and the no-TLS behaviour is unchanged. */
+TEST_FUNC(test_tls_pie_relative_template)
+{
+    elf64_dyn_t dyns[] = {
+        { DT_FLAGS_1, DF_1_PIE },
+        { DT_RELA, 0xDEAD0001ULL },
+        { DT_RELASZ, sizeof(elf64_rela_t) },
+        { DT_RELAENT, sizeof(elf64_rela_t) },
+        { DT_NULL, 0 }
+    };
+    /* r_offset inside the RW load; the loader patches bias+addend
+     * before the TLS copy. */
+    elf64_rela_t rela = { 0x2000ULL, R_X86_64_RELATIVE, 0x1234LL };
+    size_t sz = build_pie_image(0x80, 0x1000, 0x1000, 0x2000, 0x2000,
+                                dyns, 5, &rela, 1, NULL, NULL);
+    /* Add a fourth PHDR (PT_TLS).  The table now ends at 0x120, so
+     * the base-zero RX load must cover it.  The template lives in
+     * the RW load at rw_vaddr + 0x1000 (file offset 0x2000). */
+    elf64_ehdr_t *e = (elf64_ehdr_t *)elf_buf;
+    e->e_phnum = 4;
+    elf64_phdr_t *ph = (elf64_phdr_t *)(elf_buf + sizeof(elf64_ehdr_t));
+    ph[0].p_filesz = 0x120;
+    ph[3] = (elf64_phdr_t){ .p_type = PT_TLS, .p_flags = PF_R,
+                            .p_offset = 0x2000,
+                            .p_vaddr = 0x2000,
+                            .p_filesz = 8, .p_memsz = 16, .p_align = 8 };
+
+    setup_fixture(sz, 0x100000);
+    stubs_rng_push(true, 1);          /* raw=1 -> bias 0x401000 */
+    x86_elf_image_t img;
+    assert_eq(0, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(TLS_B + 16, img.fs_base);
+    assert_eq(0x401000UL + 0x1234UL, tls_u64(TLS_B));
+
+    teardown_fixture();
+}
+
+/* 10. No PT_TLS: FS base 0 and the TLS window stays empty. */
+TEST_FUNC(test_tls_absent_fs_base_zero)
+{
+    static const uint8_t code = 0xC3;
+    phdr_spec_t phs[1] = {
+        { .type = PT_LOAD, .flags = PF_R | PF_X, .vaddr = 0x400000,
+          .filesz = 1, .memsz = 0x1000, .data = &code, .off_ref = -1 }
+    };
+    size_t sz = build_elf_raw(ET_EXEC, 0x400000, phs, 1);
+    x86_elf_image_t img;
+    assert_eq(0, load_image(sz, &img));
+    assert_eq(0UL, img.fs_base);
+    assert_eq(0, vma_count());
+    assert_eq(0UL, stubs_peek_pte(TLS_B));
+    teardown_fixture();
+}
+
+/* 11. Rollback: VMA node, first/later leaf, and map failures. */
+TEST_FUNC(test_tls_rollback_injections)
+{
+    static uint8_t load[0x20];
+
+    /* VMA node allocation fails before any TLS page is allocated. */
+    phdr_spec_t phs[3];
+    int n = tls_case_base(phs, load, sizeof(load));
+    phs[n++] = tls_valid_spec(0x500000, 8, 16, 8);
+    size_t sz = build_elf_raw(ET_EXEC, 0x400000, phs, n);
+    x86_elf_image_t img;
+    setup_fixture(sz, 0x100000);
+    host_mock_kmalloc_fail_size = (int)sizeof(vma_t);
+    host_mock_kmalloc_fail_count = 1;
+    assert_eq(-ENOMEM, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(elf_load_state.total_allocs, elf_load_state.total_frees);
+    assert_eq(elf_load_state.total_maps, elf_load_state.total_unmaps);
+    assert_no_tls_leftovers();
+    teardown_fixture();
+
+    /* First TLS leaf allocation fails (2 PT_LOAD pages precede it). */
+    setup_fixture(sz, 0x100000);
+    elf_load_state.inject_alloc_fail_at = 3;
+    assert_eq(-ENOMEM, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(elf_load_state.total_allocs, elf_load_state.total_frees);
+    assert_eq(elf_load_state.total_maps, elf_load_state.total_unmaps);
+    assert_no_tls_leftovers();
+    teardown_fixture();
+
+    /* Second TLS map call fails on a two-page span: the first leaf
+     * must be withdrawn and the failed page released inline. */
+    phdr_spec_t two[3];
+    n = tls_case_base(two, load, sizeof(load));
+    two[n++] = (phdr_spec_t){ .type = PT_TLS, .flags = PF_R,
+                              .vaddr = 0x500000, .filesz = 0,
+                              .memsz = 0x1008, .align = 1,
+                              .off_ref = -1, .offset = 0 };
+    size_t sz2 = build_elf_raw(ET_EXEC, 0x400000, two, n);
+    setup_fixture(sz2, 0x100000);
+    elf_load_state.inject_map_fail_at = 4;
+    assert_eq(-ENOMEM, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(elf_load_state.total_allocs, elf_load_state.total_frees);
+    assert_eq(elf_load_state.total_maps, elf_load_state.total_unmaps);
+    assert_no_tls_leftovers();
+    teardown_fixture();
+
+    /* A later page of a 16-page TLS span fails. */
+    phdr_spec_t big[3];
+    n = tls_case_base(big, load, sizeof(load));
+    big[n++] = (phdr_spec_t){ .type = PT_TLS, .flags = PF_R,
+                              .vaddr = 0x500000, .filesz = 0,
+                              .memsz = 65528, .align = 1,
+                              .off_ref = -1, .offset = 0 };
+    sz = build_elf_raw(ET_EXEC, 0x400000, big, n);
+    setup_fixture(sz, 0x100000);
+    elf_load_state.inject_alloc_fail_at = 3 + 6;   /* 7th TLS page */
+    assert_eq(-ENOMEM, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(elf_load_state.total_allocs, elf_load_state.total_frees);
+    assert_eq(elf_load_state.total_maps, elf_load_state.total_unmaps);
+    assert_no_tls_leftovers();
+    teardown_fixture();
+}
+
+/* 12. Target collisions: 2 MiB leaf, PROT_NONE leaf, VMA without PTE. */
+TEST_FUNC(test_tls_target_collisions)
+{
+    static uint8_t load[0x20];
+    phdr_spec_t phs[3];
+    int n = tls_case_base(phs, load, sizeof(load));
+    phs[n++] = tls_valid_spec(0x500000, 8, 16, 8);
+    size_t sz = build_elf_raw(ET_EXEC, 0x400000, phs, n);
+
+    /* 2 MiB block already covers B */
+    x86_elf_image_t img;
+    setup_fixture(sz, 0x100000);
+    stubs_put_2m(TLS_B);
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(elf_load_state.total_allocs, elf_load_state.total_frees);
+    assert_eq(elf_load_state.total_maps, elf_load_state.total_unmaps);
+    assert_eq(0, vma_count());
+    assert_eq((uint64_t)(PAGE_USER_BIT | PAGE_WRITE_BIT | PAGE_VALID_BIT | PAGE_HUGE_BIT),
+              stubs_peek_pte(TLS_B));
+    teardown_fixture();
+
+    /* PROT_NONE stash leaf at B keeps its descriptor */
+    setup_fixture(sz, 0x100000);
+    stubs_put_pte(TLS_B, (uint64_t)PAGE_USER_BIT | 0x200UL /* PROTNONE bit 9 */);
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(elf_load_state.total_allocs, elf_load_state.total_frees);
+    assert_eq(elf_load_state.total_maps, elf_load_state.total_unmaps);
+    assert_eq(0, vma_count());
+    assert_eq((uint64_t)PAGE_USER_BIT | 0x200UL, stubs_peek_pte(TLS_B));
+    teardown_fixture();
+
+    /* VMA already covers B even though no leaf is present */
+    setup_fixture(sz, 0x100000);
+    vma_t *pre = (vma_t *)kmalloc(sizeof(vma_t));
+    assert_not_null(pre);
+    memset(pre, 0, sizeof(*pre));
+    list_init(&pre->list);
+    pre->vm_start = TLS_B;
+    pre->vm_end = TLS_B + 0x1000;
+    pre->vm_flags = VMA_ANON | VMA_PROT_READ;
+    vm_area_insert_sorted(&fixture_mm, pre);
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(1, vma_count());
+    assert_null(stubs_find_mapping(TLS_B));
+    assert_eq(elf_load_state.total_allocs, elf_load_state.total_frees);
+    assert_eq(elf_load_state.total_maps, elf_load_state.total_unmaps);
+    teardown_fixture();
+}
+
+/* 13. A vanished source leaf (template page unmapped between the load
+ *     copy and the TLS copy) is -ENOEXEC with a full rollback. */
+static uint8_t g_tpl_load[0x20];
+
+static void clear_template_source(uint64_t offset, uint64_t size, void *buf)
+{
+    (void)offset; (void)buf;
+    if (size == sizeof(g_tpl_load))
+        stubs_clear_pte(0x500000);
+}
+
+TEST_FUNC(test_tls_missing_source_leaf)
+{
+    phdr_spec_t phs[3];
+    int n = tls_case_base(phs, g_tpl_load, sizeof(g_tpl_load));
+    phs[n++] = tls_valid_spec(0x500000, 8, 16, 8);
+    size_t sz = build_elf_raw(ET_EXEC, 0x400000, phs, n);
+
+    x86_elf_image_t img;
+    setup_fixture(sz, 0x100000);
+    elf_load_state.post_read_hook = clear_template_source;
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    /* The test removed the source leaf itself, so that one PT_LOAD
+     * page is no longer reachable by the loader's rollback list (the
+     * TLS leaves themselves are still fully withdrawn). */
+    assert_eq(elf_load_state.total_allocs,
+              elf_load_state.total_frees + 1);
+    assert_eq(elf_load_state.total_maps,
+              elf_load_state.total_unmaps + 1);
+    assert_no_tls_leftovers();
+    teardown_fixture();
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_load_single_4k_text),
     TEST_ENTRY(test_load_across_4k_boundary),
@@ -1583,6 +2245,19 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_pie_reject_before_mapping),
     TEST_ENTRY(test_pie_failure_unwinds),
     TEST_ENTRY(test_pie_phdr_snapshot),
+    TEST_ENTRY(test_tls_etexec_variant_ii),
+    TEST_ENTRY(test_tls_align_zero_and_one),
+    TEST_ENTRY(test_tls_pure_tbss_tinygo_shape),
+    TEST_ENTRY(test_tls_template_cross_page),
+    TEST_ENTRY(test_tls_64k_span_boundary),
+    TEST_ENTRY(test_tls_rejects_malformed),
+    TEST_ENTRY(test_tls_rejects_file_template),
+    TEST_ENTRY(test_tls_rejects_etexec_interp_dynamic),
+    TEST_ENTRY(test_tls_pie_relative_template),
+    TEST_ENTRY(test_tls_absent_fs_base_zero),
+    TEST_ENTRY(test_tls_rollback_injections),
+    TEST_ENTRY(test_tls_target_collisions),
+    TEST_ENTRY(test_tls_missing_source_leaf),
 TEST_LIST_END
 
 int main(void) {
