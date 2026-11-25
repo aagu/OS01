@@ -46,6 +46,7 @@ enum BOOT_CONTEXT_FLAGS {
      * When clear, arch consumers fall back to the compile-time QEMU
      * window in boot_layout.h. */
     BOOT_CONTEXT_HAS_EARLY_MMIO   = 1u << 7,
+    BOOT_CONTEXT_CONSOLE_FIRMWARE_CONFIGURED = 1u << 8,
 };
 
 // Memory-map format tags. Values are wire-level: each arch's bootloader

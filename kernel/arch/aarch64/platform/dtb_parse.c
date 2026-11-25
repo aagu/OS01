@@ -2,6 +2,7 @@
  * BCM2712 hangs its PL011 and GIC-400 off a /soc bus whose ranges property
  * translates child addresses into the CPU physical view. */
 #include <arch/aarch64/dtb.h>
+#include <arch/aarch64/fdt_address.h>
 
 #define FDT_MAGIC UINT32_C(0xd00dfeed)
 #define MAX_DEPTH 32
@@ -27,6 +28,7 @@ struct node {
 struct bus {
     uint32_t address_cells, size_cells;
     uint32_t ranges_off, ranges_len;
+    bool has_ranges;
     bool cpus;
 };
 struct fixed_clock_entry { uint32_t phandle, freq; };
@@ -104,7 +106,7 @@ static uint64_t decode(const uint8_t *p, uint32_t count)
 }
 
 static bool device_reg_base(const struct node *n, uint32_t index, uint64_t min_size,
-                            uint64_t *base_out)
+                            uint64_t *base_out, uint64_t *size_out)
 {
     uint32_t ac = n->parent_address_cells, sc = n->parent_size_cells;
     if ((ac != 1 && ac != 2) || (sc != 1 && sc != 2)) return false;
@@ -112,44 +114,30 @@ static bool device_reg_base(const struct node *n, uint32_t index, uint64_t min_s
     if (!n->reg.data || n->reg.len % stride ||
         !range(n->reg.len, index * stride, stride)) return false;
     const uint8_t *p = n->reg.data + index * stride;
-    if (decode(p + ac * 4, sc) < min_size) return false;
+    uint64_t sz = decode(p + ac * 4, sc);
+    if (sz < min_size) return false;
     *base_out = decode(p, ac);
+    if (size_out) *size_out = sz;
     return true;
 }
 
-/* Translate a node's bus address (encoded in its parent's address space) to
- * the CPU physical view: every enclosing bus with a non-empty `ranges`
- * remaps it, buses without one are transparent, and an address no entry
- * covers is unreachable from the CPU. The node sits at `depth`, so the
- * first bus to apply is the one at depth-1; the root's own ranges is never
- * applied (there is no address space above it). */
+/* Translate a node's bus interval [addr, addr + size) to the CPU physical view
+ * using the shared fdt_address.h single-step translator. */
 static bool to_cpu_pa(const uint8_t *b, const struct bus *stack, uint32_t depth,
-                      uint64_t *addr)
+                      uint64_t size, uint64_t *addr)
 {
     for (uint32_t d = depth - 1; d > 1; --d) {
         const struct bus *bus = &stack[d - 1];
-        if (!bus->ranges_len) continue;
-        /* One entry = <child-addr: bus cells> <parent-addr: parent cells>
-         * <size: bus cells>. */
-        uint32_t pac = stack[d - 2].address_cells;
-        if ((bus->address_cells != 1 && bus->address_cells != 2) ||
-            (bus->size_cells != 1 && bus->size_cells != 2) ||
-            (pac != 1 && pac != 2)) return false;
-        uint32_t stride = (bus->address_cells + pac + bus->size_cells) * 4;
-        if (bus->ranges_len % stride) return false;
-        const uint8_t *e = b + bus->ranges_off, *end = e + bus->ranges_len;
-        for (; e < end; e += stride) {
-            uint64_t child = decode(e, bus->address_cells);
-            uint64_t size = decode(e + (bus->address_cells + pac) * 4, bus->size_cells);
-            /* Containment without computing child + size (may overflow). */
-            if (*addr < child || *addr - child >= size) continue;
-            uint64_t parent = decode(e + bus->address_cells * 4, pac);
-            uint64_t delta = *addr - child;
-            if (parent > UINT64_MAX - delta) return false;
-            *addr = parent + delta;
-            break;
-        }
-        if (e == end) return false;
+        struct aarch64_fdt_bus fbus = {
+            .ranges = bus->has_ranges ? (b + bus->ranges_off) : 0,
+            .ranges_len = bus->ranges_len,
+            .child_cells = bus->address_cells,
+            .parent_cells = stack[d - 2].address_cells,
+            .size_cells = bus->size_cells,
+            .has_ranges = bus->has_ranges,
+        };
+        if (!aarch64_fdt_translate_reg_step(&fbus, size, addr))
+            return false;
     }
     return true;
 }
@@ -194,29 +182,29 @@ static int finish_node(struct parse_state *s, const struct node *n, uint32_t dep
      * containers whose ranges translate child addresses to the CPU view. */
     if (contains(n->compatible, "arm,cortex-a15-gic") ||
         contains(n->compatible, "arm,gic-400")) {
-        uint64_t gicd_base = 0;
-        uint64_t gicc_base = 0;
+        uint64_t gicd_base = 0, gicd_size = 0;
+        uint64_t gicc_base = 0, gicc_size = 0;
         /* A disabled GIC is absent, not an error. */
         if (!enabled(n)) return 0;
         if (s->gic ||
-            !device_reg_base(n, 0, GIC_REG_SPAN, &gicd_base) || gicd_base == 0 ||
-            !device_reg_base(n, 1, GIC_REG_SPAN, &gicc_base) || gicc_base == 0) return -4;
-        if (!to_cpu_pa(b, stack, depth, &gicd_base) ||
-            !to_cpu_pa(b, stack, depth, &gicc_base)) return 0;
+            !device_reg_base(n, 0, GIC_REG_SPAN, &gicd_base, &gicd_size) || gicd_base == 0 ||
+            !device_reg_base(n, 1, GIC_REG_SPAN, &gicc_base, &gicc_size) || gicc_base == 0) return -4;
+        if (!to_cpu_pa(b, stack, depth, gicd_size, &gicd_base) ||
+            !to_cpu_pa(b, stack, depth, gicc_size, &gicc_base)) return 0;
         s->gic = true;
         s->info.gicd_base = gicd_base;
         s->info.gicc_base = gicc_base;
     }
     if (contains(n->compatible, "arm,pl011")) {
-        uint64_t base = 0;
+        uint64_t base = 0, size = 0;
         /* The console is the first enabled PL011 in tree order.  A disabled
          * one only stands in when nothing enabled shows up, so a firmware
          * that left uart0 status=disabled still gets diagnostics instead of
          * a mute kernel; it never displaces an enabled console. */
         bool on = enabled(n);
         if (s->uart && (!on || s->uart_ok)) return 0;
-        if (!device_reg_base(n, 0, PL011_REG_SPAN, &base)) return on ? -4 : 0;
-        if (!to_cpu_pa(b, stack, depth, &base)) return 0;
+        if (!device_reg_base(n, 0, PL011_REG_SPAN, &base, &size)) return on ? -4 : 0;
+        if (!to_cpu_pa(b, stack, depth, size, &base)) return 0;
         if (base == 0) return on ? -4 : 0;
         s->uart = true;
         s->uart_ok = on;
@@ -266,7 +254,7 @@ static int finish_node(struct parse_state *s, const struct node *n, uint32_t dep
             uint64_t base = decode(rp, ac);
             uint64_t size = decode(rp + ac * 4, sc);
             if (base == 0 || size < 0x200) return -4;
-            if (!to_cpu_pa(b, stack, depth, &base)) return 0;
+            if (!to_cpu_pa(b, stack, depth, size, &base)) return 0;
             if (s->info.virtio_mmio_count < AARCH64_VIRTIO_MMIO_MAX) {
                 struct aarch64_virtio_mmio_slot *slot =
                     &s->info.virtio_mmio[s->info.virtio_mmio_count++];
@@ -382,6 +370,7 @@ int aarch64_dtb_parse(const void *blob, uint32_t size, uint64_t bsp,
                 stack[depth - 1].address_cells = current.address_cells;
                 stack[depth - 1].size_cells = current.size_cells;
                 stack[depth - 1].cpus = current.cpus;
+                stack[depth - 1].has_ranges = current.ranges.data != 0;
                 stack[depth - 1].ranges_len = current.ranges.len;
                 stack[depth - 1].ranges_off =
                     current.ranges.data ? (uint32_t)(current.ranges.data - b) : 0;

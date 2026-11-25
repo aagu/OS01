@@ -24,6 +24,12 @@ $(TEST_BLD)/test_aarch64_fdt_early.o: $(TEST_CASES)/test_aarch64_fdt_early.c
 $(TEST_BLD)/test_aarch64_fdt_early.elf: $(TEST_BLD)/test_aarch64_fdt_early.o $(LINK_GROUP_aarch64-fdt-early)
 	$(HOST_CC) $(LINK_LDFLAGS_aarch64-fdt-early) -o $@ $^
 
+$(TEST_BLD)/test_aarch64_uefi_boot_memory.o: $(TEST_CASES)/test_aarch64_uefi_boot_memory.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_aarch64-uefi-boot-memory)),$(LINK_CFLAGS_aarch64-uefi-boot-memory),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_aarch64_uefi_boot_memory.elf: $(TEST_BLD)/test_aarch64_uefi_boot_memory.o $(LINK_GROUP_aarch64-uefi-boot-memory)
+	$(HOST_CC) $(LINK_LDFLAGS_aarch64-uefi-boot-memory) -o $@ $^
+
 $(TEST_BLD)/test_aarch64_user_asid.o: $(TEST_CASES)/test_aarch64_user_asid.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_aarch64-user-asid)),$(LINK_CFLAGS_aarch64-user-asid),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@

@@ -37,10 +37,10 @@ efi_status_t arch_fill_firmware(struct boot_context *ctx,
                                 const struct uefi_boot_config *config);
 void arch_memory_buffer(efi_physical_address_t *phys_out,
                         uint64_t *capacity_out);
-void arch_build_memory(struct boot_context *ctx,
-                       efi_physical_address_t desc_phys,
-                       uintn_t desc_size, uintn_t desc_count,
-                       uint32_t desc_version);
+efi_status_t arch_build_memory(struct boot_context *ctx,
+                               efi_physical_address_t desc_phys,
+                               uintn_t desc_size, uintn_t desc_count,
+                               uint32_t desc_version);
 void arch_release(void);
 void arch_puts(const char *s);
 __attribute__((noreturn)) void arch_enter_kernel(uint64_t entry,

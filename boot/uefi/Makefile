@@ -39,6 +39,7 @@ SRCS := $(ROOT)/boot/uefi/main.c \
         $(ROOT)/boot/uefi/boot_config.c \
         $(ROOT)/boot/uefi/boot_device.c \
         $(ROOT)/boot/uefi/arch/aarch64/boot.c \
+        $(ROOT)/boot/uefi/arch/aarch64/boot_memory.c \
         $(ROOT)/boot/uefi/arch/aarch64/elf.c \
         $(ROOT)/boot/uefi/arch/aarch64/fdt_early.c \
         $(ROOT)/boot/uefi/arch/aarch64/handoff.S
@@ -49,6 +50,8 @@ SRCS := $(ROOT)/boot/uefi/main.c \
 # invalidates the app objects and the EFI.
 UEFI_LAYOUT_HEADERS := $(ROOT)/kernel/include/arch/aarch64/boot_layout.h \
                        $(ROOT)/kernel/include/arch/aarch64/handoff_layout.h \
+                       $(ROOT)/kernel/include/arch/aarch64/fdt_address.h \
+                       $(ROOT)/kernel/include/arch/aarch64/uefi_memory_map.h \
                        $(ROOT)/boot/uefi/arch/aarch64/loader.h
 override UEFI_RUNTIME_CFLAGS += $(AARCH64_LAYOUT_CFLAGS)
 else

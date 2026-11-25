@@ -150,6 +150,49 @@ def main():
     one_cell_devices[2][2][1][1] = ('reg', cells(0x09000000, 0x1000))
     cases.append(('one_cell_device_addresses', one_cell_devices, 0, 0, [0]))
 
+    # Nested 1-cell/2-cell bus with empty ranges and translated bus
+    nested = fixture(missing='pl011')
+    nested[2].append(node('bus', [
+        ('#address-cells', cells(1)), ('#size-cells', cells(1)),
+        ('ranges', cells(0x0, 0x0, 0x09000000, 0x2000)),
+    ], [
+        node('sub', [
+            ('#address-cells', cells(1)), ('#size-cells', cells(1)),
+            ('ranges', b''),
+        ], [
+            node('pl011@0', [
+                ('compatible', string('arm,pl011')),
+                ('reg', cells(0x0, 0x1000)),
+            ]),
+        ]),
+    ]))
+    cases.append(('nested_empty_and_translated_ranges', nested, 0, 0, [0]))
+
+    # Intermediate bus missing ranges -> PL011 unreachable (-4)
+    no_ranges_bus = fixture(missing='pl011')
+    no_ranges_bus[2].append(node('bus', [
+        ('#address-cells', cells(2)), ('#size-cells', cells(2)),
+    ], [
+        node('pl011@9000000', [
+            ('compatible', string('arm,pl011')),
+            ('reg', cells(0, 0x09000000, 0, 0x1000)),
+        ]),
+    ]))
+    cases.append(('missing_ranges_bus', no_ranges_bus, 0, -4, []))
+
+    # Reg extends past ranges endpoint -> unreachable (-4)
+    partial_ranges_bus = fixture(missing='pl011')
+    partial_ranges_bus[2].append(node('bus', [
+        ('#address-cells', cells(1)), ('#size-cells', cells(1)),
+        ('ranges', cells(0x0, 0x0, 0x09000000, 0x0800)),
+    ], [
+        node('pl011@0', [
+            ('compatible', string('arm,pl011')),
+            ('reg', cells(0x0, 0x1000)),
+        ]),
+    ]))
+    cases.append(('reg_crosses_ranges_end', partial_ranges_bus, 0, -4, []))
+
     def with_pl011_irq(irq_cells):
         t = fixture()
         t[2][2][1].append(('interrupts', cells(*irq_cells)))

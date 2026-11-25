@@ -443,6 +443,233 @@ static void test_fdt_early_unterminated_tree(void)
     assert_eq(0, aarch64_fdt_early_mmio(w.buf, (uint32_t)size, &out));
 }
 
+static void fw_prop_str(struct fdt_writer *w, const char *name, const char *s)
+{
+    fw_prop(w, name, s, strlen(s) + 1u);
+}
+
+static void fw_prop_u32(struct fdt_writer *w, const char *name, uint32_t v)
+{
+    uint8_t b[4];
+    put_be32(b, v);
+    fw_prop(w, name, b, sizeof(b));
+}
+
+static void fw_prop_cells(struct fdt_writer *w, const char *name,
+                          const uint32_t *vals, size_t count)
+{
+    uint8_t b[64];
+    for (size_t i = 0; i < count; i++)
+        put_be32(b + i * 4u, vals[i]);
+    fw_prop(w, name, b, count * 4u);
+}
+
+static void test_fdt_boot_scan_stdout_alias_and_nested_buses(void)
+{
+    struct fdt_writer w;
+    struct aarch64_early_mmio_handoff out;
+    size_t size;
+    const uint32_t gic_reg[] = { 0, 0x08000000, 0, 0x10000, 0, 0x08010000, 0, 0x10000 };
+    const uint32_t u0_reg[] = { 0, 0x09000000, 0, 0x1000 };
+    const uint32_t u1_reg[] = { 0x00020000, 0x1000 };
+    const uint32_t bus_ranges[] = { 0x00000000, 0x0, 0x09000000, 0x00100000 };
+
+    fw_init(&w, 17);
+    fw_begin_node(&w, "");
+    fw_prop_u32(&w, "#address-cells", 2);
+    fw_prop_u32(&w, "#size-cells", 2);
+    fw_prop_str(&w, "compatible", "linux,dummy-virt");
+
+    fw_begin_node(&w, "chosen");
+    fw_prop_str(&w, "stdout-path", "serial1:115200n8");
+    fw_end_node(&w);
+
+    fw_begin_node(&w, "aliases");
+    fw_prop_str(&w, "serial1", "/bus/sub/pl011@20000");
+    fw_end_node(&w);
+
+    fw_begin_node(&w, "intc@8000000");
+    fw_prop_str(&w, "compatible", "arm,cortex-a15-gic");
+    fw_prop_cells(&w, "reg", gic_reg, 8);
+    fw_end_node(&w);
+
+    fw_begin_node(&w, "pl011@9000000");
+    fw_prop_str(&w, "compatible", "arm,pl011");
+    fw_prop_cells(&w, "reg", u0_reg, 4);
+    fw_end_node(&w);
+
+    fw_begin_node(&w, "bus");
+    fw_prop_u32(&w, "#address-cells", 1);
+    fw_prop_u32(&w, "#size-cells", 1);
+    fw_prop_cells(&w, "ranges", bus_ranges, 4);
+    fw_begin_node(&w, "sub");
+    fw_prop_u32(&w, "#address-cells", 1);
+    fw_prop_u32(&w, "#size-cells", 1);
+    fw_prop(&w, "ranges", "", 0); /* empty ranges = identity */
+    fw_begin_node(&w, "pl011@20000");
+    fw_prop_str(&w, "compatible", "arm,pl011");
+    fw_prop_cells(&w, "reg", u1_reg, 2);
+    fw_end_node(&w);
+    fw_end_node(&w);
+    fw_end_node(&w);
+
+    fw_end_node(&w);
+    fw_finish(&w, &size);
+
+    assert_eq(AARCH64_FDT_SCAN_OK,
+              aarch64_fdt_boot_scan(w.buf, (uint32_t)size, "linux,dummy-virt",
+                                    0, &out));
+    assert_eq(UINT64_C(0x09020000), out.console_base);
+    assert_eq(UINT64_C(0x08000000), out.device_base);
+    assert_eq(9u, out.device_blocks);
+
+    assert_eq(AARCH64_FDT_SCAN_PLATFORM_MISMATCH,
+              aarch64_fdt_boot_scan(w.buf, (uint32_t)size, "raspberrypi,5-model-b",
+                                    0, &out));
+}
+
+static void test_fdt_boot_scan_rejects_bad_stdout_and_missing_ranges(void)
+{
+    struct fdt_writer w;
+    struct aarch64_early_mmio_handoff out;
+    size_t size;
+    const uint32_t gic_reg[] = { 0, 0x08000000, 0, 0x10000, 0, 0x08010000, 0, 0x10000 };
+    const uint32_t u0_reg[] = { 0, 0x09000000, 0, 0x1000 };
+
+    /* Disabled stdout-path target */
+    fw_init(&w, 17);
+    fw_begin_node(&w, "");
+    fw_prop_u32(&w, "#address-cells", 2);
+    fw_prop_u32(&w, "#size-cells", 2);
+    fw_prop_str(&w, "compatible", "linux,dummy-virt");
+    fw_begin_node(&w, "chosen");
+    fw_prop_str(&w, "stdout-path", "/pl011@9000000");
+    fw_end_node(&w);
+    fw_begin_node(&w, "intc@8000000");
+    fw_prop_str(&w, "compatible", "arm,cortex-a15-gic");
+    fw_prop_cells(&w, "reg", gic_reg, 8);
+    fw_end_node(&w);
+    fw_begin_node(&w, "pl011@9000000");
+    fw_prop_str(&w, "compatible", "arm,pl011");
+    fw_prop_str(&w, "status", "disabled");
+    fw_prop_cells(&w, "reg", u0_reg, 4);
+    fw_end_node(&w);
+    fw_end_node(&w);
+    fw_finish(&w, &size);
+    assert_eq(AARCH64_FDT_SCAN_MISSING_MMIO,
+              aarch64_fdt_boot_scan(w.buf, (uint32_t)size, NULL, 0, &out));
+
+    /* Non-existent stdout-path target */
+    fw_init(&w, 17);
+    fw_begin_node(&w, "");
+    fw_prop_u32(&w, "#address-cells", 2);
+    fw_prop_u32(&w, "#size-cells", 2);
+    fw_begin_node(&w, "chosen");
+    fw_prop_str(&w, "stdout-path", "/no-such-uart");
+    fw_end_node(&w);
+    fw_begin_node(&w, "intc@8000000");
+    fw_prop_str(&w, "compatible", "arm,cortex-a15-gic");
+    fw_prop_cells(&w, "reg", gic_reg, 8);
+    fw_end_node(&w);
+    fw_begin_node(&w, "pl011@9000000");
+    fw_prop_str(&w, "compatible", "arm,pl011");
+    fw_prop_cells(&w, "reg", u0_reg, 4);
+    fw_end_node(&w);
+    fw_end_node(&w);
+    fw_finish(&w, &size);
+    assert_eq(AARCH64_FDT_SCAN_MISSING_MMIO,
+              aarch64_fdt_boot_scan(w.buf, (uint32_t)size, NULL, 0, &out));
+
+    /* Intermediate bus missing ranges property */
+    fw_init(&w, 17);
+    fw_begin_node(&w, "");
+    fw_prop_u32(&w, "#address-cells", 2);
+    fw_prop_u32(&w, "#size-cells", 2);
+    fw_begin_node(&w, "intc@8000000");
+    fw_prop_str(&w, "compatible", "arm,cortex-a15-gic");
+    fw_prop_cells(&w, "reg", gic_reg, 8);
+    fw_end_node(&w);
+    fw_begin_node(&w, "bus");
+    fw_prop_u32(&w, "#address-cells", 2);
+    fw_prop_u32(&w, "#size-cells", 2);
+    fw_begin_node(&w, "pl011@9000000");
+    fw_prop_str(&w, "compatible", "arm,pl011");
+    fw_prop_cells(&w, "reg", u0_reg, 4);
+    fw_end_node(&w);
+    fw_end_node(&w);
+    fw_end_node(&w);
+    fw_finish(&w, &size);
+    assert_eq(AARCH64_FDT_SCAN_MISSING_MMIO,
+              aarch64_fdt_boot_scan(w.buf, (uint32_t)size, NULL, 0, &out));
+}
+
+static void test_fdt_boot_scan_rpi5_firmware_mode_and_partial_ranges(void)
+{
+    struct fdt_writer w;
+    struct aarch64_early_mmio_handoff out;
+    size_t size;
+    const uint32_t soc_ranges[] = {
+        0x7fff9000, 0x10, 0x7fff9000, 0x00003000
+    };
+    const uint32_t gic_ok[] = {
+        0x7fff9000, 0x1000,
+        0x7fffa000, 0x2000
+    };
+    const uint32_t gic_cross_end[] = {
+        0x7fff9000, 0x1000,
+        0x7fffa000, 0x3000 /* ends at 0x7fffd000, past 0x7fffc000 */
+    };
+
+    /* Pi GIC-only fixture in firmware console mode */
+    fw_init(&w, 17);
+    fw_begin_node(&w, "");
+    fw_prop_u32(&w, "#address-cells", 2);
+    fw_prop_u32(&w, "#size-cells", 2);
+    fw_prop_str(&w, "compatible", "raspberrypi,5-model-b");
+    fw_begin_node(&w, "soc");
+    fw_prop_u32(&w, "#address-cells", 1);
+    fw_prop_u32(&w, "#size-cells", 1);
+    fw_prop_cells(&w, "ranges", soc_ranges, 4);
+    fw_begin_node(&w, "interrupt-controller@7fff9000");
+    fw_prop_str(&w, "compatible", "arm,gic-400");
+    fw_prop_cells(&w, "reg", gic_ok, 4);
+    fw_end_node(&w);
+    fw_end_node(&w);
+    fw_end_node(&w);
+    fw_finish(&w, &size);
+
+    assert_eq(AARCH64_FDT_SCAN_OK,
+              aarch64_fdt_boot_scan(w.buf, (uint32_t)size,
+                                    "raspberrypi,5-model-b",
+                                    UINT64_C(0x1f00030000), &out));
+    assert_eq(UINT64_C(0x1f00030000), out.console_base);
+    assert_eq(UINT64_C(0x107fe00000), out.device_base);
+    assert_eq(1u, out.device_blocks);
+
+    /* GICC crosses bus mapping endpoint -> rejected */
+    fw_init(&w, 17);
+    fw_begin_node(&w, "");
+    fw_prop_u32(&w, "#address-cells", 2);
+    fw_prop_u32(&w, "#size-cells", 2);
+    fw_prop_str(&w, "compatible", "raspberrypi,5-model-b");
+    fw_begin_node(&w, "soc");
+    fw_prop_u32(&w, "#address-cells", 1);
+    fw_prop_u32(&w, "#size-cells", 1);
+    fw_prop_cells(&w, "ranges", soc_ranges, 4);
+    fw_begin_node(&w, "interrupt-controller@7fff9000");
+    fw_prop_str(&w, "compatible", "arm,gic-400");
+    fw_prop_cells(&w, "reg", gic_cross_end, 4);
+    fw_end_node(&w);
+    fw_end_node(&w);
+    fw_end_node(&w);
+    fw_finish(&w, &size);
+
+    assert_eq(AARCH64_FDT_SCAN_MISSING_MMIO,
+              aarch64_fdt_boot_scan(w.buf, (uint32_t)size,
+                                    "raspberrypi,5-model-b",
+                                    UINT64_C(0x1f00030000), &out));
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_fdt_early_qemu_virt_shape),
     TEST_ENTRY(test_fdt_early_gic_only),
@@ -457,6 +684,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_fdt_early_unknown_token),
     TEST_ENTRY(test_fdt_early_offsets_out_of_range),
     TEST_ENTRY(test_fdt_early_unterminated_tree),
+    TEST_ENTRY(test_fdt_boot_scan_stdout_alias_and_nested_buses),
+    TEST_ENTRY(test_fdt_boot_scan_rejects_bad_stdout_and_missing_ranges),
+    TEST_ENTRY(test_fdt_boot_scan_rpi5_firmware_mode_and_partial_ranges),
 TEST_LIST_END
 
 int main(void)

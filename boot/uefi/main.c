@@ -425,64 +425,72 @@ int main(int argc, char_t **argv)
     }
 
     arch_memory_buffer(&desc_phys, &desc_capacity);
-    for (;;) {
-        status = BS->GetMemoryMap(&map_size, NULL, &map_key,
-                                  &desc_size, &desc_version);
-        if (status != EFI_BUFFER_TOO_SMALL || desc_size == 0)
-            break;
-        /* Fixed-capacity discipline (aarch64's established behavior): if the
-         * map grows between the size query and the fetch, fail rather than
-         * reallocate — the descriptor buffer is pre-reserved and must not be
-         * reallocated after it has been committed. A BUFFER_TOO_SMALL here
-         * is intentionally an error, not a retry. */
-        if ((uint64_t)map_size + UEFI_MAP_SLACK * desc_size > desc_capacity) {
-            arch_puts("UEFI: memory map overflow\r\n");
-            status = EFI_BUFFER_TOO_SMALL;
-            break;
+    {
+        int ebs_attempted = 0;
+
+        for (;;) {
+            status = BS->GetMemoryMap(&map_size, NULL, &map_key,
+                                      &desc_size, &desc_version);
+            if (status != EFI_BUFFER_TOO_SMALL || desc_size == 0) {
+                if (ebs_attempted)
+                    for (;;) ;
+                break;
+            }
+            /* Fixed-capacity discipline: if the map grows beyond the
+             * pre-reserved buffer, fail rather than reallocate. */
+            if ((uint64_t)map_size + UEFI_MAP_SLACK * desc_size > desc_capacity) {
+                if (ebs_attempted)
+                    for (;;) ;
+                arch_puts("UEFI: memory map overflow\r\n");
+                status = EFI_BUFFER_TOO_SMALL;
+                break;
+            }
+            if (map_size / desc_size > UINT32_MAX) {
+                if (ebs_attempted)
+                    for (;;) ;
+                arch_puts("UEFI: memory map too large\r\n");
+                status = EFI_LOAD_ERROR;
+                break;
+            }
+            status = BS->GetMemoryMap(&map_size, (void *)(uintptr_t)desc_phys,
+                                      &map_key, &desc_size, &desc_version);
+            if (EFI_ERROR(status)) {
+                if (ebs_attempted)
+                    for (;;) ;
+                break;
+            }
+            if (map_size % desc_size != 0) {
+                if (ebs_attempted)
+                    for (;;) ;
+                arch_puts("UEFI: corrupt handoff\r\n");
+                status = EFI_LOAD_ERROR;
+                break;
+            }
+            status = arch_build_memory(ctx, desc_phys, desc_size,
+                                       (uint32_t)(map_size / desc_size),
+                                       desc_version);
+            if (EFI_ERROR(status)) {
+                if (ebs_attempted)
+                    for (;;) ;
+                arch_puts("UEFI: unsafe memory map\r\n");
+                break;
+            }
+            if (!boot_context_valid(ctx)) {
+                if (ebs_attempted)
+                    for (;;) ;
+                arch_puts("UEFI: corrupt handoff\r\n");
+                status = EFI_LOAD_ERROR;
+                break;
+            }
+            ebs_attempted = 1;
+            status = BS->ExitBootServices(IM, map_key);
+            if (status == EFI_INVALID_PARAMETER)
+                continue;                    /* map changed: refetch */
+            if (EFI_ERROR(status)) {
+                for (;;) ;
+            }
+            arch_enter_kernel(entry, (uint64_t)ctx);   /* noreturn */
         }
-        if (map_size / desc_size > UINT32_MAX) {
-            arch_puts("UEFI: memory map too large\r\n");
-            status = EFI_LOAD_ERROR;
-            break;
-        }
-        status = BS->GetMemoryMap(&map_size, (void *)(uintptr_t)desc_phys,
-                                  &map_key, &desc_size, &desc_version);
-        if (EFI_ERROR(status))
-            break;
-        if (map_size % desc_size != 0) {
-            /* Corrupt handoff: the firmware filled the buffer with a
-             * size that is not a whole number of descriptors, so the
-             * stream is unaligned with desc_size and cannot be safely
-             * walked. */
-            arch_puts("UEFI: corrupt handoff\r\n");
-            status = EFI_LOAD_ERROR;
-            break;
-        }
-        arch_build_memory(ctx, desc_phys, desc_size,
-                          (uint32_t)(map_size / desc_size), desc_version);
-        if (!boot_context_valid(ctx)) {
-            arch_puts("UEFI: corrupt handoff\r\n");
-            status = EFI_LOAD_ERROR;
-            break;
-        }
-#if defined(AARCH64_SKIP_EBS) && AARCH64_SKIP_EBS
-        /* Bring-up workaround: the Raspberry Pi 5 UEFI tears down the
-         * PCIe/RP1 path as it shuts down, taking the CPU's access to the
-         * header UART with it (and its USB shutdown is a known lockup
-         * source). Cancel the watchdog and enter the kernel with boot
-         * services resident; the kernel masks IRQs in its first
-         * instruction and never calls back into firmware services. */
-        if (BS->SetWatchdogTimer)
-            (void)BS->SetWatchdogTimer(0, 0, 0, NULL);
-        status = EFI_SUCCESS;
-#else
-        status = BS->ExitBootServices(IM, map_key);
-        if (status == EFI_INVALID_PARAMETER)
-            continue;                    /* map changed: refetch */
-        if (EFI_ERROR(status))
-            break;
-#endif
-        arch_enter_kernel(entry, (uint64_t)ctx);   /* noreturn */
     }
 
 fail:

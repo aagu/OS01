@@ -1,6 +1,7 @@
 #ifndef OS01_UEFI_AARCH64_LOADER_H
 #define OS01_UEFI_AARCH64_LOADER_H
 
+#include <stdbool.h>
 #include <stdint.h>
 
 /* boot/uefi has no -Ikernel/include, so include the shared handoff
@@ -113,8 +114,24 @@ struct aarch64_early_mmio_handoff {
  * enclosing bus's ranges property, and nodes with status != okay are
  * skipped (a disabled PL011 still stands in as the console when no
  * enabled one exists). */
+enum aarch64_fdt_scan_result {
+    AARCH64_FDT_SCAN_OK = 0,
+    AARCH64_FDT_SCAN_INVALID = 1,
+    AARCH64_FDT_SCAN_PLATFORM_MISMATCH = 2,
+    AARCH64_FDT_SCAN_MISSING_MMIO = 3,
+};
+
+struct boot_context;
+
 int aarch64_fdt_early_mmio(const void *fdt, uint32_t fdt_size,
                            struct aarch64_early_mmio_handoff *out);
+enum aarch64_fdt_scan_result aarch64_fdt_boot_scan(
+    const void *blob, uint32_t size, const char *required_compatible,
+    uint64_t firmware_console_pa, struct aarch64_early_mmio_handoff *out);
+
+bool aarch64_fw_dtb_readable(const void *map, uint32_t entry_size,
+                             uint32_t count, uint64_t pa, uint64_t length);
+bool aarch64_early_mmio_map_safe(const struct boot_context *ctx);
 
 static inline int aarch64_handoff_el_supported(uint64_t current_el)
 {

@@ -219,10 +219,10 @@ static void x86_build_e820(efi_memory_descriptor_t *map, uintn_t map_size,
     *count_out = count;
 }
 
-void arch_build_memory(struct boot_context *ctx,
-                       efi_physical_address_t desc_phys,
-                       uintn_t desc_size, uintn_t desc_count,
-                       uint32_t desc_version)
+efi_status_t arch_build_memory(struct boot_context *ctx,
+                               efi_physical_address_t desc_phys,
+                               uintn_t desc_size, uintn_t desc_count,
+                               uint32_t desc_version)
 {
     struct E820_ENTRY *e820 = (struct E820_ENTRY *)(uintptr_t)X86_E820_BASE;
     uint32_t count = 0;
@@ -254,6 +254,7 @@ void arch_build_memory(struct boot_context *ctx,
     ctx->memory.format = BOOT_MEMORY_FORMAT_E820;
     ctx->memory.descriptor_version = 0;
     ctx->flags |= BOOT_CONTEXT_HAS_MEMORY_MAP;
+    return EFI_SUCCESS;
 }
 
 void arch_release(void)

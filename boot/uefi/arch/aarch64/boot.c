@@ -331,46 +331,148 @@ static EFI_STATUS prepare_trampoline(void)
     return EFI_SUCCESS;
 }
 
-static const void *find_fdt(uint32_t *size_out)
+static EFI_STATUS fetch_preliminary_mmap(void **buf_out, uint32_t *desc_size_out,
+                                         uint32_t *count_out)
+{
+    uintn_t map_size = 0, map_key = 0, desc_size = 0;
+    uint32_t desc_version = 0;
+    void *buf = NULL;
+    EFI_STATUS status;
+
+    status = BS->GetMemoryMap(&map_size, NULL, &map_key,
+                              &desc_size, &desc_version);
+    if (status != EFI_BUFFER_TOO_SMALL || desc_size < 40u)
+        return EFI_LOAD_ERROR;
+
+    for (unsigned attempt = 0u; attempt < 4u; attempt++) {
+        uintn_t alloc_size = map_size + (uintn_t)desc_size * 8u;
+        buf = malloc(alloc_size);
+        if (!buf)
+            return EFI_OUT_OF_RESOURCES;
+        map_size = alloc_size;
+        status = BS->GetMemoryMap(&map_size, (efi_memory_descriptor_t *)buf,
+                                  &map_key, &desc_size, &desc_version);
+        if (!EFI_ERROR(status)) {
+            if (desc_size < 40u || (map_size % desc_size) != 0u ||
+                map_size == 0u || map_size / desc_size > UINT32_C(0xffffffff)) {
+                free(buf);
+                return EFI_LOAD_ERROR;
+            }
+            *buf_out = buf;
+            *desc_size_out = (uint32_t)desc_size;
+            *count_out = (uint32_t)(map_size / desc_size);
+            return EFI_SUCCESS;
+        }
+        free(buf);
+        buf = NULL;
+        if (status != EFI_BUFFER_TOO_SMALL)
+            return status;
+    }
+    return EFI_BUFFER_TOO_SMALL;
+}
+
+static EFI_STATUS alloc_handoff_pages(uintn_t pages,
+                                      efi_physical_address_t *addr_out);
+
+static EFI_STATUS copy_fdt_to_handoff(const void *src, uint32_t fdt_size,
+                                      efi_physical_address_t *phys_out,
+                                      uintn_t *pages_out)
+{
+    efi_physical_address_t fdt_phys = 0;
+    uintn_t fdt_pages = (uintn_t)(((uint64_t)fdt_size + AARCH64_PAGE_SIZE - 1u) /
+                                  AARCH64_PAGE_SIZE);
+    EFI_STATUS status;
+
+    status = alloc_handoff_pages(fdt_pages, &fdt_phys);
+    if (EFI_ERROR(status))
+        return status;
+    memset((void *)(uintptr_t)fdt_phys, 0,
+           (size_t)fdt_pages * (size_t)AARCH64_PAGE_SIZE);
+    memcpy((void *)(uintptr_t)fdt_phys, src, (size_t)fdt_size);
+    *phys_out = fdt_phys;
+    *pages_out = fdt_pages;
+    return EFI_SUCCESS;
+}
+
+static EFI_STATUS load_and_copy_fdt(const struct uefi_boot_config *config,
+                                    efi_physical_address_t *phys_out,
+                                    uintn_t *pages_out,
+                                    uint32_t *size_out)
 {
     uintn_t index;
 
-    if (!size_out || !ST || !ST->ConfigurationTable)
-        return NULL;
+    if (!phys_out || !pages_out || !size_out || !ST || !ST->ConfigurationTable)
+        return EFI_INVALID_PARAMETER;
+
     for (index = 0; index < ST->NumberOfTableEntries; index++) {
         const efi_configuration_table_t *table = &ST->ConfigurationTable[index];
         const uint8_t *fdt = (const uint8_t *)table->VendorTable;
         uint32_t total_size;
 
-        if (!guid_equal(&table->VendorGuid, &fdt_table_guid) || !fdt)
+        if (!guid_equal(&table->VendorGuid, &fdt_table_guid))
             continue;
-        if (load_be32(fdt) != AARCH64_FDT_MAGIC)
-            return NULL;
-        total_size = load_be32(fdt + sizeof(uint32_t));
-        if (total_size < AARCH64_FDT_HEADER_SIZE)
-            return NULL;
-        *size_out = total_size;
-        return fdt;
-    }
-
-    /* Raspberry Pi 5: the VideoCore firmware loads the device tree at PA
-     * 0x1f0000 (its log: "Loading 'bcm2712-rpi-5-b.dtb' ... offset
-     * 0x1f0000") even when the UEFI does not install the EFI DTB
-     * configuration table. Fall back to that copy. */
-    {
-        const uint8_t *fw_fdt = (const uint8_t *)(uintptr_t)UINT64_C(0x1f0000);
-        uint32_t total_size;
-
-        if (load_be32(fw_fdt) == AARCH64_FDT_MAGIC) {
-            total_size = load_be32(fw_fdt + sizeof(uint32_t));
-            if (total_size >= AARCH64_FDT_HEADER_SIZE &&
-                total_size <= UINT32_C(0x200000)) {
-                *size_out = total_size;
-                return fw_fdt;
-            }
+        if (!fdt || load_be32(fdt) != AARCH64_FDT_MAGIC) {
+            uefi_puts("UEFI-A64: corrupt EFI DTB\r\n");
+            return EFI_LOAD_ERROR;
         }
+        total_size = load_be32(fdt + sizeof(uint32_t));
+        if (total_size < AARCH64_FDT_HEADER_SIZE ||
+            total_size > UINT32_C(0x200000)) {
+            uefi_puts("UEFI-A64: corrupt EFI DTB\r\n");
+            return EFI_LOAD_ERROR;
+        }
+        *size_out = total_size;
+        return copy_fdt_to_handoff(fdt, total_size, phys_out, pages_out);
     }
-    return NULL;
+
+    /* EFI DTB table absent: only explicit RPi5 may fall back to VideoCore's
+     * reserved DTB window [0x1f0000, 0x210000) after verifying readability in
+     * the preliminary EFI memory map. */
+    if (!config || config->platform != UEFI_BOOT_PLATFORM_RPI5) {
+        uefi_puts("UEFI-A64: missing DTB\r\n");
+        return EFI_NOT_FOUND;
+    }
+
+    {
+        const uint64_t fw_pa = UINT64_C(0x1f0000);
+        const uint8_t *fw_fdt = (const uint8_t *)(uintptr_t)fw_pa;
+        void *mmap = NULL;
+        uint32_t desc_size = 0, desc_count = 0, total_size = 0;
+        EFI_STATUS status;
+
+        status = fetch_preliminary_mmap(&mmap, &desc_size, &desc_count);
+        if (EFI_ERROR(status)) {
+            uefi_puts("UEFI-A64: preliminary memory map failed\r\n");
+            return status;
+        }
+        if (!aarch64_fw_dtb_readable(mmap, desc_size, desc_count,
+                                     fw_pa, AARCH64_FDT_HEADER_SIZE)) {
+            free(mmap);
+            uefi_puts("UEFI-A64: firmware DTB unreadable\r\n");
+            return EFI_NOT_FOUND;
+        }
+        if (load_be32(fw_fdt) != AARCH64_FDT_MAGIC) {
+            free(mmap);
+            uefi_puts("UEFI-A64: corrupt firmware DTB\r\n");
+            return EFI_LOAD_ERROR;
+        }
+        total_size = load_be32(fw_fdt + sizeof(uint32_t));
+        if (total_size < AARCH64_FDT_HEADER_SIZE ||
+            total_size > UINT32_C(0x20000)) {
+            free(mmap);
+            uefi_puts("UEFI-A64: corrupt firmware DTB\r\n");
+            return EFI_LOAD_ERROR;
+        }
+        if (!aarch64_fw_dtb_readable(mmap, desc_size, desc_count,
+                                     fw_pa, total_size)) {
+            free(mmap);
+            uefi_puts("UEFI-A64: firmware DTB truncated in memory map\r\n");
+            return EFI_LOAD_ERROR;
+        }
+        free(mmap);
+        *size_out = total_size;
+        return copy_fdt_to_handoff(fw_fdt, total_size, phys_out, pages_out);
+    }
 }
 
 const char_t *arch_kernel_path(void)
@@ -638,62 +740,53 @@ efi_status_t arch_setup_graphics(struct boot_context *ctx,
 efi_status_t arch_fill_firmware(struct boot_context *ctx,
                                 const struct uefi_boot_config *config)
 {
-    const void *firmware_fdt;
+    efi_physical_address_t fdt_phys = 0;
+    uintn_t fdt_pages = 0;
     uint32_t fdt_size = 0;
+    const char *required_compat = NULL;
+    uint64_t fw_console_pa = 0u;
+    struct aarch64_early_mmio_handoff early_mmio;
+    enum aarch64_fdt_scan_result scan_rc;
     EFI_STATUS status;
 
-    (void)config;
+    status = load_and_copy_fdt(config, &fdt_phys, &fdt_pages, &fdt_size);
+    if (EFI_ERROR(status))
+        return status;
 
-    firmware_fdt = find_fdt(&fdt_size);
-    if (firmware_fdt) {
-        struct aarch64_early_mmio_handoff early_mmio;
-        efi_physical_address_t fdt_phys = 0;
-        uintn_t fdt_pages = (uintn_t)(((uint64_t)fdt_size + AARCH64_PAGE_SIZE - 1) /
-                                      AARCH64_PAGE_SIZE);
+    aarch64_fdt_phys = fdt_phys;
+    aarch64_fdt_pages = fdt_pages;
+    ctx->firmware.dtb = (uint64_t)fdt_phys;
+    ctx->flags |= BOOT_CONTEXT_HAS_DTB;
 
-        status = alloc_handoff_pages(fdt_pages, &fdt_phys);
-        if (EFI_ERROR(status))
-            return status;
-        aarch64_fdt_phys = fdt_phys;
-        aarch64_fdt_pages = fdt_pages;
-        memset((void *)(uintptr_t)fdt_phys, 0,
-               (size_t)fdt_pages * (size_t)AARCH64_PAGE_SIZE);
-        memcpy((void *)(uintptr_t)fdt_phys, firmware_fdt, (size_t)fdt_size);
-        ctx->firmware.dtb = (uint64_t)fdt_phys;
-        ctx->flags |= BOOT_CONTEXT_HAS_DTB;
+    if (config) {
+        if (config->platform == UEFI_BOOT_PLATFORM_QEMU_VIRT)
+            required_compat = "linux,dummy-virt";
+        else if (config->platform == UEFI_BOOT_PLATFORM_RPI5)
+            required_compat = "raspberrypi,5-model-b";
 
-        /* Derive the early console PA + Device window from the same
-         * firmware FDT (fail-quiet: an unusable derivation leaves the
-         * boot_context fields unset so the kernel falls back to its
-         * compile-time QEMU defaults). */
-        if (aarch64_fdt_early_mmio(firmware_fdt, fdt_size, &early_mmio)) {
-            ctx->early_mmio.console_base = early_mmio.console_base;
-            ctx->early_mmio.device_base = early_mmio.device_base;
-            ctx->early_mmio.device_blocks = early_mmio.device_blocks;
-            ctx->early_mmio.reserved = 0;
-            ctx->flags |= BOOT_CONTEXT_HAS_EARLY_MMIO;
-        }
+        if (config->console == UEFI_BOOT_CONSOLE_RP1_HEADER)
+            fw_console_pa = UINT64_C(0x1f00030000);
     }
-#ifdef AARCH64_FIRMWARE_CONSOLE_PA
-    /* The console is the UART the firmware brought up, wherever the device
-     * tree put the PL011 (Raspberry Pi 5: the DTB names the SoC UART on the
-     * debug connector, the 40-pin header carries RP1's). The kernel maps its
-     * block beside the device window; when no window could be derived at
-     * all, that block stands in as the window so diagnostics still get out. */
-    if ((ctx->flags & BOOT_CONTEXT_HAS_EARLY_MMIO) == 0u) {
-        ctx->early_mmio.device_base =
-            (uint64_t)AARCH64_FIRMWARE_CONSOLE_PA & ~UINT64_C(0x1fffff);
-        ctx->early_mmio.device_blocks = 1;
-        ctx->early_mmio.reserved = 0;
-        ctx->flags |= BOOT_CONTEXT_HAS_EARLY_MMIO;
+
+    scan_rc = aarch64_fdt_boot_scan((const void *)(uintptr_t)fdt_phys, fdt_size,
+                                    required_compat, fw_console_pa, &early_mmio);
+    if (scan_rc == AARCH64_FDT_SCAN_PLATFORM_MISMATCH) {
+        uefi_puts("UEFI-A64: platform mismatch\r\n");
+        return EFI_LOAD_ERROR;
     }
-    ctx->early_mmio.console_base = (uint64_t)AARCH64_FIRMWARE_CONSOLE_PA;
-#endif
-    /* Best-effort: if EFI_RNG_PROTOCOL is present, fetch 32 bytes
-     * of boot entropy for the kernel CSPRNG. Without this, aarch64
-     * (RNDR not yet wired) would land in the cycle-counter ^ jiffies
-     * fallback and random_init() would fail-closed, aborting every
-     * user-space program on its all-zero canary. */
+    if (scan_rc != AARCH64_FDT_SCAN_OK) {
+        uefi_puts("UEFI-A64: DTB missing early MMIO\r\n");
+        return EFI_LOAD_ERROR;
+    }
+
+    ctx->early_mmio.console_base = early_mmio.console_base;
+    ctx->early_mmio.device_base = early_mmio.device_base;
+    ctx->early_mmio.device_blocks = early_mmio.device_blocks;
+    ctx->early_mmio.reserved = 0u;
+    ctx->flags |= BOOT_CONTEXT_HAS_EARLY_MMIO;
+    if (fw_console_pa != 0u)
+        ctx->flags |= BOOT_CONTEXT_CONSOLE_FIRMWARE_CONFIGURED;
+
     status = capture_entropy(ctx);
     fb_beacon_bar(2);   /* firmware tables (FDT, early MMIO, entropy) ready */
     return status;
@@ -753,10 +846,31 @@ void arch_memory_buffer(efi_physical_address_t *phys_out,
     *capacity_out = (uint64_t)pages * AARCH64_PAGE_SIZE;
 }
 
-void arch_build_memory(struct boot_context *ctx,
-                       efi_physical_address_t desc_phys,
-                       uintn_t desc_size, uintn_t desc_count,
-                       uint32_t desc_version)
+static int range_overlaps_mmio(uint64_t start, uint64_t size,
+                               const struct boot_context *ctx)
+{
+    uint64_t end;
+    uint64_t win_base = ctx->early_mmio.device_base;
+    uint64_t win_end = win_base + ((uint64_t)ctx->early_mmio.device_blocks << 21);
+
+    if (size == 0u || start > (~UINT64_C(0)) - size)
+        return 1;
+    end = start + size;
+    if (start < win_end && win_base < end)
+        return 1;
+    if ((ctx->flags & BOOT_CONTEXT_CONSOLE_FIRMWARE_CONFIGURED) != 0u) {
+        uint64_t cbase = ctx->early_mmio.console_base & ~UINT64_C(0x1fffff);
+        uint64_t cend = cbase + UINT64_C(0x200000);
+        if (start < cend && cbase < end)
+            return 1;
+    }
+    return 0;
+}
+
+efi_status_t arch_build_memory(struct boot_context *ctx,
+                               efi_physical_address_t desc_phys,
+                               uintn_t desc_size, uintn_t desc_count,
+                               uint32_t desc_version)
 {
     ctx->memory.entries = desc_phys;
     ctx->memory.entry_count = (uint32_t)desc_count;
@@ -764,6 +878,18 @@ void arch_build_memory(struct boot_context *ctx,
     ctx->memory.format = BOOT_MEMORY_FORMAT_UEFI_RAW;
     ctx->memory.descriptor_version = desc_version;
     ctx->flags |= BOOT_CONTEXT_HAS_MEMORY_MAP;
+
+    if (!aarch64_early_mmio_map_safe(ctx) ||
+        range_overlaps_mmio((uint64_t)AARCH64_TRAMPOLINE_BASE,
+                            (uint64_t)AARCH64_PAGE_SIZE, ctx) ||
+        range_overlaps_mmio((uint64_t)aarch64_ctx_phys,
+                            (uint64_t)AARCH64_PAGE_SIZE, ctx) ||
+        range_overlaps_mmio((uint64_t)aarch64_fdt_phys,
+                            (uint64_t)aarch64_fdt_pages * AARCH64_PAGE_SIZE, ctx) ||
+        range_overlaps_mmio((uint64_t)aarch64_mmap_phys,
+                            (uint64_t)aarch64_mmap_pages * AARCH64_PAGE_SIZE, ctx))
+        return EFI_SECURITY_VIOLATION;
+
 #if defined(AARCH64_FIRMWARE_CONSOLE_PA) && AARCH64_FW_CONSOLE_BEACON
     {
         /* One round per GetMemoryMap → ExitBootServices attempt. */
@@ -775,6 +901,7 @@ void arch_build_memory(struct boot_context *ctx,
         pre_ebs_uart_mark(UINT64_C(0x1f00030000), 'Q');
     }
 #endif
+    return EFI_SUCCESS;
 }
 
 void arch_release(void)

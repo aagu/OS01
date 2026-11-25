@@ -1,28 +1,17 @@
 /* boot/uefi/arch/aarch64/fdt_early.c — derive the early-MMIO handoff
  * from the firmware device tree.
  *
- * The boot page tables map one contiguous run of 2 MiB Device blocks
- * (head.S) and the M1 runtime tree reproduces it (device_window.c).
- * On QEMU virt that window used to be compile-time [0x08000000,
- * 0x0a000000); here it is derived from the devices the kernel actually
- * touches through it: the early PL011 console and the GICv2 interrupt
- * controller (all reg pairs, covering GICD/GICC/v2m).
- *
- * Deliberately minimal (freestanding, no libc): a malformed or foreign
- * blob yields "not found" and the kernel falls back to its compile-time
- * defaults. Per the device-tree spec, a node's reg is interpreted with
- * the PARENT's #address-cells/#size-cells, so the cells values are
- * inherited down the tree as nodes open.
- *
- * Devices may sit on nested buses (BCM2712 keeps its PL011 and GIC-400
- * under /soc): every enclosing bus's ranges property translates a child
- * address one level up, and a bus without ranges is transparent. Only
- * enabled nodes are used, with one exception spelled out in
- * scan_close_node().
+ * Shares single-step bus translation (fdt_address.h) with the kernel's
+ * DTB parser.  Provides both the legacy pure-extraction helper
+ * aarch64_fdt_early_mmio() and the boot-time policy entry
+ * aarch64_fdt_boot_scan().
  */
+#include <stdbool.h>
+#include <stddef.h>
 #include <stdint.h>
 
 #include "loader.h"
+#include "../../../../kernel/include/arch/aarch64/fdt_address.h"
 
 #define FDT_MAGIC           UINT32_C(0xd00dfeed)
 #define FDT_BEGIN_NODE      UINT32_C(0x00000001)
@@ -30,13 +19,17 @@
 #define FDT_PROP            UINT32_C(0x00000003)
 #define FDT_NOP             UINT32_C(0x00000004)
 #define FDT_END             UINT32_C(0x00000009)
-#define FDT_HEADER_SIZE     40
-#define FDT_MIN_VERSION     3   /* property names live in the strings block */
+#define FDT_HEADER_SIZE     40u
+#define FDT_MIN_VERSION     3u
 
-#define MMIO_BLOCK_SHIFT    21
+#define MMIO_BLOCK_SHIFT    21u
 #define MMIO_BLOCK_BYTES    (UINT64_C(1) << MMIO_BLOCK_SHIFT)
-#define MMIO_MAX_BLOCKS     1024
-#define FDT_MAX_DEPTH       63
+#define MMIO_MAX_BLOCKS     1024u
+#define FDT_MAX_DEPTH       63u
+
+#define PL011_MIN_REG_SPAN  UINT64_C(0x48)
+#define GIC_MIN_REG_SPAN    UINT64_C(0x1000)
+#define FDT_PATH_MAX        256u
 
 static uint32_t load_be32(const void *address)
 {
@@ -58,8 +51,6 @@ static uint64_t load_be_cells(const uint32_t *cells, unsigned count)
     return value;
 }
 
-/* Bounds-safe property-name equality: `name` must be `lit` followed by
- * a NUL, without reading past `limit`. */
 static int prop_name_is(const uint8_t *name, const uint8_t *limit,
                         const char *lit)
 {
@@ -72,8 +63,6 @@ static int prop_name_is(const uint8_t *name, const uint8_t *limit,
     return name + i < limit && name[i] == 0;
 }
 
-/* The compatible value is a concatenation of NUL-terminated strings;
- * one of them must equal `name` exactly. */
 static int compat_matches(const uint8_t *value, uint32_t len,
                           const char *name)
 {
@@ -95,25 +84,77 @@ static int compat_matches(const uint8_t *value, uint32_t len,
     return 0;
 }
 
-/* status is absent, or is exactly okay/ok: the firmware left the node on. */
 static int node_is_enabled(const uint8_t *status, uint32_t len)
 {
     return !status || compat_matches(status, len, "okay") ||
            compat_matches(status, len, "ok");
 }
 
-struct early_mmio_scan {
-    uint64_t window_base;      /* byte-aligned low bound, pre-snap */
-    uint64_t window_end;       /* byte-aligned high bound, pre-snap */
-    uint64_t console_base;
-    int have_device;
-    int have_console;
-    int console_enabled;       /* the chosen console came from an enabled node */
+static bool cstr_eq_n(const char *a, size_t a_len, const char *b)
+{
+    size_t i = 0;
+
+    while (i < a_len && b[i] != '\0') {
+        if (a[i] != b[i])
+            return false;
+        i++;
+    }
+    return i == a_len && b[i] == '\0';
+}
+
+static size_t strlen_bounded(const char *s, uint32_t max_bytes)
+{
+    size_t n = 0;
+
+    while (n < max_bytes && s[n] != '\0')
+        n++;
+    return n;
+}
+
+struct fdt_header_info {
+    uint32_t off_struct;
+    uint32_t struct_end;
+    uint32_t off_strings;
 };
 
-/* Every open node's cells and the properties the close hook needs, indexed
- * by depth (1 = root). A node's reg and ranges are encoded with the cells
- * of the node above it, which is what translating an address walks. */
+static bool fdt_validate_header(const uint8_t *blob, uint32_t fdt_size,
+                                struct fdt_header_info *hdr)
+{
+    uint32_t totalsize, off_struct, size_struct, off_strings, version;
+
+    if (!blob || fdt_size < FDT_HEADER_SIZE)
+        return false;
+    if (load_be32(blob) != FDT_MAGIC)
+        return false;
+    totalsize = load_be32(blob + 4);
+    off_struct = load_be32(blob + 8);
+    off_strings = load_be32(blob + 12);
+    version = load_be32(blob + 20);
+    size_struct = load_be32(blob + 36);
+    if (totalsize == 0 || totalsize > fdt_size ||
+        off_struct >= fdt_size || size_struct == 0 ||
+        size_struct > fdt_size - off_struct ||
+        off_strings >= fdt_size || version < FDT_MIN_VERSION)
+        return false;
+    hdr->off_struct = off_struct;
+    hdr->struct_end = off_struct + size_struct;
+    hdr->off_strings = off_strings;
+    return true;
+}
+
+struct early_mmio_scan {
+    uint64_t window_base;
+    uint64_t window_end;
+    uint64_t console_base;
+    int have_device;
+    int have_gic;
+    int have_console;
+    int console_enabled;
+    int boot_mode;
+    int have_target_path;
+    char target_path[FDT_PATH_MAX];
+};
+
 struct fdt_ancestry {
     unsigned address_cells[FDT_MAX_DEPTH + 1];
     unsigned size_cells[FDT_MAX_DEPTH + 1];
@@ -123,83 +164,71 @@ struct fdt_ancestry {
     uint32_t reg_len[FDT_MAX_DEPTH + 1];
     const uint32_t *ranges[FDT_MAX_DEPTH + 1];
     uint32_t ranges_len[FDT_MAX_DEPTH + 1];
+    bool has_ranges[FDT_MAX_DEPTH + 1];
     const uint8_t *status[FDT_MAX_DEPTH + 1];
     uint32_t status_len[FDT_MAX_DEPTH + 1];
+    bool tree_enabled[FDT_MAX_DEPTH + 1];
+    uint16_t path_len[FDT_MAX_DEPTH + 1];
+    char path[FDT_PATH_MAX];
 };
 
-static void scan_add_reg(struct early_mmio_scan *scan, uint64_t base,
+static bool scan_add_reg(struct early_mmio_scan *scan, uint64_t base,
                          uint64_t size)
 {
-    if (size == 0)
-        return;
+    if (size == 0 || size > UINT64_MAX - base)
+        return false;
     if (!scan->have_device || base < scan->window_base)
         scan->window_base = base;
     if (!scan->have_device || base + size > scan->window_end)
         scan->window_end = base + size;
     scan->have_device = 1;
+    return true;
 }
 
-/* Translate `addr`, a bus address in the parent space of the node at
- * `depth`, into the CPU physical view: each enclosing bus with a non-empty
- * ranges remaps it through its first covering entry, buses without one are
- * transparent, and the root's own ranges is never applied. Returns 0 when
- * a bus cannot be decoded or no entry covers the address. */
-static int to_cpu_pa(const struct fdt_ancestry *an, unsigned depth,
-                     uint64_t *addr)
+static bool to_cpu_pa_span(const struct fdt_ancestry *an, unsigned depth,
+                           uint64_t size, uint64_t *addr)
 {
-    unsigned d;
-
-    for (d = depth - 1; d > 1; --d) {
-        const uint8_t *ranges = (const uint8_t *)an->ranges[d];
-        uint32_t len = an->ranges_len[d];
-        unsigned child_cells = an->address_cells[d];
-        unsigned size_cells = an->size_cells[d];
-        unsigned parent_cells = an->address_cells[d - 1];
-        uint32_t stride;
-        uint32_t off;
-        int hit = 0;
-
-        if (!len)
-            continue;
-        if (child_cells < 1 || child_cells > 2 ||
-            size_cells < 1 || size_cells > 2 ||
-            parent_cells < 1 || parent_cells > 2)
-            return 0;
-        /* One entry = <child-addr: bus cells> <parent-addr: parent cells>
-         * <size: bus cells>. */
-        stride = (child_cells + parent_cells + size_cells) * 4u;
-        if (len % stride != 0u)
-            return 0;
-        for (off = 0; off < len && !hit; off += stride) {
-            const uint32_t *entry = (const uint32_t *)(ranges + off);
-            uint64_t child = load_be_cells(entry, child_cells);
-            uint64_t size = load_be_cells(entry + child_cells + parent_cells,
-                                          size_cells);
-            uint64_t parent;
-            uint64_t delta;
-
-            /* Containment without computing child + size (may overflow). */
-            if (*addr < child || *addr - child >= size)
-                continue;
-            parent = load_be_cells(entry + child_cells, parent_cells);
-            delta = *addr - child;
-            if (parent > (~UINT64_C(0)) - delta)
-                return 0;
-            *addr = parent + delta;
-            hit = 1;
-        }
-        if (!hit)
-            return 0;
+    for (unsigned d = depth - 1; d > 1; --d) {
+        struct aarch64_fdt_bus bus = {
+            .ranges = (const uint8_t *)an->ranges[d],
+            .ranges_len = an->ranges_len[d],
+            .child_cells = an->address_cells[d],
+            .parent_cells = an->address_cells[d - 1],
+            .size_cells = an->size_cells[d],
+            .has_ranges = an->has_ranges[d],
+        };
+        if (!aarch64_fdt_translate_reg_step(&bus, size, addr))
+            return false;
     }
-    return 1;
+    return true;
 }
 
-/* Fold one closed node into the scan. The window union consumes every
- * reg pair of the matched device (GICD/GICC/v2m; the UART's own range
- * too — the window must cover the console). The UART additionally
- * records its first base as the early console PA. */
-static void scan_close_node(struct early_mmio_scan *scan,
-                            const struct fdt_ancestry *an, unsigned depth)
+/* Legacy translation helper for aarch64_fdt_early_mmio(): preserves
+ * transparent-when-missing-ranges behavior for legacy unit fixtures while
+ * using the shared step helper whenever ranges is present. */
+static bool to_cpu_pa_legacy(const struct fdt_ancestry *an, unsigned depth,
+                             uint64_t size, uint64_t *addr)
+{
+    for (unsigned d = depth - 1; d > 1; --d) {
+        if (!an->has_ranges[d] || an->ranges_len[d] == 0)
+            continue;
+        struct aarch64_fdt_bus bus = {
+            .ranges = (const uint8_t *)an->ranges[d],
+            .ranges_len = an->ranges_len[d],
+            .child_cells = an->address_cells[d],
+            .parent_cells = an->address_cells[d - 1],
+            .size_cells = an->size_cells[d],
+            .has_ranges = true,
+        };
+        if (!aarch64_fdt_translate_reg_step(&bus, size, addr))
+            return false;
+    }
+    return true;
+}
+
+static void scan_close_node_legacy(struct early_mmio_scan *scan,
+                                   const struct fdt_ancestry *an,
+                                   unsigned depth)
 {
     unsigned address_cells = an->address_cells[depth - 1];
     unsigned size_cells = an->size_cells[depth - 1];
@@ -221,10 +250,6 @@ static void scan_close_node(struct early_mmio_scan *scan,
     if ((!is_uart && !is_gic) || !reg || address_cells == 0 ||
         size_cells == 0)
         return;
-    /* A node the firmware parked is absent — except that a disabled PL011
-     * stands in as the console while nothing enabled has shown up, so the
-     * kernel still gets a diagnostics port instead of printing into
-     * nowhere. */
     on = node_is_enabled(an->status[depth], an->status_len[depth]);
     if (!on && (!is_uart || scan->have_console))
         return;
@@ -237,10 +262,11 @@ static void scan_close_node(struct early_mmio_scan *scan,
 
         cell += address_cells + size_cells;
         remain -= (address_cells + size_cells) * 4u;
-        if (!to_cpu_pa(an, depth, &base))
-            continue;   /* no ranges entry covers it: no CPU address */
-        scan_add_reg(scan, base, size);
-        if (is_uart && size != 0) {
+        if (size == 0 || !to_cpu_pa_legacy(an, depth, size, &base))
+            continue;
+        if (!scan_add_reg(scan, base, size))
+            continue;
+        if (is_uart) {
             if (!scan->have_console) {
                 scan->console_base = base;
                 scan->have_console = 1;
@@ -253,43 +279,294 @@ static void scan_close_node(struct early_mmio_scan *scan,
     }
 }
 
-int aarch64_fdt_early_mmio(const void *fdt, uint32_t fdt_size,
-                           struct aarch64_early_mmio_handoff *out)
+static void scan_close_node_boot(struct early_mmio_scan *scan,
+                                 const struct fdt_ancestry *an,
+                                 unsigned depth, uint64_t firmware_console_pa)
 {
-    const uint8_t *blob = (const uint8_t *)fdt;
+    unsigned address_cells = an->address_cells[depth - 1];
+    unsigned size_cells = an->size_cells[depth - 1];
+    const uint8_t *compatible = an->compatible[depth];
+    uint32_t compat_len = an->compat_len[depth];
+    const uint32_t *reg = an->reg[depth];
+    uint32_t reg_len = an->reg_len[depth];
+    uint32_t stride;
+    bool on;
+    bool is_uart;
+    bool is_gic;
+
+    if (!compatible || !reg || (address_cells != 1u && address_cells != 2u) ||
+        (size_cells != 1u && size_cells != 2u))
+        return;
+
+    on = an->tree_enabled[depth - 1] &&
+         node_is_enabled(an->status[depth], an->status_len[depth]);
+    if (!on)
+        return;
+
+    stride = (address_cells + size_cells) * 4u;
+    if (reg_len == 0u || (reg_len % stride) != 0u)
+        return;
+
+    is_gic = compat_matches(compatible, compat_len, "arm,cortex-a15-gic") ||
+             compat_matches(compatible, compat_len, "arm,gic-400");
+    if (is_gic && !scan->have_gic) {
+        uint32_t pairs = reg_len / stride;
+        uint64_t bases[8];
+        uint64_t sizes[8];
+
+        if (pairs < 2u || pairs > 8u)
+            return;
+        for (uint32_t i = 0u; i < pairs; i++) {
+            const uint32_t *cell = reg + i * (address_cells + size_cells);
+            uint64_t b = load_be_cells(cell, address_cells);
+            uint64_t s = load_be_cells(cell + address_cells, size_cells);
+            uint64_t min_span = (i < 2u) ? GIC_MIN_REG_SPAN : UINT64_C(1);
+
+            if (b == 0u || s < min_span || !to_cpu_pa_span(an, depth, s, &b))
+                return;
+            bases[i] = b;
+            sizes[i] = s;
+        }
+        for (uint32_t i = 0u; i < pairs; i++) {
+            if (!scan_add_reg(scan, bases[i], sizes[i]))
+                return;
+        }
+        scan->have_gic = 1;
+        return;
+    }
+
+    is_uart = compat_matches(compatible, compat_len, "arm,pl011");
+    if (is_uart && firmware_console_pa == 0u && !scan->have_console) {
+        uint64_t base = load_be_cells(reg, address_cells);
+        uint64_t size = load_be_cells(reg + address_cells, size_cells);
+
+        if (scan->have_target_path) {
+            if (!cstr_eq_n(an->path, an->path_len[depth], scan->target_path))
+                return;
+        }
+        if (base == 0u || size < PL011_MIN_REG_SPAN ||
+            !to_cpu_pa_span(an, depth, size, &base))
+            return;
+        if (!scan_add_reg(scan, base, size))
+            return;
+        scan->console_base = base;
+        scan->have_console = 1;
+        scan->console_enabled = 1;
+    }
+}
+
+static bool resolve_chosen_and_root(
+    const uint8_t *blob, uint32_t fdt_size, const struct fdt_header_info *hdr,
+    const char *required_compatible, bool resolve_stdout,
+    bool *platform_mismatch, bool *stdout_broken,
+    bool *has_target_path, char target_path[FDT_PATH_MAX])
+{
     const uint8_t *blob_end = blob + fdt_size;
-    struct early_mmio_scan scan;
+    uint32_t cursor = hdr->off_struct;
+    unsigned depth = 0;
+    int saw_end = 0;
+    bool root_compat_checked = false;
+    bool in_chosen = false;
+    bool in_aliases = false;
+    const char *stdout_raw = NULL;
+    uint32_t stdout_len = 0;
+    const char *alias_match = NULL;
+    uint32_t alias_match_len = 0;
+
+    *platform_mismatch = false;
+    *stdout_broken = false;
+    *has_target_path = false;
+
+    while (cursor + 4u <= hdr->struct_end) {
+        uint32_t token = load_be32(blob + cursor);
+        cursor += 4u;
+
+        if (token == FDT_END) {
+            saw_end = 1;
+            break;
+        }
+        if (token == FDT_NOP)
+            continue;
+        if (token == FDT_BEGIN_NODE) {
+            const char *name = (const char *)(blob + cursor);
+            while (cursor < hdr->struct_end && blob[cursor] != 0)
+                cursor++;
+            if (cursor >= hdr->struct_end)
+                return false;
+            cursor++;
+            cursor = (cursor + 3u) & ~UINT32_C(3);
+            if (depth >= FDT_MAX_DEPTH)
+                return false;
+            depth++;
+            if (depth == 2u) {
+                in_chosen = cstr_eq_n(name, strlen_bounded(name, hdr->struct_end), "chosen");
+                in_aliases = cstr_eq_n(name, strlen_bounded(name, hdr->struct_end), "aliases");
+            }
+            continue;
+        }
+        if (token == FDT_END_NODE) {
+            if (depth == 0u)
+                return false;
+            if (depth == 2u) {
+                in_chosen = false;
+                in_aliases = false;
+            }
+            depth--;
+            continue;
+        }
+        if (token == FDT_PROP) {
+            uint32_t len, nameoff, name_start;
+            const uint8_t *name, *value;
+
+            if (cursor + 8u > hdr->struct_end)
+                return false;
+            len = load_be32(blob + cursor);
+            nameoff = load_be32(blob + cursor + 4u);
+            cursor += 8u;
+            if (len > hdr->struct_end - cursor)
+                return false;
+            name_start = hdr->off_strings + nameoff;
+            if (name_start >= fdt_size)
+                return false;
+            name = blob + name_start;
+            value = blob + cursor;
+
+            if (depth == 1u && prop_name_is(name, blob_end, "compatible")) {
+                root_compat_checked = true;
+                if (required_compatible &&
+                    !compat_matches(value, len, required_compatible)) {
+                    *platform_mismatch = true;
+                    return true;
+                }
+            } else if (resolve_stdout && in_chosen && depth == 2u &&
+                       prop_name_is(name, blob_end, "stdout-path")) {
+                if (len == 0u || value[len - 1u] != 0) {
+                    *stdout_broken = true;
+                    return true;
+                }
+                stdout_raw = (const char *)value;
+                stdout_len = len - 1u;
+            }
+
+            cursor = (cursor + len + 3u) & ~UINT32_C(3);
+            continue;
+        }
+        return false;
+    }
+
+    if (!saw_end || depth != 0u)
+        return false;
+    if (required_compatible && !root_compat_checked) {
+        *platform_mismatch = true;
+        return true;
+    }
+
+    if (!resolve_stdout || !stdout_raw)
+        return true;
+
+    /* Strip :options suffix */
+    uint32_t id_len = 0u;
+    while (id_len < stdout_len && stdout_raw[id_len] != ':')
+        id_len++;
+    if (id_len == 0u) {
+        *stdout_broken = true;
+        return true;
+    }
+
+    if (stdout_raw[0] == '/') {
+        if (id_len >= FDT_PATH_MAX) {
+            *stdout_broken = true;
+            return true;
+        }
+        for (uint32_t i = 0u; i < id_len; i++)
+            target_path[i] = stdout_raw[i];
+        target_path[id_len] = '\0';
+        *has_target_path = true;
+        return true;
+    }
+
+    /* Alias lookup in /aliases */
+    cursor = hdr->off_struct;
+    depth = 0u;
+    in_aliases = false;
+    while (cursor + 4u <= hdr->struct_end) {
+        uint32_t token = load_be32(blob + cursor);
+        cursor += 4u;
+        if (token == FDT_END)
+            break;
+        if (token == FDT_NOP)
+            continue;
+        if (token == FDT_BEGIN_NODE) {
+            const char *name = (const char *)(blob + cursor);
+            size_t nlen = 0;
+            while (cursor < hdr->struct_end && blob[cursor] != 0) {
+                cursor++;
+                nlen++;
+            }
+            cursor++;
+            cursor = (cursor + 3u) & ~UINT32_C(3);
+            depth++;
+            if (depth == 2u)
+                in_aliases = cstr_eq_n(name, nlen, "aliases");
+            continue;
+        }
+        if (token == FDT_END_NODE) {
+            if (depth == 2u)
+                in_aliases = false;
+            depth--;
+            continue;
+        }
+        if (token == FDT_PROP) {
+            uint32_t len = load_be32(blob + cursor);
+            uint32_t nameoff = load_be32(blob + cursor + 4u);
+            const uint8_t *name = blob + hdr->off_strings + nameoff;
+            const uint8_t *value = blob + cursor + 8u;
+            cursor += 8u;
+            if (in_aliases && depth == 2u) {
+                uint32_t nl = 0u;
+                while (name + nl < blob_end && name[nl] != 0)
+                    nl++;
+                if (nl == id_len && cstr_eq_n(stdout_raw, id_len, (const char *)name)) {
+                    alias_match = (const char *)value;
+                    alias_match_len = len;
+                    break;
+                }
+            }
+            cursor = (cursor + len + 3u) & ~UINT32_C(3);
+        }
+    }
+
+    if (!alias_match || alias_match_len < 2u ||
+        alias_match[alias_match_len - 1u] != '\0' ||
+        alias_match[0] != '/' || alias_match_len > FDT_PATH_MAX) {
+        *stdout_broken = true;
+        return true;
+    }
+    for (uint32_t i = 0u; i < alias_match_len; i++)
+        target_path[i] = alias_match[i];
+    *has_target_path = true;
+    return true;
+}
+
+static bool walk_fdt_devices(const uint8_t *blob, uint32_t fdt_size,
+                             const struct fdt_header_info *hdr,
+                             struct early_mmio_scan *scan,
+                             uint64_t firmware_console_pa)
+{
+    const uint8_t *blob_end = blob + fdt_size;
     struct fdt_ancestry an;
-    uint32_t totalsize, off_struct, size_struct, off_strings;
-    uint32_t version, cursor, struct_end;
+    uint32_t cursor = hdr->off_struct;
     unsigned depth = 0;
     int saw_end = 0;
 
-    if (!out || !blob || fdt_size < FDT_HEADER_SIZE)
-        return 0;
-    if (load_be32(blob) != FDT_MAGIC)
-        return 0;
-    totalsize = load_be32(blob + 4);
-    off_struct = load_be32(blob + 8);
-    off_strings = load_be32(blob + 12);
-    version = load_be32(blob + 20);
-    size_struct = load_be32(blob + 36);
-    if (totalsize == 0 || totalsize > fdt_size ||
-        off_struct >= fdt_size || size_struct == 0 ||
-        off_struct + size_struct > fdt_size ||
-        off_strings >= fdt_size || version < FDT_MIN_VERSION)
-        return 0;
-    struct_end = off_struct + size_struct;
+    an.address_cells[0] = 2u;
+    an.size_cells[0] = 2u;
+    an.tree_enabled[0] = true;
+    an.path_len[0] = 0u;
 
-    for (unsigned i = 0; i < sizeof(scan); ++i)
-        ((uint8_t *)&scan)[i] = 0;
-    an.address_cells[0] = 2;
-    an.size_cells[0] = 2;
-
-    cursor = off_struct;
-    while (cursor + 4 <= struct_end) {
+    while (cursor + 4u <= hdr->struct_end) {
         uint32_t token = load_be32(blob + cursor);
-        cursor += 4;
+        cursor += 4u;
 
         if (token == FDT_END) {
             saw_end = 1;
@@ -299,56 +576,87 @@ int aarch64_fdt_early_mmio(const void *fdt, uint32_t fdt_size,
             continue;
 
         if (token == FDT_BEGIN_NODE) {
-            /* Skip the NUL-terminated name (aligned up to 4). */
-            while (cursor < struct_end && blob[cursor] != 0)
+            const char *name = (const char *)(blob + cursor);
+            uint32_t name_len = 0u;
+
+            while (cursor < hdr->struct_end && blob[cursor] != 0) {
                 cursor++;
+                name_len++;
+            }
+            if (cursor >= hdr->struct_end)
+                return false;
             cursor++;
             cursor = (cursor + 3u) & ~UINT32_C(3);
             if (depth >= FDT_MAX_DEPTH)
-                return 0;
+                return false;
+
+            if (depth > 0u) {
+                an.tree_enabled[depth] = an.tree_enabled[depth - 1u] &&
+                    node_is_enabled(an.status[depth], an.status_len[depth]);
+            }
+
             depth++;
-            an.address_cells[depth] = an.address_cells[depth - 1];
-            an.size_cells[depth] = an.size_cells[depth - 1];
-            an.compatible[depth] = 0;
-            an.compat_len[depth] = 0;
-            an.reg[depth] = 0;
-            an.reg_len[depth] = 0;
-            an.ranges[depth] = 0;
-            an.ranges_len[depth] = 0;
-            an.status[depth] = 0;
-            an.status_len[depth] = 0;
+            an.address_cells[depth] = an.address_cells[depth - 1u];
+            an.size_cells[depth] = an.size_cells[depth - 1u];
+            an.compatible[depth] = NULL;
+            an.compat_len[depth] = 0u;
+            an.reg[depth] = NULL;
+            an.reg_len[depth] = 0u;
+            an.ranges[depth] = NULL;
+            an.ranges_len[depth] = 0u;
+            an.has_ranges[depth] = false;
+            an.status[depth] = NULL;
+            an.status_len[depth] = 0u;
+            an.tree_enabled[depth] = an.tree_enabled[depth - 1u];
+
+            if (depth == 1u) {
+                an.path[0] = '/';
+                an.path_len[1] = 1u;
+            } else {
+                uint16_t base_len = an.path_len[depth - 1u];
+                uint16_t pos = base_len;
+                if (pos > 1u && pos < FDT_PATH_MAX - 1u)
+                    an.path[pos++] = '/';
+                for (uint32_t i = 0u; i < name_len && pos < FDT_PATH_MAX - 1u; i++)
+                    an.path[pos++] = name[i];
+                an.path_len[depth] = pos;
+            }
             continue;
         }
+
         if (token == FDT_END_NODE) {
-            if (depth == 0)
-                return 0;
-            /* reg is sized by the PARENT's cells (depth-1 values). */
-            scan_close_node(&scan, &an, depth);
+            if (depth == 0u)
+                return false;
+            if (scan->boot_mode)
+                scan_close_node_boot(scan, &an, depth, firmware_console_pa);
+            else
+                scan_close_node_legacy(scan, &an, depth);
             depth--;
             continue;
         }
+
         if (token == FDT_PROP) {
             uint32_t len, nameoff, name_start;
             const uint8_t *name, *value;
 
-            if (cursor + 8 > struct_end)
-                return 0;
+            if (cursor + 8u > hdr->struct_end)
+                return false;
             len = load_be32(blob + cursor);
-            nameoff = load_be32(blob + cursor + 4);
-            cursor += 8;
-            if (len > struct_end - cursor)
-                return 0;
-            name_start = off_strings + nameoff;
+            nameoff = load_be32(blob + cursor + 4u);
+            cursor += 8u;
+            if (len > hdr->struct_end - cursor)
+                return false;
+            name_start = hdr->off_strings + nameoff;
             if (name_start >= fdt_size)
-                return 0;
+                return false;
             name = blob + name_start;
             value = blob + cursor;
 
             if (prop_name_is(name, blob_end, "#address-cells")) {
-                if (len == 4)
+                if (len == 4u)
                     an.address_cells[depth] = load_be32(value);
             } else if (prop_name_is(name, blob_end, "#size-cells")) {
-                if (len == 4)
+                if (len == 4u)
                     an.size_cells[depth] = load_be32(value);
             } else if (prop_name_is(name, blob_end, "compatible")) {
                 an.compatible[depth] = value;
@@ -359,6 +667,7 @@ int aarch64_fdt_early_mmio(const void *fdt, uint32_t fdt_size,
             } else if (prop_name_is(name, blob_end, "ranges")) {
                 an.ranges[depth] = (const uint32_t *)value;
                 an.ranges_len[depth] = len;
+                an.has_ranges[depth] = true;
             } else if (prop_name_is(name, blob_end, "status")) {
                 an.status[depth] = value;
                 an.status_len[depth] = len;
@@ -367,25 +676,98 @@ int aarch64_fdt_early_mmio(const void *fdt, uint32_t fdt_size,
             cursor = (cursor + len + 3u) & ~UINT32_C(3);
             continue;
         }
-        return 0;   /* unknown token — treat the blob as foreign */
-    }
-    if (!saw_end)
-        return 0;   /* unterminated structure block */
 
-    if (!scan.have_device)
+        return false;
+    }
+
+    return saw_end && depth == 0u;
+}
+
+static bool finalize_window(const struct early_mmio_scan *scan,
+                            uint64_t console_base,
+                            struct aarch64_early_mmio_handoff *out)
+{
+    uint64_t base = scan->window_base & ~(MMIO_BLOCK_BYTES - 1u);
+    uint64_t end = (scan->window_end + MMIO_BLOCK_BYTES - 1u) &
+                   ~(MMIO_BLOCK_BYTES - 1u);
+    uint64_t blocks;
+
+    if (!scan->have_device || end <= base)
+        return false;
+    blocks = (end - base) >> MMIO_BLOCK_SHIFT;
+    if (blocks == 0u || blocks > MMIO_MAX_BLOCKS)
+        return false;
+    out->console_base = console_base;
+    out->device_base = base;
+    out->device_blocks = (uint32_t)blocks;
+    out->reserved = 0u;
+    return true;
+}
+
+int aarch64_fdt_early_mmio(const void *fdt, uint32_t fdt_size,
+                           struct aarch64_early_mmio_handoff *out)
+{
+    struct fdt_header_info hdr;
+    struct early_mmio_scan scan;
+
+    if (!out || !fdt_validate_header((const uint8_t *)fdt, fdt_size, &hdr))
         return 0;
-    {
-        uint64_t base = scan.window_base & ~(MMIO_BLOCK_BYTES - 1);
-        uint64_t end = (scan.window_end + MMIO_BLOCK_BYTES - 1) &
-                       ~(MMIO_BLOCK_BYTES - 1);
-        uint64_t blocks = (end - base) >> MMIO_BLOCK_SHIFT;
 
-        if (blocks == 0 || blocks > MMIO_MAX_BLOCKS)
-            return 0;
-        out->console_base = scan.have_console ? scan.console_base : 0;
-        out->device_base = base;
-        out->device_blocks = (uint32_t)blocks;
-        out->reserved = 0;
-    }
-    return 1;
+    for (unsigned i = 0; i < sizeof(scan); ++i)
+        ((uint8_t *)&scan)[i] = 0;
+    scan.boot_mode = 0;
+
+    if (!walk_fdt_devices((const uint8_t *)fdt, fdt_size, &hdr, &scan, 0u))
+        return 0;
+
+    return finalize_window(&scan, scan.have_console ? scan.console_base : 0u,
+                           out) ? 1 : 0;
+}
+
+enum aarch64_fdt_scan_result aarch64_fdt_boot_scan(
+    const void *blob, uint32_t size, const char *required_compatible,
+    uint64_t firmware_console_pa, struct aarch64_early_mmio_handoff *out)
+{
+    struct fdt_header_info hdr;
+    struct early_mmio_scan scan;
+    bool platform_mismatch = false;
+    bool stdout_broken = false;
+    bool has_target = false;
+
+    if (!out || !fdt_validate_header((const uint8_t *)blob, size, &hdr))
+        return AARCH64_FDT_SCAN_INVALID;
+
+    for (unsigned i = 0; i < sizeof(scan); ++i)
+        ((uint8_t *)&scan)[i] = 0;
+    scan.boot_mode = 1;
+
+    if (!resolve_chosen_and_root((const uint8_t *)blob, size, &hdr,
+                                 required_compatible,
+                                 firmware_console_pa == 0u,
+                                 &platform_mismatch, &stdout_broken,
+                                 &has_target, scan.target_path))
+        return AARCH64_FDT_SCAN_INVALID;
+
+    if (platform_mismatch)
+        return AARCH64_FDT_SCAN_PLATFORM_MISMATCH;
+    if (stdout_broken)
+        return AARCH64_FDT_SCAN_MISSING_MMIO;
+    scan.have_target_path = has_target ? 1 : 0;
+
+    if (!walk_fdt_devices((const uint8_t *)blob, size, &hdr, &scan,
+                          firmware_console_pa))
+        return AARCH64_FDT_SCAN_INVALID;
+
+    if (!scan.have_gic)
+        return AARCH64_FDT_SCAN_MISSING_MMIO;
+    if (firmware_console_pa == 0u && !scan.have_console)
+        return AARCH64_FDT_SCAN_MISSING_MMIO;
+
+    if (!finalize_window(&scan,
+                         firmware_console_pa != 0u ? firmware_console_pa
+                                                   : scan.console_base,
+                         out))
+        return AARCH64_FDT_SCAN_MISSING_MMIO;
+
+    return AARCH64_FDT_SCAN_OK;
 }

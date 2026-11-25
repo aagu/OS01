@@ -49,6 +49,8 @@ _Static_assert(offsetof(struct BOOT_EARLY_MMIO, device_blocks) == 16,
                "device_blocks offset");
 _Static_assert(BOOT_CONTEXT_HAS_EARLY_MMIO == (1u << 7),
                "early mmio flag");
+_Static_assert(BOOT_CONTEXT_CONSOLE_FIRMWARE_CONFIGURED == (1u << 8),
+               "firmware-configured console flag");
 _Static_assert(sizeof(struct boot_context) == 200, "boot context ABI");
 
 int main(void)
