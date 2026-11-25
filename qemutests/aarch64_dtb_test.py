@@ -83,7 +83,7 @@ RUNNER = r'''
 #include <stdlib.h>
 #include <string.h>
 int main(int argc, char **argv) {
-    if (argc != 3) return 2;
+    if (argc != 3 && argc != 5) return 2;
     FILE *f = fopen(argv[1], "rb");
     if (!f || fseek(f, 0, SEEK_END)) return 2;
     long size = ftell(f);
@@ -98,7 +98,20 @@ int main(int argc, char **argv) {
     for (size_t i = 0; i < sizeof(out); ++i)
         if (((unsigned char *)&out)[i]) return 4;
     memset(&out, 0xa5, sizeof(out));
-    int rc = aarch64_dtb_parse(blob, (uint32_t)size, strtoull(argv[2], 0, 0), &out);
+    int rc;
+    if (argc == 5) {
+        uint64_t cpa = strtoull(argv[3], 0, 0);
+        int fw = atoi(argv[4]);
+        rc = aarch64_dtb_parse_for_console(blob, (uint32_t)size,
+                                           strtoull(argv[2], 0, 0),
+                                           cpa, fw != 0, &out);
+        printf("%d %llx %u %u\n", rc,
+               (unsigned long long)out.pl011_base,
+               out.pl011_clock, out.pl011_spi);
+        free(blob);
+        return 0;
+    }
+    rc = aarch64_dtb_parse(blob, (uint32_t)size, strtoull(argv[2], 0, 0), &out);
     printf("%d %u %d %d %llx %llx %llx %u %u", rc, out.topology.cpu_count,
            out.topology.conduit, out.topology.psci_compatible,
            (unsigned long long)out.gicd_base, (unsigned long long)out.gicc_base,
@@ -270,6 +283,46 @@ def main():
                 conduit = {'one_cpu_no_psci': ['0', '0'], 'smc_conduit': ['1', '1']}
                 assert result[2:4] == conduit.get(name, ['2', '1']), (name, result)
             print('PASS', name)
+
+        # Console-selection parser tests (Task 3)
+        two_uarts = fixture()
+        two_uarts[2][2][1].extend([
+            ('clock-frequency', cells(24000000)),
+            ('interrupts', cells(0, 1, 4)),
+        ])
+        two_uarts[2].append(node('pl011@9020000', [
+            ('compatible', string('arm,pl011')),
+            ('reg', cells(0, 0x09020000, 0, 0x1000)),
+            ('clock-frequency', cells(48000000)),
+            ('interrupts', cells(0, 3, 4)),
+        ]))
+        p_two = tmp / 'two_uarts.dtb'
+        p_two.write_bytes(flatten(two_uarts))
+        res = subprocess.run([str(runner), str(p_two), '0', '0x09020000', '0'],
+                             check=True, text=True, capture_output=True).stdout.split()
+        assert res == ['0', '9020000', '48000000', '35'], res
+        res = subprocess.run([str(runner), str(p_two), '0', '0x09040000', '0'],
+                             check=True, text=True, capture_output=True).stdout.split()
+        assert res[0] == '-4', res
+
+        dup_uarts = fixture()
+        dup_uarts[2].append(node('pl011@9000000-dup', [
+            ('compatible', string('arm,pl011')),
+            ('reg', cells(0, 0x09000000, 0, 0x1000)),
+        ]))
+        p_dup = tmp / 'dup_uarts.dtb'
+        p_dup.write_bytes(flatten(dup_uarts))
+        res = subprocess.run([str(runner), str(p_dup), '0', '0x09000000', '0'],
+                             check=True, text=True, capture_output=True).stdout.split()
+        assert res[0] == '-4', res
+
+        no_uart = fixture(missing='pl011')
+        p_nouart = tmp / 'no_uart.dtb'
+        p_nouart.write_bytes(flatten(no_uart))
+        res = subprocess.run([str(runner), str(p_nouart), '0', '0x1f00030000', '1'],
+                             check=True, text=True, capture_output=True).stdout.split()
+        assert res == ['0', '1f00030000', '0', '0'], res
+        print('PASS console_selection_cases')
     print(f'{len(encoded)} DTB cases passed')
 
 

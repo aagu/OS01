@@ -34,6 +34,10 @@ aarch64_boot_early_mmio_devbase:
 .hidden aarch64_boot_early_mmio_devblocks
 aarch64_boot_early_mmio_devblocks:
     .skip   8
+.globl aarch64_boot_early_mmio_flags
+.hidden aarch64_boot_early_mmio_flags
+aarch64_boot_early_mmio_flags:
+    .skip   8
 
 .section .boot.text.first, "ax"
 .balign 0x1000
@@ -42,29 +46,6 @@ aarch64_boot_early_mmio_devblocks:
 _start:
     msr     daifset, #0xf
     mov     x19, x0
-#if defined(AARCH64_FIRMWARE_CONSOLE_PA) && AARCH64_FW_CONSOLE_BEACON
-    mov     x10, #0xffffff
-    mov     w1, #0
-    bl      aarch64_boot_fb_mark        /* kernel entry reached */
-    /* Slot 4 carries the current Exception Level as a colour:
-     * green=EL1, blue=EL2, red=EL3, yellow=unexpected. */
-    mrs     x10, CurrentEL
-    lsr     x10, x10, #2
-    mov     w9, #0xff0000
-    movk    w9, #0xff00
-    cmp     x10, #1
-    mov     x11, #0x00ff00
-    csel    x9, x11, x9, eq
-    cmp     x10, #2
-    mov     x11, #0x0000ff
-    csel    x9, x11, x9, eq
-    cmp     x10, #3
-    mov     x11, #0xff0000
-    csel    x9, x11, x9, eq
-    mov     x10, x9
-    mov     w1, #4
-    bl      aarch64_boot_fb_mark        /* current EL indicator */
-#endif
 
     /* 2. EL3 → EL1 drop if at EL3.  QEMU-ONLY PATH: this executes only
      *    when QEMU is launched with `-M virt,secure=on` and the bare
@@ -114,27 +95,9 @@ _start:
     cmp     x0, #2
     b.ne    1f
 
-#if defined(AARCH64_FIRMWARE_CONSOLE_PA) && AARCH64_FW_CONSOLE_BEACON
-    /* Slot 8: HCR_EL2.E2H (VHE) state - magenta set, white clear. */
-    mrs     x9, hcr_el2
-    lsr     x9, x9, #34
-    and     x9, x9, #1
-    cmp     x9, #1
-    mov     x11, #0xffffff
-    mov     w10, #0xff0000
-    movk    w10, #0x00ff
-    csel    x10, x10, x11, eq
-    mov     w1, #8
-    bl      aarch64_boot_fb_mark        /* E2H indicator */
-#endif
     mov     x0, #1
     lsl     x0, x0, #31                        /* HCR_EL2.RW = 1 */
     msr     hcr_el2, x0
-#if defined(AARCH64_FIRMWARE_CONSOLE_PA) && AARCH64_FW_CONSOLE_BEACON
-    mov     x10, #0xffffff
-    mov     w1, #5
-    bl      aarch64_boot_fb_mark        /* after HCR_EL2 write */
-#endif
     mov     x0, #0x33ff                        /* CPTR_EL2: TFP=0 (allow FP/SIMD at EL1/EL0) */
     msr     cptr_el2, x0
     mov     x0, #0x3c5                         /* SPSR_EL2 = EL1h + DAIF */
@@ -142,27 +105,12 @@ _start:
     mov     x0, #3                             /* CNTHCTL_EL2 */
     msr     cnthctl_el2, x0
     msr     cntvoff_el2, xzr
-#if defined(AARCH64_FIRMWARE_CONSOLE_PA) && AARCH64_FW_CONSOLE_BEACON
-    mov     x10, #0xffffff
-    mov     w1, #6
-    bl      aarch64_boot_fb_mark        /* EL2 config MSRs done */
-#endif
     adr     x0, 1f                             /* resume locally at EL1 */
     msr     elr_el2, x0
     isb
-#if defined(AARCH64_FIRMWARE_CONSOLE_PA) && AARCH64_FW_CONSOLE_BEACON
-    mov     x10, #0xffffff
-    mov     w1, #7
-    bl      aarch64_boot_fb_mark        /* just before the EL2 -> EL1 eret */
-#endif
     eret
 
 1:
-#if defined(AARCH64_FIRMWARE_CONSOLE_PA) && AARCH64_FW_CONSOLE_BEACON
-    mov     x10, #0xffffff
-    mov     w1, #1
-    bl      aarch64_boot_fb_mark        /* running at EL1, MMU off */
-#endif
     msr     spsel, #1
     ldr     x0, =aarch64_boot_stacks
     mov     x1, #AARCH64_BOOT_STACK_SIZE
@@ -188,11 +136,6 @@ _start:
     sub     x3, x3, #8
     cbnz    x3, .Lbss_loop
 .Lbss_done:
-#if defined(AARCH64_FIRMWARE_CONSOLE_PA) && AARCH64_FW_CONSOLE_BEACON
-    mov     x10, #0xffffff
-    mov     w1, #2
-    bl      aarch64_boot_fb_mark        /* stack + vectors + BSS clear done */
-#endif
     /* Record the entry address this low path actually executes from,
      * using a PC-relative adr (Task 3 evidence). Must run after the
      * .boot.bss clear (the store would otherwise be erased) and before
@@ -201,20 +144,16 @@ _start:
     ldr     x1, =aarch64_boot_observed_entry_value
     str     x0, [x1]
 
-    /* Park the early-MMIO handoff (console PA + Device window) from
-     * the boot_context. x19 is the entry handoff, but the vector
-     * printers cannot reach callee-saved registers, so the panic
-     * printer and the page-table builder read the parked slots
-     * instead. Any slot left zero by a missing/flag-less/invalid
-     * handoff makes consumers use the compile-time fallbacks. */
-    cbz     x19, .Learly_mmio_parked
-    ldr     w0, [x19, #BOOT_CTX_MAGIC_OFF]
-    ldr     w1, =BOOT_CTX_MAGIC
-    cmp     w0, w1
-    b.ne    .Learly_mmio_parked
-    ldr     w0, [x19, #BOOT_CTX_FLAGS_OFF]
-    tst     w0, #BOOT_CTX_FLAG_EARLY_MMIO
-    b.eq    .Learly_mmio_parked
+    /* Validate the boot_context v3 handoff and early_mmio contract before
+     * publishing any console PA or Device window. On failure, halt
+     * silently with UART unpublished (no W!/P!/C panic). */
+    mov     x0, x19
+    bl      aarch64_boot_validate_handoff
+    cbnz    x0, .Lhandoff_valid
+.Lbad_handoff_halt:
+    wfe
+    b       .Lbad_handoff_halt
+.Lhandoff_valid:
     ldr     x0, [x19, #BOOT_CTX_EARLY_CONSOLE_OFF]
     ldr     x1, =aarch64_boot_early_mmio_console
     str     x0, [x1]
@@ -224,28 +163,10 @@ _start:
     ldr     w0, [x19, #BOOT_CTX_EARLY_DEVBLOCKS_OFF]
     ldr     x1, =aarch64_boot_early_mmio_devblocks
     str     w0, [x1]
+    ldr     w0, [x19, #BOOT_CTX_FLAGS_OFF]
+    ldr     x1, =aarch64_boot_early_mmio_flags
+    str     w0, [x1]
 .Learly_mmio_parked:
-
-#if defined(AARCH64_FIRMWARE_CONSOLE_PA) && AARCH64_FW_CONSOLE_BEACON
-    mov     x10, #0xffffff
-    mov     w1, #3
-    bl      aarch64_boot_fb_mark        /* handoff parked, before the UART store */
-#endif
-
-#if defined(AARCH64_FIRMWARE_CONSOLE_PA) && AARCH64_FW_CONSOLE_BEACON
-    /* Bring-up beacon: one write-only physical store to the UART the
-     * firmware already initialized, before the MMU is on. On a board whose
-     * UEFI console is HDMI this is the first serial evidence that the
-     * kernel entry and the handoff park completed. No register read (a
-     * read of an address with no device behind it faults); a host that
-     * lacks the device drops the store instead. */
-    ldr     x0, =aarch64_boot_early_mmio_console
-    ldr     x0, [x0]
-    cbz     x0, .Lkernel_beacon_done
-    mov     x1, #'K'
-    str     w1, [x0]
-.Lkernel_beacon_done:
-#endif
 
     /* Fail-closed on a flag-bearing handoff whose Device window is
      * malformed or cannot be represented in the boot tables. Two

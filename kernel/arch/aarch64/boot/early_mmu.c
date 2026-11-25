@@ -1,6 +1,24 @@
 #include <arch/aarch64/boot_layout.h>
+#include <arch/aarch64/device_window.h>
 #include <arch/aarch64/early_mmu.h>
 #include <arch/aarch64/vmm_backend.h>
+
+__attribute__((section(".boot.text.early_mmu")))
+bool aarch64_boot_validate_handoff(const struct boot_context *ctx)
+{
+    uint64_t addr = (uint64_t)(uintptr_t)ctx;
+    uint64_t end;
+
+    if (addr == 0u || (addr & UINT64_C(7)) != 0u)
+        return false;
+    if (addr > (uint64_t)AARCH64_BOOT_MAP_END - sizeof(*ctx))
+        return false;
+    end = addr + sizeof(*ctx);
+    if (addr < (uint64_t)AARCH64_BOOT_BLOCK_END &&
+        end > (uint64_t)AARCH64_BOOT_BLOCK_BASE)
+        return false;
+    return aarch64_early_mmio_valid(ctx);
+}
 
 #define BOOT_INNER_SHAREABLE (UINT64_C(3) << 8)
 

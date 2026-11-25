@@ -28,7 +28,6 @@
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/device_window.h>
 #include <arch/mmu.h>
-#define PL011_EARLY_FALLBACK_PA 0x09000000UL
 #define PL011_DEFAULT_CLK_HZ    16000000U
 #define PL011_BAUD_RATE         115200U
 
@@ -36,7 +35,7 @@ static inline volatile uint32_t *pl011_base(void)
 {
     uint64_t pa = dtb_pl011_base();
     if (!pa) pa = aarch64_boot_early_console_pa();
-    if (!pa) pa = PL011_EARLY_FALLBACK_PA;
+    if (!pa) return (volatile uint32_t *)0;
     return (volatile uint32_t *)(ARCH_PAGE_OFFSET + pa);
 }
 
@@ -65,7 +64,6 @@ static inline uint32_t pl011_r32(uint32_t off)
     return pl011_base()[off / 4];
 }
 
-#ifndef AARCH64_FIRMWARE_CONSOLE_PA
 static void pl011_calc_divisors(uint32_t clk_hz, uint32_t baud,
                                 uint32_t *ibrd_out, uint32_t *fbrd_out)
 {
@@ -81,13 +79,16 @@ static void pl011_calc_divisors(uint32_t clk_hz, uint32_t baud,
     *ibrd_out = (uint32_t)ibrd;
     *fbrd_out = (uint32_t)fbrd;
 }
-#endif
 
 /* Initialise PL011: 8N1, FIFO enabled, TX+RX enabled.  QEMU ignores
  * baud divisors, but real hardware requires them derived from the DTB
- * uartclk frequency. */
+ * uartclk frequency.  In firmware-configured mode, preserve the line
+ * settings established by the firmware. */
 void pl011_init(void)
 {
+    if (!pl011_base())
+        return;
+
     /* Disable UART while we configure. */
     pl011_w32(PL011_CR, 0);
 
@@ -95,19 +96,16 @@ void pl011_init(void)
     pl011_w32(PL011_IMSC, 0);
     pl011_w32(PL011_ICR, 0x7FF);   /* clear any pending */
 
-#ifdef AARCH64_FIRMWARE_CONSOLE_PA
-    /* The firmware brought this UART up at PL011_BAUD_RATE on a clock that
-     * is not ours to assume: leave its line settings alone. */
-#else
-    uint32_t ibrd = 0, fbrd = 0;
+    if (!aarch64_boot_console_firmware_configured()) {
+        uint32_t ibrd = 0, fbrd = 0;
 
-    pl011_calc_divisors(dtb_pl011_clock(), PL011_BAUD_RATE, &ibrd, &fbrd);
-    pl011_w32(PL011_IBRD, ibrd);
-    pl011_w32(PL011_FBRD, fbrd);
+        pl011_calc_divisors(dtb_pl011_clock(), PL011_BAUD_RATE, &ibrd, &fbrd);
+        pl011_w32(PL011_IBRD, ibrd);
+        pl011_w32(PL011_FBRD, fbrd);
 
-    /* 8 bits, no parity, 1 stop bit; FIFO enabled. */
-    pl011_w32(PL011_LCR_H, (1U << 4) | (1U << 5) | (1U << 6));
-#endif
+        /* 8 bits, no parity, 1 stop bit; FIFO enabled. */
+        pl011_w32(PL011_LCR_H, (1U << 4) | (1U << 5) | (1U << 6));
+    }
 
     /* Re-enable UART: TX + RX + UART enable. */
     pl011_w32(PL011_CR, (1U << 0) | (1U << 8) | (1U << 9));
@@ -121,6 +119,8 @@ void pl011_init(void)
  * before EOI for level-triggered interrupts (spec §2.3). */
 uint32_t pl011_dr_read(void)
 {
+    if (!pl011_base())
+        return 0;
     return pl011_r32(PL011_DR);
 }
 
@@ -128,12 +128,16 @@ uint32_t pl011_dr_read(void)
  * sources stay masked. */
 void pl011_irq_rx_enable(void)
 {
+    if (!pl011_base())
+        return;
     pl011_w32(PL011_IMSC, 1U << 4);
 }
 
 /* Clear all asserted PL011 interrupts (write-1-to-clear). */
 void pl011_clear_ints(void)
 {
+    if (!pl011_base())
+        return;
     pl011_w32(PL011_ICR, 0x7FF);
 }
 
@@ -143,12 +147,16 @@ void pl011_clear_ints(void)
  * private to this TU. */
 bool pl011_rx_pending(void)
 {
+    if (!pl011_base())
+        return false;
     return (pl011_r32(PL011_FR) & PL011_FR_RXFE) == 0;
 }
 
 /* Write a single byte.  Waits until the TX FIFO has room. */
 void pl011_putc(char c)
 {
+    if (!pl011_base())
+        return;
     /* FR.TXFF set ⇒ transmit FIFO is full; spin. */
     while (pl011_r32(PL011_FR) & PL011_FR_TXFF) {
         arch_nop();

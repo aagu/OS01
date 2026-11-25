@@ -104,11 +104,83 @@ static void test_device_window_over_cap_rejected(void)
 static void test_device_window_cap_boundary_adopted(void)
 {
     reset();
-    ctx.early_mmio.device_base = 0x08000000;
-    ctx.early_mmio.device_blocks = 1024;
-    ctx.flags |= BOOT_CONTEXT_HAS_EARLY_MMIO;
+    ctx.early_mmio.console_base = UINT64_C(0x1f00030000);
+    ctx.early_mmio.device_base = UINT64_C(0x107fe00000);
+    ctx.early_mmio.device_blocks = 1;
+    ctx.flags |= BOOT_CONTEXT_HAS_EARLY_MMIO |
+                 BOOT_CONTEXT_CONSOLE_FIRMWARE_CONFIGURED;
+    assert_true(aarch64_early_mmio_valid(&ctx));
     aarch64_device_window_init(&ctx);
-    expect_window(UINT64_C(0x08000000), UINT64_C(0x88000000));
+    {
+        struct aarch64_device_windows wins;
+        aarch64_device_windows_get(&wins);
+        assert_eq(2u, wins.count);
+        assert_eq(UINT64_C(0x107fe00000), wins.window[0].base_pa);
+        assert_eq(UINT64_C(0x1080000000), wins.window[0].end_pa);
+        assert_eq(UINT64_C(0x1f00000000), wins.window[1].base_pa);
+        assert_eq(UINT64_C(0x1f00200000), wins.window[1].end_pa);
+    }
+}
+
+static void test_device_window_dedup_and_validation_negatives(void)
+{
+    struct aarch64_device_windows wins;
+
+    /* Same L1 slot, console already inside main window -> deduplicated to 1 */
+    reset();
+    ctx.early_mmio.device_base = UINT64_C(0x1000000000);
+    ctx.early_mmio.device_blocks = 2;
+    ctx.early_mmio.console_base = UINT64_C(0x1000200000);
+    ctx.flags |= BOOT_CONTEXT_HAS_EARLY_MMIO |
+                 BOOT_CONTEXT_CONSOLE_FIRMWARE_CONFIGURED;
+    assert_true(aarch64_early_mmio_valid(&ctx));
+    aarch64_device_window_init(&ctx);
+    aarch64_device_windows_get(&wins);
+    assert_eq(1u, wins.count);
+
+    /* Bad magic, version, size, flag */
+    reset();
+    ctx.early_mmio.device_base = 0x08000000;
+    ctx.early_mmio.device_blocks = 9;
+    ctx.early_mmio.console_base = 0x09000000;
+    ctx.flags |= BOOT_CONTEXT_HAS_EARLY_MMIO;
+    assert_true(aarch64_early_mmio_valid(&ctx));
+
+    ctx.magic ^= 1u;
+    assert_false(aarch64_early_mmio_valid(&ctx));
+    ctx.magic = BOOT_CONTEXT_MAGIC;
+
+    ctx.version = 2u;
+    assert_false(aarch64_early_mmio_valid(&ctx));
+    ctx.version = BOOT_CONTEXT_VERSION;
+
+    ctx.size = 176u;
+    assert_false(aarch64_early_mmio_valid(&ctx));
+    ctx.size = sizeof(ctx);
+
+    ctx.flags &= ~BOOT_CONTEXT_HAS_EARLY_MMIO;
+    assert_false(aarch64_early_mmio_valid(&ctx));
+    ctx.flags |= BOOT_CONTEXT_HAS_EARLY_MMIO;
+
+    /* Unaligned console (not 4-byte aligned) */
+    ctx.early_mmio.console_base = 0x09000002;
+    assert_false(aarch64_early_mmio_valid(&ctx));
+
+    /* PL011 access span [console, console+0x48) extends past mapped window */
+    ctx.early_mmio.console_base = UINT64_C(0x09200000) - 0x40u;
+    assert_false(aarch64_early_mmio_valid(&ctx));
+
+    /* Crossing 2 GiB */
+    ctx.early_mmio.device_base = UINT64_C(0x7fe00000);
+    ctx.early_mmio.device_blocks = 2;
+    ctx.early_mmio.console_base = UINT64_C(0x7fe00000);
+    assert_false(aarch64_early_mmio_valid(&ctx));
+
+    /* High window crossing 1 GiB L1 slot */
+    ctx.early_mmio.device_base = UINT64_C(0xbfe00000);
+    ctx.early_mmio.device_blocks = 2;
+    ctx.early_mmio.console_base = UINT64_C(0xbfe00000);
+    assert_false(aarch64_early_mmio_valid(&ctx));
 }
 
 TEST_LIST_BEGIN
@@ -120,6 +192,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_device_window_zero_blocks_rejected),
     TEST_ENTRY(test_device_window_over_cap_rejected),
     TEST_ENTRY(test_device_window_cap_boundary_adopted),
+    TEST_ENTRY(test_device_window_dedup_and_validation_negatives),
 TEST_LIST_END
 
 int main(void)

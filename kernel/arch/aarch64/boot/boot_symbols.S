@@ -62,6 +62,13 @@ aarch64_boot_early_console_pa:
     ldr     x0, [x0]
     ret
 
+.globl aarch64_boot_console_firmware_configured
+aarch64_boot_console_firmware_configured:
+    ldr     x0, =aarch64_boot_early_mmio_flags
+    ldr     w0, [x0]
+    ubfx    x0, x0, #8, #1
+    ret
+
 .globl aarch64_boot_page_tables_addr
 aarch64_boot_page_tables_addr:
     ldr     x0, =boot_page_tables

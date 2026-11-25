@@ -1,8 +1,10 @@
 #ifndef OS01_AARCH64_DEVICE_WINDOW_H
 #define OS01_AARCH64_DEVICE_WINDOW_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <core/bootinfo.h>
+#include <arch/aarch64/boot_layout.h>
 
 /* Early device window: the contiguous 2 MiB-aligned PA run that the
  * boot identity map covers with Device-nGnRnE blocks (head.S) and the
@@ -47,5 +49,74 @@ void aarch64_device_windows_get(struct aarch64_device_windows *out);
  * fallback before the DTB names a PL011. Provided by boot_symbols.S, so
  * it exists in the kernel image only. */
 uint64_t aarch64_boot_early_console_pa(void);
+bool aarch64_boot_console_firmware_configured(void);
+
+#define AARCH64_EARLY_MMIO_BLOCK_BYTES UINT64_C(0x200000)
+#define AARCH64_EARLY_MMIO_MAX_BLOCKS  1024u
+#define AARCH64_EARLY_MMIO_PL011_SPAN  UINT64_C(0x48)
+
+static inline bool aarch64_early_mmio_range_valid(uint64_t base, uint64_t end)
+{
+    if (base >= end || end > (uint64_t)AARCH64_BOOT_HIGH_END)
+        return false;
+    if (base < (uint64_t)AARCH64_BOOT_MAP_END &&
+        end > (uint64_t)AARCH64_BOOT_MAP_END)
+        return false;
+    if (base >= (uint64_t)AARCH64_BOOT_MAP_END &&
+        (base >> 30) != ((end - 1u) >> 30))
+        return false;
+    if (base < (uint64_t)AARCH64_BOOT_BLOCK_END &&
+        end > (uint64_t)AARCH64_BOOT_BLOCK_BASE)
+        return false;
+    return true;
+}
+
+static inline bool aarch64_early_mmio_valid(const struct boot_context *ctx)
+{
+    uint64_t win_base;
+    uint64_t win_size;
+    uint64_t win_end;
+    uint64_t console;
+    bool fw_console;
+
+    if (!boot_context_valid(ctx))
+        return false;
+    if ((ctx->flags & BOOT_CONTEXT_HAS_EARLY_MMIO) == 0u)
+        return false;
+
+    win_base = ctx->early_mmio.device_base;
+    if ((win_base & (AARCH64_EARLY_MMIO_BLOCK_BYTES - 1u)) != 0u)
+        return false;
+    if (ctx->early_mmio.device_blocks == 0u ||
+        ctx->early_mmio.device_blocks > AARCH64_EARLY_MMIO_MAX_BLOCKS)
+        return false;
+    win_size = (uint64_t)ctx->early_mmio.device_blocks << 21;
+    if (win_base > UINT64_MAX - win_size)
+        return false;
+    win_end = win_base + win_size;
+    if (!aarch64_early_mmio_range_valid(win_base, win_end))
+        return false;
+
+    console = ctx->early_mmio.console_base;
+    if (console == 0u || (console & 3u) != 0u)
+        return false;
+    if (console > UINT64_MAX - AARCH64_EARLY_MMIO_PL011_SPAN ||
+        console + AARCH64_EARLY_MMIO_PL011_SPAN > (uint64_t)AARCH64_BOOT_HIGH_END)
+        return false;
+
+    if (console >= win_base &&
+        console + AARCH64_EARLY_MMIO_PL011_SPAN <= win_end)
+        return true;
+
+    fw_console = (ctx->flags & BOOT_CONTEXT_CONSOLE_FIRMWARE_CONFIGURED) != 0u;
+    if (!fw_console)
+        return false;
+
+    {
+        uint64_t cblock = console & ~(AARCH64_EARLY_MMIO_BLOCK_BYTES - 1u);
+        return aarch64_early_mmio_range_valid(
+            cblock, cblock + AARCH64_EARLY_MMIO_BLOCK_BYTES);
+    }
+}
 
 #endif /* OS01_AARCH64_DEVICE_WINDOW_H */

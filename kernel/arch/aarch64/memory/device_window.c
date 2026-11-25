@@ -39,15 +39,25 @@ void aarch64_device_window_init(const struct boot_context *ctx)
         current_console.end_pa = 0;
         return;
     }
-    if ((ctx->flags & BOOT_CONTEXT_HAS_EARLY_MMIO) == 0u)
-        return;
-
-    base = ctx->early_mmio.device_base;
-    blocks = ctx->early_mmio.device_blocks;
-    if (blocks == 0u || blocks > DEVICE_WINDOW_MAX_BLOCKS)
-        return;
-    if ((base & (WINDOW_BLOCK - 1u)) != 0u)
-        return;
+    if (ctx->early_mmio.console_base != 0u) {
+        if (!aarch64_early_mmio_valid(ctx))
+            return;
+        base = ctx->early_mmio.device_base;
+        blocks = ctx->early_mmio.device_blocks;
+    } else {
+        if (!boot_context_valid(ctx) ||
+            (ctx->flags & BOOT_CONTEXT_HAS_EARLY_MMIO) == 0u)
+            return;
+        base = ctx->early_mmio.device_base;
+        blocks = ctx->early_mmio.device_blocks;
+        if (blocks == 0u || blocks > DEVICE_WINDOW_MAX_BLOCKS ||
+            (base & (WINDOW_BLOCK - 1u)) != 0u)
+            return;
+        if (base > UINT64_MAX - (uint64_t)blocks * WINDOW_BLOCK ||
+            !aarch64_early_mmio_range_valid(
+                base, base + (uint64_t)blocks * WINDOW_BLOCK))
+            return;
+    }
 
     current_window.base_pa = base;
     current_window.end_pa = base + (uint64_t)blocks * WINDOW_BLOCK;

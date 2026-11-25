@@ -36,6 +36,10 @@ struct aarch64_platform_info {
  * Every failure clears out when non-NULL. No hardware or global state. */
 int aarch64_dtb_parse(const void *blob, uint32_t size, uint64_t bsp,
                       struct aarch64_platform_info *out);
+int aarch64_dtb_parse_for_console(const void *blob, uint32_t size,
+                                  uint64_t bsp, uint64_t console_pa,
+                                  bool firmware_configured,
+                                  struct aarch64_platform_info *out);
 struct boot_context;
 void dtb_init(const struct boot_context *handoff);
 const struct aarch64_topology *dtb_topology(void);

@@ -82,24 +82,13 @@ void dtb_init(const struct boot_context *handoff)
     uint64_t bsp;
     __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(bsp));
     struct aarch64_platform_info parsed;
-    int rc = aarch64_dtb_parse(b, size, bsp, &parsed);
+    int rc = aarch64_dtb_parse_for_console(
+        b, size, bsp, aarch64_boot_early_console_pa(),
+        aarch64_boot_console_firmware_configured(), &parsed);
     if (rc == -1) dtb_fatal("malformed UEFI DTB");
     if (rc == -2) dtb_fatal("invalid CPU topology");
     if (rc == -3) dtb_fatal("invalid PSCI binding");
     if (rc) dtb_fatal("unsupported or missing platform devices");
-    /* The console stays on the UART the loader parked in the handoff: that
-     * is the address head.S already printed through and the one mapped as a
-     * Device window. It may be a firmware-initialized UART the device tree
-     * names elsewhere or not at all — Raspberry Pi 5 keeps its DTB PL011 on
-     * the debug connector while the 40-pin header carries RP1's — whose
-     * interrupt is not this GIC's, so such a console is output-only. */
-    {
-        uint64_t console = aarch64_boot_early_console_pa();
-        if (console != 0u && console != parsed.pl011_base) {
-            parsed.pl011_base = console;
-            parsed.pl011_spi = 0u;
-        }
-    }
     for (uint32_t i = 0; i < sizeof(platform); ++i)
         ((volatile uint8_t *)&platform)[i] = ((uint8_t *)&parsed)[i];
     kputs("[dtb] /cpus: ");
