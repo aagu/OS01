@@ -322,7 +322,7 @@ static void scan_close_node_boot(struct early_mmio_scan *scan,
             uint64_t s = load_be_cells(cell + address_cells, size_cells);
             uint64_t min_span = (i < 2u) ? GIC_MIN_REG_SPAN : UINT64_C(1);
 
-            if (b == 0u || s < min_span || !to_cpu_pa_span(an, depth, s, &b))
+            if (s < min_span || !to_cpu_pa_span(an, depth, s, &b) || b == 0u)
                 return;
             bases[i] = b;
             sizes[i] = s;
@@ -344,8 +344,8 @@ static void scan_close_node_boot(struct early_mmio_scan *scan,
             if (!cstr_eq_n(an->path, an->path_len[depth], scan->target_path))
                 return;
         }
-        if (base == 0u || size < PL011_MIN_REG_SPAN ||
-            !to_cpu_pa_span(an, depth, size, &base))
+        if (size < PL011_MIN_REG_SPAN ||
+            !to_cpu_pa_span(an, depth, size, &base) || base == 0u)
             return;
         if (!scan_add_reg(scan, base, size))
             return;

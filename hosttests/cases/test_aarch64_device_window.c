@@ -170,6 +170,14 @@ static void test_device_window_dedup_and_validation_negatives(void)
     ctx.early_mmio.console_base = UINT64_C(0x09200000) - 0x40u;
     assert_false(aarch64_early_mmio_valid(&ctx));
 
+    /* Off-window firmware console whose +0x48 crosses end of its 2 MiB block */
+    ctx.early_mmio.device_base = UINT64_C(0x107fe00000);
+    ctx.early_mmio.device_blocks = 1;
+    ctx.early_mmio.console_base = UINT64_C(0x1f001fffc0);
+    ctx.flags |= BOOT_CONTEXT_CONSOLE_FIRMWARE_CONFIGURED;
+    assert_false(aarch64_early_mmio_valid(&ctx));
+    ctx.flags &= ~BOOT_CONTEXT_CONSOLE_FIRMWARE_CONFIGURED;
+
     /* Crossing 2 GiB */
     ctx.early_mmio.device_base = UINT64_C(0x7fe00000);
     ctx.early_mmio.device_blocks = 2;

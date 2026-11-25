@@ -147,6 +147,8 @@ bool aarch64_early_mmio_map_safe(const struct boot_context *ctx)
         uint64_t cblock_base = console_base & ~(AARCH64_MMIO_BLOCK_BYTES - 1u);
         uint64_t cblock_end = cblock_base + AARCH64_MMIO_BLOCK_BYTES;
 
+        if (AARCH64_PL011_SPAN > cblock_end - console_base)
+            return false;
         if (!range_shape_valid(cblock_base, cblock_end))
             return false;
         if (aarch64_uefi_range_overlaps_ram(map, stride, count,

@@ -133,6 +133,12 @@ static void test_early_mmio_map_safe_and_overlap_rules(void)
 
     map[1].type = AARCH64_UEFI_MEM_CONVENTIONAL;
     assert_false(aarch64_early_mmio_map_safe(&ctx));
+
+    /* Off-window firmware console whose +0x48 crosses end of its 2 MiB block */
+    map[1].type = AARCH64_UEFI_MEM_MMIO;
+    ctx.flags |= BOOT_CONTEXT_CONSOLE_FIRMWARE_CONFIGURED;
+    ctx.early_mmio.console_base = UINT64_C(0x1f001fffc0);
+    assert_false(aarch64_early_mmio_map_safe(&ctx));
 }
 
 int main(void)

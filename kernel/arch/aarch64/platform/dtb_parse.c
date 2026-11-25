@@ -192,10 +192,11 @@ static int finish_node(struct parse_state *s, const struct node *n, uint32_t dep
         /* A disabled GIC is absent, not an error. */
         if (!enabled(b, n)) return 0;
         if (s->gic ||
-            !device_reg_base(b, n, 0, GIC_REG_SPAN, &gicd_base, &gicd_size) || gicd_base == 0 ||
-            !device_reg_base(b, n, 1, GIC_REG_SPAN, &gicc_base, &gicc_size) || gicc_base == 0) return -4;
+            !device_reg_base(b, n, 0, GIC_REG_SPAN, &gicd_base, &gicd_size) ||
+            !device_reg_base(b, n, 1, GIC_REG_SPAN, &gicc_base, &gicc_size)) return -4;
         if (!to_cpu_pa(b, stack, depth, gicd_size, &gicd_base) ||
             !to_cpu_pa(b, stack, depth, gicc_size, &gicc_base)) return 0;
+        if (gicd_base == 0 || gicc_base == 0) return -4;
         s->gic = true;
         s->info->gicd_base = gicd_base;
         s->info->gicc_base = gicc_base;
@@ -212,6 +213,8 @@ static int finish_node(struct parse_state *s, const struct node *n, uint32_t dep
                 return -4;
             if (!to_cpu_pa(b, stack, depth, size, &base))
                 return 0;
+            if (base == 0)
+                return -4;
             if (base != s->target_console_pa)
                 return 0;
             s->uart_matches++;
@@ -274,9 +277,9 @@ static int finish_node(struct parse_state *s, const struct node *n, uint32_t dep
             const uint8_t *rp = b + n->reg.off;
             uint64_t base = decode(rp, ac);
             uint64_t size = decode(rp + ac * 4, sc);
-            if (base == 0 || (base & 3u) != 0 || size < 0x200 ||
-                size > UINT64_MAX - base) return -4;
-            if (!to_cpu_pa(b, stack, depth, size, &base)) return 0;
+            if (size < 0x200 || size > UINT64_MAX - base) return -4;
+            if (!to_cpu_pa(b, stack, depth, size, &base)) return -4;
+            if (base == 0 || (base & 3u) != 0) return -4;
             if (s->info->virtio_mmio_count < AARCH64_VIRTIO_MMIO_MAX) {
                 struct aarch64_virtio_mmio_slot *slot =
                     &s->info->virtio_mmio[s->info->virtio_mmio_count++];

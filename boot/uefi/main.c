@@ -429,6 +429,7 @@ int main(int argc, char_t **argv)
         int ebs_attempted = 0;
 
         for (;;) {
+            map_size = 0;
             status = BS->GetMemoryMap(&map_size, NULL, &map_key,
                                       &desc_size, &desc_version);
             if (status != EFI_BUFFER_TOO_SMALL || desc_size == 0) {
@@ -452,6 +453,7 @@ int main(int argc, char_t **argv)
                 status = EFI_LOAD_ERROR;
                 break;
             }
+            map_size = (uintn_t)desc_capacity;
             status = BS->GetMemoryMap(&map_size, (void *)(uintptr_t)desc_phys,
                                       &map_key, &desc_size, &desc_version);
             if (EFI_ERROR(status)) {

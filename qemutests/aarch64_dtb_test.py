@@ -357,6 +357,22 @@ def main():
         res = subprocess.run([str(runner), str(p_vu), '0'],
                              check=True, text=True, capture_output=True).stdout.split()
         assert res[0] == '-4', res
+
+        vio_cross_ranges = fixture()
+        vio_cross_ranges[2].append(node('bus', [
+            ('#address-cells', cells(1)), ('#size-cells', cells(1)),
+            ('ranges', cells(0x1000, 0x0, 0x0a001000, 0x100)),
+        ], [
+            node('virtio_mmio@1000', [
+                ('compatible', string('virtio,mmio')),
+                ('reg', cells(0x1000, 0x200)),
+            ]),
+        ]))
+        p_vcr = tmp / 'vio_cross_ranges.dtb'
+        p_vcr.write_bytes(flatten(vio_cross_ranges))
+        res = subprocess.run([str(runner), str(p_vcr), '0'],
+                             check=True, text=True, capture_output=True).stdout.split()
+        assert res[0] == '-4', res
         print('PASS virtio_mmio_cases')
     print(f'{len(encoded)} DTB cases passed')
 

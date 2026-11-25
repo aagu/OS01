@@ -114,8 +114,11 @@ static inline bool aarch64_early_mmio_valid(const struct boot_context *ctx)
 
     {
         uint64_t cblock = console & ~(AARCH64_EARLY_MMIO_BLOCK_BYTES - 1u);
-        return aarch64_early_mmio_range_valid(
-            cblock, cblock + AARCH64_EARLY_MMIO_BLOCK_BYTES);
+        uint64_t cblock_end = cblock + AARCH64_EARLY_MMIO_BLOCK_BYTES;
+
+        if (AARCH64_EARLY_MMIO_PL011_SPAN > cblock_end - console)
+            return false;
+        return aarch64_early_mmio_range_valid(cblock, cblock_end);
     }
 }
 
