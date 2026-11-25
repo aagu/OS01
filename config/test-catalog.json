@@ -4974,6 +4974,19 @@
       "source": "hosttests/cases/test_trace_symbols.c"
     },
     {
+      "id": "test_uefi_boot_config",
+      "layer": "host",
+      "subsystem": "boot",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "boot.uefi.config"
+      ],
+      "link": "uefi-boot-config",
+      "source": "hosttests/cases/test_uefi_boot_config.c"
+    },
+    {
       "id": "test_unwind_aarch64",
       "layer": "host",
       "subsystem": "intr",

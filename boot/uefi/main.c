@@ -247,6 +247,118 @@ static void capture_boot_device(struct boot_context *ctx)
     }
 }
 
+static efi_status_t read_boot_config(struct uefi_boot_config *out)
+{
+#if defined(__aarch64__)
+    const bool is_aarch64 = true;
+#else
+    const bool is_aarch64 = false;
+#endif
+    efi_guid_t sfs_guid = EFI_SIMPLE_FILE_SYSTEM_PROTOCOL_GUID;
+    efi_simple_file_system_protocol_t *sfs = NULL;
+    efi_file_handle_t *root = NULL;
+    efi_file_handle_t *file = NULL;
+    char buf[UEFI_BOOT_CONFIG_MAX_BYTES + 1u];
+    size_t total = 0;
+    unsigned err_line = 0;
+    EFI_STATUS status;
+
+    (void)uefi_boot_config_parse(NULL, 0, is_aarch64, out, NULL);
+
+    if (!LIP || !LIP->DeviceHandle) {
+        if (!is_aarch64)
+            return EFI_SUCCESS;
+        arch_puts("UEFI: config.txt volume unavailable\r\n");
+        return EFI_LOAD_ERROR;
+    }
+
+    status = BS->HandleProtocol(LIP->DeviceHandle, &sfs_guid, (void **)&sfs);
+    if (EFI_ERROR(status) || !sfs) {
+        if (!is_aarch64)
+            return EFI_SUCCESS;
+        arch_puts("UEFI: config.txt filesystem unavailable\r\n");
+        return EFI_ERROR(status) ? status : EFI_LOAD_ERROR;
+    }
+
+    status = sfs->OpenVolume(sfs, &root);
+    if (EFI_ERROR(status) || !root) {
+        if (!is_aarch64)
+            return EFI_SUCCESS;
+        arch_puts("UEFI: config.txt volume open failed\r\n");
+        return EFI_ERROR(status) ? status : EFI_LOAD_ERROR;
+    }
+
+    status = root->Open(root, &file, L"config.txt", EFI_FILE_MODE_READ, 0);
+    if (status == EFI_NOT_FOUND) {
+        (void)root->Close(root);
+        return EFI_SUCCESS;
+    }
+    if (EFI_ERROR(status) || !file) {
+        (void)root->Close(root);
+        if (!is_aarch64)
+            return EFI_SUCCESS;
+        arch_puts("UEFI: config.txt open failed\r\n");
+        return EFI_ERROR(status) ? status : EFI_LOAD_ERROR;
+    }
+
+    while (total < sizeof(buf)) {
+        uintn_t chunk = (uintn_t)(sizeof(buf) - total);
+        status = file->Read(file, &chunk, buf + total);
+        if (EFI_ERROR(status)) {
+            (void)file->Close(file);
+            (void)root->Close(root);
+            if (!is_aarch64)
+                return EFI_SUCCESS;
+            arch_puts("UEFI: config.txt read failed\r\n");
+            return status;
+        }
+        if (chunk == 0)
+            break;
+        total += (size_t)chunk;
+    }
+
+    (void)file->Close(file);
+    (void)root->Close(root);
+
+    if (uefi_boot_config_parse(buf, total, is_aarch64, out, &err_line) != 0) {
+        if (!is_aarch64) {
+            (void)uefi_boot_config_parse(NULL, 0, false, out, NULL);
+            return EFI_SUCCESS;
+        }
+        if (total > UEFI_BOOT_CONFIG_MAX_BYTES) {
+            arch_puts("UEFI: config.txt exceeds 4096 bytes\r\n");
+        } else {
+            char msg[48];
+            char num[16];
+            size_t n = 0;
+            unsigned v = err_line;
+            static const char prefix[] = "UEFI: config.txt invalid at line ";
+            size_t i = 0;
+            while (prefix[i] != '\0')
+                msg[n++] = prefix[i++];
+            if (v == 0) {
+                num[0] = '0';
+                i = 1;
+            } else {
+                i = 0;
+                while (v > 0 && i < sizeof(num)) {
+                    num[i++] = (char)('0' + (v % 10u));
+                    v /= 10u;
+                }
+            }
+            while (i > 0)
+                msg[n++] = num[--i];
+            msg[n++] = '\r';
+            msg[n++] = '\n';
+            msg[n] = '\0';
+            arch_puts(msg);
+        }
+        return EFI_LOAD_ERROR;
+    }
+
+    return EFI_SUCCESS;
+}
+
 /* Mask a status to its low bits; the CRT's `ret ? EFIERR(ret) : EFI_SUCCESS`
  * re-applies the error bit at the application entry boundary. */
 static int main_error_code(EFI_STATUS status)
@@ -268,10 +380,15 @@ int main(int argc, char_t **argv)
     uint64_t desc_capacity = 0;
     uintn_t map_size = 0, map_key = 0, desc_size = 0;
     uint32_t desc_version = 0;
+    struct uefi_boot_config boot_cfg;
     EFI_STATUS status;
 
     (void)argc;
     (void)argv;
+
+    status = read_boot_config(&boot_cfg);
+    if (EFI_ERROR(status))
+        goto fail;
 
     status = arch_init_handoff(&ctx);
     if (EFI_ERROR(status)) {
@@ -295,13 +412,13 @@ int main(int argc, char_t **argv)
 
     capture_boot_device(ctx);
 
-    status = arch_setup_graphics(ctx);
+    status = arch_setup_graphics(ctx, &boot_cfg);
     if (EFI_ERROR(status)) {
         arch_puts("UEFI: graphics setup failed\r\n");
         goto fail;
     }
 
-    status = arch_fill_firmware(ctx);
+    status = arch_fill_firmware(ctx, &boot_cfg);
     if (EFI_ERROR(status)) {
         arch_puts("UEFI: firmware tables failed\r\n");
         goto fail;

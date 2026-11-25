@@ -80,7 +80,7 @@ UEFI_TARGET_EFI   := $(if $(filter x86_64-unknown-none,$(TARGET_TRIPLE)),BOOTX64
 # the boot/uefi inner make self-derives UEFI_CLANG from its CC there).
 UEFI_CLANG        ?= $(if $(filter x86_64-unknown-none,$(TARGET_TRIPLE)),$(CLANG))
 UEFI_DIGEST_CLANG := $(if $(filter x86_64-unknown-none,$(TARGET_TRIPLE)),$(UEFI_CLANG),clang)
-UEFI_BOOT_SRCS    := boot/uefi/main.c boot/uefi/boot_device.c boot/uefi/arch/$(UEFI_ARCH_FAMILY)/boot.c \
+UEFI_BOOT_SRCS    := boot/uefi/main.c boot/uefi/boot_config.c boot/uefi/boot_device.c boot/uefi/arch/$(UEFI_ARCH_FAMILY)/boot.c \
                      $(if $(filter aarch64,$(UEFI_ARCH_FAMILY)),boot/uefi/arch/aarch64/elf.c boot/uefi/arch/aarch64/fdt_early.c boot/uefi/arch/aarch64/handoff.S)
 
 UEFI_EFI_ARTIFACT := $(BUILD_DIR)/artifacts/uefi/$(UEFI_TARGET_EFI)
@@ -93,6 +93,7 @@ UEFI_EFI_ARTIFACT := $(BUILD_DIR)/artifacts/uefi/$(UEFI_TARGET_EFI)
 # change still re-keys both the staged runtime receipt and the EFI
 # artifact.
 UEFI_BOOT_INPUTS := $(UEFI_BOOT_SRCS) boot/uefi/arch/arch.h \
+                    boot/uefi/boot_config.h \
                     boot/uefi/boot_device.h \
                     kernel/include/core/bootinfo.h
 # LMA Task 2: the AArch64 loader consumes the shared layout constants

@@ -19,6 +19,7 @@ typedef efi_status_t EFI_STATUS;
 #endif
 
 #include "../../../kernel/include/core/bootinfo.h"
+#include "../boot_config.h"
 
 /* Shared helpers provided by common main.c, used by arch code. */
 efi_status_t capture_graphics(struct boot_context *ctx);
@@ -30,8 +31,10 @@ const char_t *arch_kernel_path(void);
 efi_status_t arch_init_handoff(struct boot_context **ctx_out);
 efi_status_t arch_load_kernel(const void *image, uint64_t image_size,
                               uint64_t *entry_out);
-efi_status_t arch_setup_graphics(struct boot_context *ctx);
-efi_status_t arch_fill_firmware(struct boot_context *ctx);
+efi_status_t arch_setup_graphics(struct boot_context *ctx,
+                                 const struct uefi_boot_config *config);
+efi_status_t arch_fill_firmware(struct boot_context *ctx,
+                                const struct uefi_boot_config *config);
 void arch_memory_buffer(efi_physical_address_t *phys_out,
                         uint64_t *capacity_out);
 void arch_build_memory(struct boot_context *ctx,

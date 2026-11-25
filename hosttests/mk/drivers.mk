@@ -607,6 +607,15 @@ LINK_CFLAGS_aarch64-fdt-early = $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) $(KE
 LINK_GROUP_aarch64-fdt-early := \
     $(TEST_BLD)/aarch64_fdt_early_production.o
 
+# UEFI ESP /config.txt parser (no firmware dependencies)
+$(TEST_BLD)/uefi_boot_config.o: $(TESTS_DIR)/boot/uefi/boot_config.c \
+		$(TESTS_DIR)/boot/uefi/boot_config.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(LIBC_INC) -c $< -o $@
+
+LINK_CFLAGS_uefi-boot-config = $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC)
+LINK_GROUP_uefi-boot-config := $(TEST_BLD)/uefi_boot_config.o
+
 .PHONY: test-aarch64-boot-elf
 test-aarch64-boot-elf: $(TEST_BLD)/test_aarch64_boot_elf.elf
 	$<

@@ -84,6 +84,12 @@ $(TEST_BLD)/test_timekeeping.o: $(TEST_CASES)/test_timekeeping.c
 $(TEST_BLD)/test_timekeeping.elf: $(TEST_BLD)/test_timekeeping.o $(LINK_GROUP_timekeeping)
 	$(HOST_CC) $(LINK_LDFLAGS_timekeeping) -o $@ $^
 
+$(TEST_BLD)/test_uefi_boot_config.o: $(TEST_CASES)/test_uefi_boot_config.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_uefi-boot-config)),$(LINK_CFLAGS_uefi-boot-config),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_uefi_boot_config.elf: $(TEST_BLD)/test_uefi_boot_config.o $(LINK_GROUP_uefi-boot-config)
+	$(HOST_CC) $(LINK_LDFLAGS_uefi-boot-config) -o $@ $^
+
 $(TEST_BLD)/test_usb_hid_report.o: $(TEST_CASES)/test_usb_hid_report.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_usb-hid-report)),$(LINK_CFLAGS_usb-hid-report),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@

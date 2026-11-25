@@ -625,19 +625,24 @@ efi_status_t arch_load_kernel(const void *image, uint64_t image_size,
     return EFI_SUCCESS;
 }
 
-efi_status_t arch_setup_graphics(struct boot_context *ctx)
+efi_status_t arch_setup_graphics(struct boot_context *ctx,
+                                 const struct uefi_boot_config *config)
 {
+    (void)config;
     /* Best-effort: a missing GOP must not abort the boot. */
     (void)capture_graphics(ctx);
     fb_beacon_bar(1);   /* GOP captured */
     return EFI_SUCCESS;
 }
 
-efi_status_t arch_fill_firmware(struct boot_context *ctx)
+efi_status_t arch_fill_firmware(struct boot_context *ctx,
+                                const struct uefi_boot_config *config)
 {
     const void *firmware_fdt;
     uint32_t fdt_size = 0;
     EFI_STATUS status;
+
+    (void)config;
 
     firmware_fdt = find_fdt(&fdt_size);
     if (firmware_fdt) {

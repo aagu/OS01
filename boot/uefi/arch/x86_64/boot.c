@@ -27,41 +27,6 @@ static int x86_kernel_reserved;       /* pages at 0x100000 allocated */
 static uintn_t x86_kernel_pages;
 static int x86_handoff_reserved;      /* pages at 0x60000 allocated */
 
-/* Narrow-string helpers.  config.txt / kernel.bin are ASCII byte streams;
- * under UEFI_NO_UTF8 the runtime's strchr/strlen/strcmp/atoi are wide and
- * must not be used on them. */
-static size_t narrow_strlen(const char *s)
-{
-    size_t n = 0;
-    while (s[n])
-        n++;
-    return n;
-}
-
-static const char *narrow_strchr(const char *s, int c)
-{
-    while (*s && *s != (char)c)
-        s++;
-    return (*s == (char)c) ? s : (const char *)0;
-}
-
-static int narrow_strcmp(const char *a, const char *b)
-{
-    while (*a && *a == *b) {
-        a++;
-        b++;
-    }
-    return (int)(unsigned char)*a - (int)(unsigned char)*b;
-}
-
-static long narrow_atoi(const char *s)
-{
-    long value = 0;
-    while (*s >= '0' && *s <= '9')
-        value = value * 10 + (*s++ - '0');
-    return value;
-}
-
 const char_t *arch_kernel_path(void)
 {
     return L"kernel.bin";
@@ -109,80 +74,18 @@ efi_status_t arch_load_kernel(const void *image, uint64_t image_size,
     return EFI_SUCCESS;
 }
 
-static void x86_parse_config(int *want_width, int *want_height)
-{
-    FILE *cfg;
-    long size;
-
-    *want_width = 1440;
-    *want_height = 900;
-    cfg = fopen(L"config.txt", L"r");
-    if (!cfg)
-        return;
-    if (fseek(cfg, 0, SEEK_END) != 0 || (size = ftell(cfg)) <= 0 ||
-        fseek(cfg, 0, SEEK_SET) != 0) {
-        fclose(cfg);
-        return;
-    }
-    {
-        char *buf = malloc((size_t)size + 1);
-        if (!buf) {
-            fclose(cfg);
-            return;
-        }
-        if (fread(buf, 1, (size_t)size, cfg) != (size_t)size) {
-            free(buf);
-            fclose(cfg);
-            return;
-        }
-        fclose(cfg);
-        buf[size] = 0;
-
-        /* Narrow scan: each line is "resolution WxH" or ignored. */
-        {
-            char *line = buf;
-            while (*line) {
-                char *nl = narrow_strchr(line, '\n');
-                char *tok = line;
-                char *sp;
-                if (nl)
-                    *nl = 0;
-                while (*tok == ' ' || *tok == '\t')
-                    tok++;
-                sp = narrow_strchr(tok, ' ');
-                if (sp)
-                    *sp = 0;
-                if (narrow_strcmp(tok, "resolution") == 0 && sp) {
-                    char *dim = sp + 1;
-                    char *x;
-                    while (*dim == ' ' || *dim == '\t')
-                        dim++;
-                    x = narrow_strchr(dim, 'x');
-                    if (x) {
-                        *x = 0;
-                        *want_width = (int)narrow_atoi(dim);
-                        *want_height = (int)narrow_atoi(x + 1);
-                    }
-                }
-                line = nl ? nl + 1 : line + narrow_strlen(line);
-            }
-        }
-        free(buf);
-    }
-}
-
-efi_status_t arch_setup_graphics(struct boot_context *ctx)
+efi_status_t arch_setup_graphics(struct boot_context *ctx,
+                                 const struct uefi_boot_config *config)
 {
     efi_guid_t gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
     efi_gop_t *gop = NULL;
     efi_gop_mode_info_t *info = NULL;
     uintn_t isiz = sizeof(efi_gop_mode_info_t), i;
     long current_h = 0, current_w = 0;
-    int want_w, want_h;
+    uint32_t want_w = config ? config->width : UEFI_BOOT_CONFIG_DEFAULT_WIDTH;
+    uint32_t want_h = config ? config->height : UEFI_BOOT_CONFIG_DEFAULT_HEIGHT;
     int expect_mode = 0;
     EFI_STATUS status;
-
-    x86_parse_config(&want_w, &want_h);
 
     status = BS->LocateProtocol(&gop_guid, NULL, (void **)&gop);
     if (EFI_ERROR(status) || !gop)
@@ -218,10 +121,13 @@ efi_status_t arch_setup_graphics(struct boot_context *ctx)
     return capture_graphics(ctx);
 }
 
-efi_status_t arch_fill_firmware(struct boot_context *ctx)
+efi_status_t arch_fill_firmware(struct boot_context *ctx,
+                                const struct uefi_boot_config *config)
 {
     efi_guid_t acpi_guid = ACPI_20_TABLE_GUID;
     uintn_t i;
+
+    (void)config;
 
     for (i = 0; i < ST->NumberOfTableEntries; i++) {
         if (guid_equal(&ST->ConfigurationTable[i].VendorGuid, &acpi_guid)) {

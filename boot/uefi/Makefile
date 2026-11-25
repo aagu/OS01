@@ -30,11 +30,13 @@ RUNTIME_DIR := $(UEFI_RUNTIME_DIR)
 ifeq ($(ARCH),x86_64)
 TARGET := BOOTX64.EFI
 SRCS := $(ROOT)/boot/uefi/main.c \
+        $(ROOT)/boot/uefi/boot_config.c \
         $(ROOT)/boot/uefi/boot_device.c \
         $(ROOT)/boot/uefi/arch/x86_64/boot.c
 else ifeq ($(ARCH),aarch64)
 TARGET := BOOTAA64.EFI
 SRCS := $(ROOT)/boot/uefi/main.c \
+        $(ROOT)/boot/uefi/boot_config.c \
         $(ROOT)/boot/uefi/boot_device.c \
         $(ROOT)/boot/uefi/arch/aarch64/boot.c \
         $(ROOT)/boot/uefi/arch/aarch64/elf.c \
@@ -144,6 +146,7 @@ FORCE:
 endif
 
 $(OUTDIR)/$(TARGET): $(SRCS) $(ROOT)/boot/uefi/arch/arch.h \
+		$(ROOT)/boot/uefi/boot_config.h \
 		$(ROOT)/boot/uefi/boot_device.h \
 		$(ROOT)/kernel/include/core/bootinfo.h \
 		$(UEFI_LAYOUT_HEADERS) \
