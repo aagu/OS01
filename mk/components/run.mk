@@ -118,8 +118,16 @@ define require_aarch64_uefi
 $(if $(AARCH64_UEFI_DISK),,$(error ERROR: aarch64-uefi targets require the aarch64-clang profile (AARCH64_UEFI_DISK is empty)))
 endef
 
+ifdef AARCH64_UEFI_DISK
+ifneq ($(filter run-aarch64-uefi test-aarch64 test-aarch64-boot-logo,$(MAKECMDGOALS)),)
+ifneq ($(filter qemu-virt,$(AARCH64_PLATFORM)),qemu-virt)
+$(error ERROR: $(filter run-aarch64-uefi test-aarch64 test-aarch64-boot-logo,$(MAKECMDGOALS)) is for QEMU virt only; got AARCH64_PLATFORM='$(AARCH64_PLATFORM)')
+endif
+endif
+endif
+
 .PHONY: aarch64-uefi
-aarch64-uefi: $(AARCH64_UEFI_DISK) $(AARCH64_UEFI_FIRMWARE)
+aarch64-uefi: $(AARCH64_UEFI_DISK) $(if $(filter qemu-virt,$(AARCH64_PLATFORM)),$(AARCH64_UEFI_FIRMWARE))
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
 

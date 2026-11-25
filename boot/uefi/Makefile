@@ -137,10 +137,7 @@ all: $(OUTDIR)/$(TARGET)
 ifneq ($(strip $(UEFI_LAYOUT_HEADERS)),)
 $(OUTDIR)/.aarch64_layout_cfg: FORCE
 	@mkdir -p $(OUTDIR)
-	@printf '%s\n' 'base=$(AARCH64_BOOT_BLOCK_BASE)' \
-	    'firmware-console=$(or $(AARCH64_FIRMWARE_CONSOLE_PA),none)' \
-	    'firmware-console-beacon=$(or $(AARCH64_FW_CONSOLE_BEACON),0)' \
-	    'skip-ebs=$(or $(AARCH64_SKIP_EBS),0)' > $@.new
+	@printf '%s\n' 'base=$(AARCH64_BOOT_BLOCK_BASE)' > $@.new
 	@sha256sum $(UEFI_LAYOUT_HEADERS) >> $@.new
 	@cmp -s $@.new $@ || { mv -f $@.new $@; find $(OUTDIR) -name '*.o' -delete; }
 AARCH64_LAYOUT_KEY := $(OUTDIR)/.aarch64_layout_cfg

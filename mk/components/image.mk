@@ -302,7 +302,9 @@ $(AARCH64_SELFTEST_MARKER): FORCE
 	@mv $@.tmp $@
 
 $(AARCH64_UEFI_DISK): $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
-		$(BUILD_DIR)/artifacts/kernel.elf $(AARCH64_UEFI_FIRMWARE) \
+		$(BUILD_DIR)/artifacts/kernel.elf \
+		$(if $(filter qemu-virt,$(AARCH64_PLATFORM)),$(AARCH64_UEFI_FIRMWARE)) \
+		$(AARCH64_ESP_CONFIG) \
 		$(HOST_MKDISK) $(INITTAB_FILE) \
 		$(if $(filter userland,$(PROFILE_CAPABILITIES)),$(AARCH64_ROOTFS_PROGRAM_ELFS) $(USER_ARTIFACT_DIR)/busybox.elf) \
 		$(if $(filter selftest,$(IMAGE_VARIANT)),$(AARCH64_SELFTEST_MARKER))
@@ -316,7 +318,7 @@ ifeq ($(IMAGE_VARIANT),selftest)
 	@mv $@.tmp $(dir $@)rootfs.selftest.manifest
 	@$(HOST_MKDISK) --output $@ --efi $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
 	  --temp-dir $(dir $@)tmp --rootfs-manifest $(dir $@)rootfs.selftest.manifest \
-	  --esp-kernel kernel.elf
+	  --esp-kernel kernel.elf --esp-config $(AARCH64_ESP_CONFIG)
 else
 	@$(MAKE) -C tools check-deps HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools
 	@mkdir -p $(dir $@) $(dir $@)tmp
@@ -338,7 +340,7 @@ else
 	@mv $@.tmp $(dir $@)rootfs.product.manifest
 	@$(HOST_MKDISK) --output $@ --efi $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
 	  --temp-dir $(dir $@)tmp --rootfs-manifest $(dir $@)rootfs.product.manifest \
-	  --esp-kernel kernel.elf
+	  --esp-kernel kernel.elf --esp-config $(AARCH64_ESP_CONFIG)
 endif
 
 endif

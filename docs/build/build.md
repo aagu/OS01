@@ -352,9 +352,13 @@ make PROFILE=aarch64-clang run-aarch64-uefi
 # 默认 SMP=1：串口依次可见 init pid=1 → OS01 Shell（`echo hi` 交互可用）。
 # 多核（显式 SMP=N，N≥2）按设计降级 kernel-only（串口有 warn 行）；
 # 多核用户态调度是 roadmap 的独立后续任务。
+
+# 双平台打包（共用同一套 BOOTAA64.EFI 和 kernel.elf，由 ESP /config.txt 区分）：
+make PROFILE=aarch64-clang aarch64-uefi                        # 默认 AARCH64_PLATFORM=qemu-virt -> image/aarch64-uefi.img（config/aarch64/uefi-qemu-virt.txt）
+make PROFILE=aarch64-clang AARCH64_PLATFORM=rpi5 aarch64-uefi  # RPi5 普通镜像 -> image/rpi5/aarch64-uefi.img（config/aarch64/uefi-rpi5.txt，不依赖 QEMU_EFI.fd）
 ```
 
-运行 `qemu-system-aarch64 -M virt -display none -serial stdio` + GPT 双分区启动镜像（ESP FAT32：BOOTAA64.EFI + kernel.elf；ext2 rootfs；固件在 pflash）。串口启动签名：`aarch64 uefi handoff ok`，接着 `phase1 boot ok`。`make PROFILE=aarch64-clang aarch64-uefi` 构建镜像 + 固件；`aarch64-uefi-kernel` 仅构建内核 ELF。三个目标都需要 `uefi` 能力（在 x86 profile 下干净失败）。
+运行 `qemu-system-aarch64 -M virt -display none -serial stdio` + GPT 双分区启动镜像（ESP FAT32：`BOOTAA64.EFI` + `kernel.elf` + `config.txt`；ext2 rootfs；固件在 pflash）。串口启动签名：`aarch64 uefi handoff ok`，接着 `phase1 boot ok`。`make PROFILE=aarch64-clang aarch64-uefi` 构建镜像 + 固件（`AARCH64_PLATFORM=rpi5` 时不获取/依赖 QEMU 固件）；`aarch64-uefi-kernel` 仅构建内核 ELF。RPi5 真机需在 TF 卡 VideoCore `config.txt` 启用 `enable_rp1_uart=1` 并链载 RPi5 UEFI v0.3（OS01 的 `config.txt` 位于装载 `BOOTAA64.EFI` 的 ESP 根目录；当前真机运行待实测）。三个目标都需要 `uefi` 能力（在 x86 profile 下干净失败）。
 
 ### 5. 测试
 

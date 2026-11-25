@@ -20,6 +20,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <time.h>
+#include <sys/wait.h>
 
 #define SECTOR_SIZE    512
 #define FAT32_SIZE_MB  64
@@ -262,11 +263,35 @@ static void add_parent_dirs(const char *dest)
     }
 }
 
+static void run_argv(char *const argv[])
+{
+    pid_t pid = fork();
+    if (pid < 0) {
+        perror("fork");
+        exit(1);
+    }
+    if (pid == 0) {
+        execvp(argv[0], argv);
+        perror(argv[0]);
+        _exit(127);
+    }
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        perror("waitpid");
+        exit(1);
+    }
+    if (!WIFEXITED(status) || WEXITSTATUS(status) != 0) {
+        fprintf(stderr, "Command failed (status=%d): %s\n", status, argv[0]);
+        exit(1);
+    }
+}
+
 int main(int argc, char **argv)
 {
     const char *efi_path       = NULL;
     const char *manifest_path  = NULL;
     const char *esp_kernel     = "kernel.bin";
+    const char *esp_config     = NULL;
 
     for (int i = 1; i < argc; i++) {
         if      (!strcmp(argv[i], "--output") && i+1 < argc)         output_path   = argv[++i];
@@ -274,6 +299,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--temp-dir") && i+1 < argc)       temp_dir      = argv[++i];
         else if (!strcmp(argv[i], "--rootfs-manifest") && i+1 < argc) manifest_path = argv[++i];
         else if (!strcmp(argv[i], "--esp-kernel") && i+1 < argc)     esp_kernel    = argv[++i];
+        else if (!strcmp(argv[i], "--esp-config") && i+1 < argc)     esp_config    = argv[++i];
     }
     if (!output_path || !efi_path || !temp_dir || !manifest_path) {
         fprintf(stderr, "Usage: mkdisk --output <image> --efi BOOTX64.EFI --temp-dir <dir> --rootfs-manifest <file>\n");
@@ -358,6 +384,12 @@ int main(int argc, char **argv)
     run_cmd("mcopy -i %s %s ::/EFI/BOOT 2>/dev/null", esp_tmp, efi_path);
     if (esp_kernel_src)
         run_cmd("mcopy -i %s %s ::/%s 2>/dev/null", esp_tmp, esp_kernel_src, esp_kernel);
+    if (esp_config) {
+        char *const mcopy_argv[] = {
+            "mcopy", "-i", esp_tmp, (char *)esp_config, "::/config.txt", NULL
+        };
+        run_argv(mcopy_argv);
+    }
     run_cmd("dd if=%s of=%s bs=512 seek=%lu conv=notrunc 2>/dev/null",
             esp_tmp, output_path, (unsigned long)PART1_START);
 

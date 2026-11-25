@@ -1,0 +1,2 @@
+platform rpi5
+console rp1-header
