@@ -955,6 +955,26 @@ $(TEST_BLD)/test_aarch64_pt_split.elf: $(TEST_BLD)/test_aarch64_pt_split.o \
 test-aarch64-pt-split: $(TEST_BLD)/test_aarch64_pt_split.elf
 	$(TEST_BLD)/test_aarch64_pt_split.elf
 
+# aarch64 virtio-mmio pre-SMP DTB mapping
+$(TEST_BLD)/aarch64_virtio_mmio_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/driver/virtio_mmio.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/virtio_mmio.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/uefi_memory_map.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/dtb.h \
+		$(TESTS_DIR)/kernel/include/core/bootinfo.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) -c $< -o $@
+
+LINK_CFLAGS_aarch64-virtio-mmio-map = $(HOST_CFLAGS) -DOS01_SELFTEST=1 \
+	-I$(TEST_MOCK)/page_table_aarch64_include \
+	$(KERNEL_INC) -idirafter $(TESTS_DIR)/libc/include $(FRAMEWORK_INC)
+LINK_GROUP_aarch64-virtio-mmio-map := \
+	$(TEST_BLD)/aarch64_virtio_mmio_production.o \
+	$(TEST_BLD)/aarch64_pt_production.o \
+	$(TEST_BLD)/vmm_gate_production.o \
+	$(TEST_BLD)/vmm_gate_test_stubs.o
+
 # aarch64 arch_vmm_init
 $(TEST_BLD)/test_aarch64_arch_vmm_init.o: \
 		$(TEST_CASES)/test_aarch64_arch_vmm_init.c \

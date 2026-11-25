@@ -1116,6 +1116,57 @@ int aarch64_pt_map_2m_block(uint64_t *root, uint64_t va, uint64_t pa,
     return AARCH64_PT_OK;
 }
 
+int aarch64_pt_ensure_device_2m(uint64_t *root, uint64_t va, uint64_t pa)
+{
+    const uint32_t perm = AARCH64_PT_KERNEL_RW | AARCH64_PT_DEVICE;
+    uint64_t want_desc;
+    uint64_t l2_idx;
+    uint64_t root_pa;
+    spinlock_T *pt_lock;
+    uint64_t *pmd = NULL;
+    int wr = AARCH64_PT_OK;
+    int wrc;
+    uint64_t cur;
+    int rv;
+
+    vmm_gate_check();
+    rv = root_valid(root);
+    if (rv != AARCH64_PT_OK) return rv;
+    if (!va_canonical(va)) return AARCH64_PT_EINVAL;
+    if ((va & (PAGE_2M_SIZE - 1)) != 0) return AARCH64_PT_EINVAL;
+    if ((pa & (PAGE_2M_SIZE - 1)) != 0) return AARCH64_PT_EINVAL;
+    if (pa >= AARCH64_PT_PA_LIMIT) return AARCH64_PT_EINVAL;
+
+    want_desc = aarch64_pt_encode_block_desc(pa, perm, 0);
+    l2_idx = (va >> AARCH64_PT_L2_SHIFT) & AARCH64_PT_IDX_MASK;
+    root_pa = (uint64_t)((uintptr_t)root - (uintptr_t)ARCH_PAGE_OFFSET);
+    pt_lock = pt_lock_for(root_pa, (uint32_t)l2_idx);
+    spin_lock(pt_lock);
+
+    wrc = walk_to_l2(root, va, true, &pmd, &wr);
+    if (wrc != 0) {
+        spin_unlock(pt_lock);
+        return wr;
+    }
+
+    cur = pmd[l2_idx];
+    if (cur == want_desc) {
+        spin_unlock(pt_lock);
+        return AARCH64_PT_OK;
+    }
+    if ((cur & AARCH64_PT_DESC_VALID) != 0 || cur != 0) {
+        spin_unlock(pt_lock);
+        return AARCH64_PT_ECONFLICT;
+    }
+
+    pmd[l2_idx] = want_desc;
+    dsb_ishst();
+    if (is_active_root(root))
+        tlb_invalidate_local(va);
+    spin_unlock(pt_lock);
+    return AARCH64_PT_OK;
+}
+
 /* Unmap a 2 MiB block (spec §4.4.5).  Reads pmd[l2] and dispatches:
  *   - block (V=1, bit1=0) → return PA via *pa_out, clear entry,
  *                            local TLBI, return OK.

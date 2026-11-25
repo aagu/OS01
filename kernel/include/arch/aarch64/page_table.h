@@ -217,6 +217,7 @@ uint64_t aarch64_pt_encode_block_desc(uint64_t pa, uint32_t perm,
  * split_block_2m is still -EPERM (Task 21 implements it). */
 int aarch64_pt_map_2m_block(uint64_t *root, uint64_t va, uint64_t pa,
                             uint32_t perm);
+int aarch64_pt_ensure_device_2m(uint64_t *root, uint64_t va, uint64_t pa);
 
 /* Unmap a 2 MiB block at `va` (spec §4.4.5 / §5.2).  Returns the
  * prior physical address via `*pa_out` (NULL to discard) before

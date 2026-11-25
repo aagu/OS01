@@ -323,6 +323,41 @@ def main():
                              check=True, text=True, capture_output=True).stdout.split()
         assert res == ['0', '1f00030000', '0', '0'], res
         print('PASS console_selection_cases')
+
+        # virtio-mmio DTB validation cases (Task 4)
+        vio_overflow = fixture()
+        vio_overflow[2].append(node('virtio_mmio@fffffffffffff000', [
+            ('compatible', string('virtio,mmio')),
+            ('reg', cells(0xffffffff, 0xfffff000, 0, 0x2000)),
+        ]))
+        p_vo = tmp / 'vio_overflow.dtb'
+        p_vo.write_bytes(flatten(vio_overflow))
+        res = subprocess.run([str(runner), str(p_vo), '0'],
+                             check=True, text=True, capture_output=True).stdout.split()
+        assert res[0] == '-4', res
+
+        vio_short = fixture()
+        vio_short[2].append(node('virtio_mmio@a000000', [
+            ('compatible', string('virtio,mmio')),
+            ('reg', cells(0, 0x0a000000, 0, 0x100)),
+        ]))
+        p_vs = tmp / 'vio_short.dtb'
+        p_vs.write_bytes(flatten(vio_short))
+        res = subprocess.run([str(runner), str(p_vs), '0'],
+                             check=True, text=True, capture_output=True).stdout.split()
+        assert res[0] == '-4', res
+
+        vio_unaligned = fixture()
+        vio_unaligned[2].append(node('virtio_mmio@a000002', [
+            ('compatible', string('virtio,mmio')),
+            ('reg', cells(0, 0x0a000002, 0, 0x200)),
+        ]))
+        p_vu = tmp / 'vio_unaligned.dtb'
+        p_vu.write_bytes(flatten(vio_unaligned))
+        res = subprocess.run([str(runner), str(p_vu), '0'],
+                             check=True, text=True, capture_output=True).stdout.split()
+        assert res[0] == '-4', res
+        print('PASS virtio_mmio_cases')
     print(f'{len(encoded)} DTB cases passed')
 
 

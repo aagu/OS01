@@ -36,6 +36,12 @@ $(TEST_BLD)/test_aarch64_user_asid.o: $(TEST_CASES)/test_aarch64_user_asid.c
 $(TEST_BLD)/test_aarch64_user_asid.elf: $(TEST_BLD)/test_aarch64_user_asid.o $(LINK_GROUP_aarch64-user-asid)
 	$(HOST_CC) $(LINK_LDFLAGS_aarch64-user-asid) -o $@ $^
 
+$(TEST_BLD)/test_aarch64_virtio_mmio_map.o: $(TEST_CASES)/test_aarch64_virtio_mmio_map.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_aarch64-virtio-mmio-map)),$(LINK_CFLAGS_aarch64-virtio-mmio-map),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_aarch64_virtio_mmio_map.elf: $(TEST_BLD)/test_aarch64_virtio_mmio_map.o $(LINK_GROUP_aarch64-virtio-mmio-map)
+	$(HOST_CC) $(LINK_LDFLAGS_aarch64-virtio-mmio-map) -o $@ $^
+
 $(TEST_BLD)/test_boot_devpath.o: $(TEST_CASES)/test_boot_devpath.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_boot-devpath)),$(LINK_CFLAGS_boot-devpath),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@

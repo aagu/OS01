@@ -1412,6 +1412,19 @@
       "source": "hosttests/cases/test_aarch64_user_asid.c"
     },
     {
+      "id": "test_aarch64_virtio_mmio_map",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "memory.aarch64.virtio_mmio_map"
+      ],
+      "link": "aarch64-virtio-mmio-map",
+      "source": "hosttests/cases/test_aarch64_virtio_mmio_map.c"
+    },
+    {
       "kind": "host_test",
       "id": "test_ahci_lifecycle",
       "layer": "host",

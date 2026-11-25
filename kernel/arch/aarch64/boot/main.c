@@ -6,6 +6,7 @@
 #include <arch/aarch64/boot_direct_map.h>
 #include <arch/aarch64/boot_layout.h>
 #include <arch/virtio_mmio.h>          // arch_virtio_mmio_map_early (pre-SMP MMIO window)
+#include <arch/aarch64/virtio_mmio.h>  // aarch64_virtio_mmio_prepare
 #include <arch/aarch64/page_table_selftest.h>
 #include <core/bootinfo.h>
 #include <log/log.h>      /* for log_err/log_info macros */
@@ -583,21 +584,6 @@ void arch_boot_memory(const struct boot_context *bootctx)
         }
     }
 
-    /* Virtio-mmio MMIO window: mapped here (pre-SMP) because the VMM
-     * change gate rejects TTBR1 writes once smp_starting is set — the
-     * virtio-blk subsys probes in SUBSYS_PHASE_STORAGE, which runs after
-     * percpu bring-up but before the APs are IPI-ready. */
-#if defined(AARCH64_VIRTIO_MMIO) && !AARCH64_VIRTIO_MMIO
-    /* Platform without virtio-mmio (e.g. Raspberry Pi 5): there is no
-     * window to map, and 0x0a000000 lies inside RAM, so the QEMU map
-     * would be refused. Storage bring-up for such a board comes later. */
-#else
-    if (arch_virtio_mmio_map_early() != 0) {
-        kputs("FATAL: virtio-mmio window map failed\n");
-        for (;;) arch_cpu_halt();
-    }
-#endif
-
     aarch64_boot_fb_init(bootctx);
     if (aarch64_page_table_probe_prepare()) {
         log_err("M1 FATAL reason=probe\n");
@@ -689,6 +675,13 @@ void arch_boot_controllers(const struct boot_context *bootctx)
 {
     dtb_init(bootctx);
     pl011_init();
+    {
+        int vio_rc = aarch64_virtio_mmio_prepare(bootctx);
+        if (vio_rc != 0) {
+            log_err("FATAL: virtio-mmio map failed rc=%d\n", vio_rc);
+            for (;;) arch_cpu_halt();
+        }
+    }
     __asm__ __volatile__("msr daifclr, #4\n\tisb" ::: "memory");
 #if AARCH64_SERROR_TEST
     {
