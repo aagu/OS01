@@ -130,7 +130,7 @@ def main():
         ('missing_timer', fixture(missing='timer'), 0, -4, []),
         ('custom_gicc', fixture(gicc=0x08020000), 0, 0, [0]),
         ('zero_gicc', fixture(gicc=0x0), 0, -4, []),
-        ('short_uart_reg', fixture(uart_size=0xfff), 0, -4, []),
+        ('short_uart_reg', fixture(uart_size=0x40), 0, -4, []),
         ('disabled_cpu_ignored', fixture(cpus=(0, 1), disabled=(1,)), 0, 0, [0]),
         ('duplicate_mpidr', fixture(cpus=(0, 0)), 0, -2, []),
         ('capacity_plus_one', fixture(cpus=tuple(range(9))), 0, -2, []),

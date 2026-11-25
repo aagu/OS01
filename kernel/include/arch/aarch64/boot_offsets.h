@@ -36,9 +36,16 @@
  * hosttests/cases/test_bootinfo_abi.c. */
 #define BOOT_CTX_MAGIC_OFF             0
 #define BOOT_CTX_FLAGS_OFF             12
+#define BOOT_CTX_GRAPHICS_H_RES_OFF    24
+#define BOOT_CTX_GRAPHICS_V_RES_OFF    28
+#define BOOT_CTX_GRAPHICS_STRIDE_OFF   32
+#define BOOT_CTX_GRAPHICS_FB_BASE_OFF  40
+#define BOOT_CTX_GRAPHICS_FB_SIZE_OFF  48
 #define BOOT_CTX_EARLY_CONSOLE_OFF     176
 #define BOOT_CTX_EARLY_DEVBASE_OFF     184
 #define BOOT_CTX_EARLY_DEVBLOCKS_OFF   192
+/* Assembly-safe BOOT_CONTEXT_HAS_FRAMEBUFFER (enum in bootinfo.h). */
+#define BOOT_CTX_FLAG_FRAMEBUFFER      (1 << 0)
 /* Assembly-safe BOOT_CONTEXT_HAS_EARLY_MMIO (enum in bootinfo.h). */
 #define BOOT_CTX_FLAG_EARLY_MMIO       (1 << 7)
 #define BOOT_CTX_MAGIC                 0x4f533031

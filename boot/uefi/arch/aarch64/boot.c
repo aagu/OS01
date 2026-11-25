@@ -31,7 +31,11 @@ extern const uint8_t aarch64_handoff_stub_start[];
 extern const uint8_t aarch64_handoff_stub_end[];
 __attribute__((noreturn)) void aarch64_enter_kernel(uint64_t entry,
                                                     uint64_t context_phys,
-                                                    uint64_t trampoline_phys);
+                                                    uint64_t trampoline_phys,
+                                                    uint64_t beacon_pa,
+                                                    uint64_t fb_base,
+                                                    uint64_t fb_stride,
+                                                    uint64_t fb_pixel);
 
 struct aarch64_fixed_allocation {
     efi_physical_address_t address;
@@ -46,6 +50,127 @@ static uintn_t aarch64_fdt_pages;
 static efi_physical_address_t aarch64_mmap_phys;
 static uintn_t aarch64_mmap_pages;
 static int aarch64_trampoline_reserved;  /* AARCH64_TRAMPOLINE_BASE, 1 page */
+
+#if defined(AARCH64_FIRMWARE_CONSOLE_PA) && AARCH64_FW_CONSOLE_BEACON
+/* Framebuffer stage beacons.
+ *
+ * A board whose UEFI console is HDMI and whose SerialIo is the debug UART
+ * leaves neither the serial header nor the screen showing loader progress,
+ * so a hang before the handoff is invisible. Each stage paints one 96x40
+ * block on the framebuffer; counting the blocks tells how far the loader
+ * got. The blocks stop at ExitBootServices (the protocol is gone
+ * afterwards); the trampoline's 'H' on the serial UART marks that step.
+ * All fills are direct framebuffer stores: calling GOP->Blt inside the
+ * ExitBootServices retry loop would itself be a boot service call, and a
+ * service that allocates invalidates the memory-map key the loop is
+ * retrying with. A second row of small blocks counts loop iterations. */
+#define FB_BEACON_BARS 5u
+#define FB_BEACON_W    96u
+#define FB_BEACON_H    40u
+
+static struct {
+    int probed;
+    efi_gop_t *gop;
+    uint64_t fb_base;
+    uint32_t stride;
+    uint32_t width;
+    uint32_t height;
+    uint32_t format;
+} fb_beacon;
+
+static void fb_beacon_probe(void)
+{
+    efi_guid_t gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+    efi_gop_t *gop = NULL;
+
+    if (fb_beacon.probed)
+        return;
+    fb_beacon.probed = 1;
+    if (!BS || !BS->LocateProtocol)
+        return;
+    if (EFI_ERROR(BS->LocateProtocol(&gop_guid, NULL, (void **)&gop)) ||
+        !gop || !gop->Mode || !gop->Mode->Information)
+        return;
+    fb_beacon.gop = gop;
+    fb_beacon.fb_base = (uint64_t)gop->Mode->FrameBufferBase;
+    fb_beacon.stride = gop->Mode->Information->PixelsPerScanLine;
+    fb_beacon.width = gop->Mode->Information->HorizontalResolution;
+    fb_beacon.height = gop->Mode->Information->VerticalResolution;
+    fb_beacon.format = (uint32_t)gop->Mode->Information->PixelFormat;
+}
+
+static uint32_t fb_beacon_pixel(uint32_t r, uint32_t g, uint32_t b)
+{
+    if (fb_beacon.format == (uint32_t)PixelRedGreenBlueReserved8BitPerColor)
+        return (r & 0xffu) | ((g & 0xffu) << 8) | ((b & 0xffu) << 16);
+    if (fb_beacon.format == (uint32_t)PixelBlueGreenRedReserved8BitPerColor)
+        return (b & 0xffu) | ((g & 0xffu) << 8) | ((r & 0xffu) << 16);
+    return 0x00ffffffu;   /* PixelBitMask / PixelBltOnly: white */
+}
+
+static void fb_beacon_fill(uint32_t x, uint32_t y, uint32_t w, uint32_t h,
+                           uint32_t color)
+{
+    volatile uint32_t *fb = (volatile uint32_t *)(uintptr_t)fb_beacon.fb_base;
+
+    for (uint32_t row = 0; row < h; ++row) {
+        volatile uint32_t *p = fb + (uint64_t)(y + row) * fb_beacon.stride + x;
+        for (uint32_t col = 0; col < w; ++col)
+            p[col] = color;
+    }
+}
+
+static void fb_beacon_bar(unsigned stage)
+{
+    static const uint8_t colors[FB_BEACON_BARS][3] = {
+        { 0xff, 0x00, 0x00 }, { 0x00, 0xff, 0x00 },
+        { 0x00, 0x00, 0xff }, { 0xff, 0xff, 0x00 },
+        { 0xff, 0x00, 0xff },   /* ExitBootServices returned success */
+    };
+    uint32_t x = 24u + stage * 120u;
+    uint32_t y = 24u;
+
+    fb_beacon_probe();
+    if (stage >= FB_BEACON_BARS || fb_beacon.fb_base == 0u ||
+        fb_beacon.stride == 0u ||
+        x + FB_BEACON_W > fb_beacon.width ||
+        y + FB_BEACON_H > fb_beacon.height)
+        return;
+    fb_beacon_fill(x, y, FB_BEACON_W, FB_BEACON_H,
+                   fb_beacon_pixel(colors[stage][0], colors[stage][1],
+                                   colors[stage][2]));
+}
+
+/* Pre-EBS UART probes: one write-only store each, no register read.
+ * 'P' goes to the firmware/VideoCore alias the knob names; 'Q' goes to
+ * the CPU-side PCIe alias the device tree gives the RP1 UART. Whichever
+ * letter reaches the header serial is the address the kernel must use. */
+static void pre_ebs_uart_mark(uint64_t pa, char c)
+{
+    volatile uint32_t *dr = (volatile uint32_t *)(uintptr_t)pa;
+
+    dr[0] = (uint32_t)(unsigned char)c;
+}
+
+/* One 48x24 marker per ExitBootServices attempt, second row. More than one
+ * means the firmware kept invalidating the memory-map key. */
+static void fb_beacon_retry(unsigned attempt)
+{
+    uint32_t x = 24u + (attempt - 1u) * 60u;
+    uint32_t y = 80u;
+
+    fb_beacon_probe();
+    if (attempt == 0u || attempt > 16u || fb_beacon.fb_base == 0u ||
+        fb_beacon.stride == 0u ||
+        x + 48u > fb_beacon.width || y + 24u > fb_beacon.height)
+        return;
+    fb_beacon_fill(x, y, 48u, 24u, fb_beacon_pixel(0xff, 0xff, 0xff));
+}
+#else
+#define fb_beacon_bar(stage) ((void)0)
+#define fb_beacon_retry(attempt) ((void)0)
+#define pre_ebs_uart_mark(pa, c) ((void)0)
+#endif
 
 static efi_serial_io_protocol_t *serial_io_protocol(void)
 {
@@ -227,6 +352,24 @@ static const void *find_fdt(uint32_t *size_out)
         *size_out = total_size;
         return fdt;
     }
+
+    /* Raspberry Pi 5: the VideoCore firmware loads the device tree at PA
+     * 0x1f0000 (its log: "Loading 'bcm2712-rpi-5-b.dtb' ... offset
+     * 0x1f0000") even when the UEFI does not install the EFI DTB
+     * configuration table. Fall back to that copy. */
+    {
+        const uint8_t *fw_fdt = (const uint8_t *)(uintptr_t)UINT64_C(0x1f0000);
+        uint32_t total_size;
+
+        if (load_be32(fw_fdt) == AARCH64_FDT_MAGIC) {
+            total_size = load_be32(fw_fdt + sizeof(uint32_t));
+            if (total_size >= AARCH64_FDT_HEADER_SIZE &&
+                total_size <= UINT32_C(0x200000)) {
+                *size_out = total_size;
+                return fw_fdt;
+            }
+        }
+    }
     return NULL;
 }
 
@@ -287,6 +430,8 @@ efi_status_t arch_init_handoff(struct boot_context **ctx_out)
     efi_physical_address_t addr;
     struct boot_context *ctx;
     EFI_STATUS status;
+
+    fb_beacon_bar(0);   /* loader main reached */
 
     status = alloc_handoff_pages(1, &addr);
     if (EFI_ERROR(status))
@@ -484,6 +629,7 @@ efi_status_t arch_setup_graphics(struct boot_context *ctx)
 {
     /* Best-effort: a missing GOP must not abort the boot. */
     (void)capture_graphics(ctx);
+    fb_beacon_bar(1);   /* GOP captured */
     return EFI_SUCCESS;
 }
 
@@ -523,12 +669,28 @@ efi_status_t arch_fill_firmware(struct boot_context *ctx)
             ctx->flags |= BOOT_CONTEXT_HAS_EARLY_MMIO;
         }
     }
+#ifdef AARCH64_FIRMWARE_CONSOLE_PA
+    /* The console is the UART the firmware brought up, wherever the device
+     * tree put the PL011 (Raspberry Pi 5: the DTB names the SoC UART on the
+     * debug connector, the 40-pin header carries RP1's). The kernel maps its
+     * block beside the device window; when no window could be derived at
+     * all, that block stands in as the window so diagnostics still get out. */
+    if ((ctx->flags & BOOT_CONTEXT_HAS_EARLY_MMIO) == 0u) {
+        ctx->early_mmio.device_base =
+            (uint64_t)AARCH64_FIRMWARE_CONSOLE_PA & ~UINT64_C(0x1fffff);
+        ctx->early_mmio.device_blocks = 1;
+        ctx->early_mmio.reserved = 0;
+        ctx->flags |= BOOT_CONTEXT_HAS_EARLY_MMIO;
+    }
+    ctx->early_mmio.console_base = (uint64_t)AARCH64_FIRMWARE_CONSOLE_PA;
+#endif
     /* Best-effort: if EFI_RNG_PROTOCOL is present, fetch 32 bytes
      * of boot entropy for the kernel CSPRNG. Without this, aarch64
      * (RNDR not yet wired) would land in the cycle-counter ^ jiffies
      * fallback and random_init() would fail-closed, aborting every
      * user-space program on its all-zero canary. */
     status = capture_entropy(ctx);
+    fb_beacon_bar(2);   /* firmware tables (FDT, early MMIO, entropy) ready */
     return status;
 }
 
@@ -597,6 +759,17 @@ void arch_build_memory(struct boot_context *ctx,
     ctx->memory.format = BOOT_MEMORY_FORMAT_UEFI_RAW;
     ctx->memory.descriptor_version = desc_version;
     ctx->flags |= BOOT_CONTEXT_HAS_MEMORY_MAP;
+#if defined(AARCH64_FIRMWARE_CONSOLE_PA) && AARCH64_FW_CONSOLE_BEACON
+    {
+        /* One round per GetMemoryMap → ExitBootServices attempt. */
+        static unsigned ebs_attempts;
+        ++ebs_attempts;
+        fb_beacon_bar(3);                 /* memory map obtained */
+        fb_beacon_retry(ebs_attempts);    /* second-row attempt marker */
+        pre_ebs_uart_mark((uint64_t)AARCH64_FIRMWARE_CONSOLE_PA, 'P');
+        pre_ebs_uart_mark(UINT64_C(0x1f00030000), 'Q');
+    }
+#endif
 }
 
 void arch_release(void)
@@ -627,8 +800,86 @@ void arch_puts(const char *s)
     uefi_puts(s);
 }
 
+/* Cache maintenance for the handoff.
+ *
+ * The kernel's first instructions run at EL1 with the MMU off, so its
+ * fetches and data reads bypass the caches and see DRAM directly. Every
+ * byte this loader wrote (kernel image, boot_context, FDT copy, memory
+ * map, trampoline) went through cacheable UEFI mappings and may still be
+ * dirty in the D-cache. Without a clean to the point of coherency the
+ * kernel executes stale DRAM (undefined instruction -> firmware VBAR ->
+ * hang) or reads a stale boot_context. QEMU does not model caches, so this
+ * only shows up on hardware. Per-VA `dc civac` over the exact regions
+ * avoids depending on cache geometry from CCSIDR. */
+static uint32_t cache_line_bytes(void)
+{
+    uint64_t ctr;
+
+    __asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr));
+    return 4u << ((uint32_t)(ctr >> 16) & 0xfu);   /* CTR_EL0.DminLine */
+}
+
+static void clean_invalidate_dcache(uint64_t base, uint64_t size, uint32_t line)
+{
+    uint64_t addr = base & ~(uint64_t)(line - 1u);
+    uint64_t end = (base + size + line - 1u) & ~(uint64_t)(line - 1u);
+
+    for (; addr < end; addr += line)
+        __asm__ __volatile__("dc civac, %0" :: "r"(addr) : "memory");
+}
+
+static void flush_handoff_caches(void)
+{
+    uint32_t line = cache_line_bytes();
+
+    clean_invalidate_dcache((uint64_t)AARCH64_BOOT_BLOCK_BASE,
+                            (uint64_t)(AARCH64_BOOT_BLOCK_END -
+                                       AARCH64_BOOT_BLOCK_BASE), line);
+    clean_invalidate_dcache((uint64_t)AARCH64_TRAMPOLINE_BASE,
+                            (uint64_t)AARCH64_PAGE_SIZE, line);
+    if (aarch64_ctx_phys != 0u)
+        clean_invalidate_dcache((uint64_t)aarch64_ctx_phys,
+                                (uint64_t)AARCH64_PAGE_SIZE, line);
+    if (aarch64_fdt_phys != 0u && aarch64_fdt_pages != 0u)
+        clean_invalidate_dcache((uint64_t)aarch64_fdt_phys,
+                                (uint64_t)aarch64_fdt_pages *
+                                    (uint64_t)AARCH64_PAGE_SIZE, line);
+    if (aarch64_mmap_phys != 0u && aarch64_mmap_pages != 0u)
+        clean_invalidate_dcache((uint64_t)aarch64_mmap_phys,
+                                (uint64_t)aarch64_mmap_pages *
+                                    (uint64_t)AARCH64_PAGE_SIZE, line);
+    __asm__ __volatile__("dsb sy" ::: "memory");
+    __asm__ __volatile__("ic iallu" ::: "memory");
+    __asm__ __volatile__("dsb sy\n\tisb" ::: "memory");
+}
+
 __attribute__((noreturn)) void arch_enter_kernel(uint64_t entry,
                                                  uint64_t context_phys)
 {
-    aarch64_enter_kernel(entry, context_phys, AARCH64_TRAMPOLINE_BASE);
+    uint64_t beacon_pa = 0;
+    uint64_t fb_base = 0, fb_stride = 0, fb_pixel = 0;
+
+    flush_handoff_caches();
+
+#if defined(AARCH64_FIRMWARE_CONSOLE_PA) && AARCH64_FW_CONSOLE_BEACON
+    /* Bring-up beacon: hand the firmware-initialized UART's PA to the
+     * trampoline, which prints 'H' there with the MMU off. A board whose
+     * UEFI console is HDMI otherwise gives no serial evidence that the
+     * loader reached the handoff. The store is write-only: a host with no
+     * device at that address drops it instead of faulting, so QEMU runs of
+     * the same image stay usable. */
+    beacon_pa = (uint64_t)AARCH64_FIRMWARE_CONSOLE_PA;
+    /* Past ExitBootServices: no protocol calls, only the cached
+     * framebuffer fill. Magenta means the handoff is being entered. */
+    fb_beacon_bar(4);
+    /* The trampoline paints a white 16x16 block after its UART store, so
+     * a visible block proves the store did not wedge the CPU. */
+    if (fb_beacon.fb_base != 0u && fb_beacon.stride != 0u) {
+        fb_base = fb_beacon.fb_base;
+        fb_stride = fb_beacon.stride;
+        fb_pixel = fb_beacon_pixel(0xff, 0xff, 0xff);
+    }
+#endif
+    aarch64_enter_kernel(entry, context_phys, AARCH64_TRAMPOLINE_BASE, beacon_pa,
+                         fb_base, fb_stride, fb_pixel);
 }

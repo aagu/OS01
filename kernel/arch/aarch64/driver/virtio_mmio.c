@@ -14,6 +14,10 @@ static bool s_window_mapped;
 
 int arch_virtio_mmio_map_early(void)
 {
+#if defined(AARCH64_VIRTIO_MMIO) && !AARCH64_VIRTIO_MMIO
+    /* No virtio-mmio on this platform: nothing to map. */
+    return 0;
+#endif
     if (s_window_mapped)
         return 0;
 

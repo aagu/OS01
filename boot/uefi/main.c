@@ -348,11 +348,23 @@ int main(int argc, char_t **argv)
             status = EFI_LOAD_ERROR;
             break;
         }
+#if defined(AARCH64_SKIP_EBS) && AARCH64_SKIP_EBS
+        /* Bring-up workaround: the Raspberry Pi 5 UEFI tears down the
+         * PCIe/RP1 path as it shuts down, taking the CPU's access to the
+         * header UART with it (and its USB shutdown is a known lockup
+         * source). Cancel the watchdog and enter the kernel with boot
+         * services resident; the kernel masks IRQs in its first
+         * instruction and never calls back into firmware services. */
+        if (BS->SetWatchdogTimer)
+            (void)BS->SetWatchdogTimer(0, 0, 0, NULL);
+        status = EFI_SUCCESS;
+#else
         status = BS->ExitBootServices(IM, map_key);
         if (status == EFI_INVALID_PARAMETER)
             continue;                    /* map changed: refetch */
         if (EFI_ERROR(status))
             break;
+#endif
         arch_enter_kernel(entry, (uint64_t)ctx);   /* noreturn */
     }
 

@@ -38,16 +38,18 @@ static struct {
 static bool prune_pa_reserved(uint64_t pa, const struct MEMORY_RANGE *ram,
                               size_t count)
 {
-    struct aarch64_device_window dev;
-    size_t i;
+    struct aarch64_device_windows dev;
+    size_t i, k;
 
     if (pa < (uint64_t)AARCH64_BOOT_BLOCK_END &&
         pa + PAGE_2M_SIZE > (uint64_t)AARCH64_BOOT_BLOCK_BASE)
         return true;    /* inside the boot block B */
-    aarch64_device_window_get(&dev);
-    if (pa < dev.end_pa &&
-        pa + PAGE_2M_SIZE > dev.base_pa)
-        return true;    /* inside the device window D */
+    aarch64_device_windows_get(&dev);
+    for (k = 0; k < dev.count && k < AARCH64_DEVICE_WINDOWS; k++) {
+        if (pa < dev.window[k].end_pa &&
+            pa + PAGE_2M_SIZE > dev.window[k].base_pa)
+            return true;    /* inside a device window D */
+    }
     for (i = 0; i < count; i++) {
         if (pa < ram[i].phys_end && pa + PAGE_2M_SIZE > ram[i].phys_start)
             return true;    /* overlaps a range about to be installed */

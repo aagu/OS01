@@ -1,5 +1,6 @@
 /* UEFI-only DTB handoff wrapper. Pure parsing lives in dtb_parse.c. */
 #include <arch/aarch64/dtb.h>
+#include <arch/aarch64/device_window.h>
 #include <arch/aarch64/handoff_layout.h>
 #include <arch/cpu.h>
 #include <core/bootinfo.h>
@@ -86,6 +87,19 @@ void dtb_init(const struct boot_context *handoff)
     if (rc == -2) dtb_fatal("invalid CPU topology");
     if (rc == -3) dtb_fatal("invalid PSCI binding");
     if (rc) dtb_fatal("unsupported or missing platform devices");
+    /* The console stays on the UART the loader parked in the handoff: that
+     * is the address head.S already printed through and the one mapped as a
+     * Device window. It may be a firmware-initialized UART the device tree
+     * names elsewhere or not at all — Raspberry Pi 5 keeps its DTB PL011 on
+     * the debug connector while the 40-pin header carries RP1's — whose
+     * interrupt is not this GIC's, so such a console is output-only. */
+    {
+        uint64_t console = aarch64_boot_early_console_pa();
+        if (console != 0u && console != parsed.pl011_base) {
+            parsed.pl011_base = console;
+            parsed.pl011_spi = 0u;
+        }
+    }
     for (uint32_t i = 0; i < sizeof(platform); ++i)
         ((volatile uint8_t *)&platform)[i] = ((uint8_t *)&parsed)[i];
     kputs("[dtb] /cpus: ");
@@ -95,5 +109,19 @@ void dtb_init(const struct boot_context *handoff)
     kputs("\n");
     kputs("[smp] topology source=uefi-dtb cpus=");
     kputu(platform.topology.cpu_count);
+    kputs("\n");
+    /* The translated device addresses, for bring-up on boards whose buses
+     * remap them: a wrong PL011 here is a console printing into nowhere, a
+     * wrong GIC is a silent hang at the first interrupt. */
+    kputs("[dtb] pl011=0x");
+    kputx(platform.pl011_base);
+    kputs(" spi=");
+    kputu(platform.pl011_spi);
+    kputs(" clk=");
+    kputu(platform.pl011_clock);
+    kputs(" gicd=0x");
+    kputx(platform.gicd_base);
+    kputs(" gicc=0x");
+    kputx(platform.gicc_base);
     kputs("\n");
 }

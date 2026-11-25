@@ -27,3 +27,45 @@ void aarch64_build_boot_page_tables(uint64_t tables[6][512], uint64_t boot_base,
         }
     }
 }
+
+/* Device blocks are never executable and never shareable: the same
+ * descriptor the builder above emits inside the low window. */
+#define BOOT_DEVICE_BLOCK (AARCH64_PT_DESC_VALID | AARCH64_PT_DESC_AF | \
+                           AARCH64_PT_DESC_UXN | AARCH64_PT_DESC_PXN | \
+                           AARCH64_PT_ATTR_DEVICE)
+/* Table descriptors carry the next level's address in bits [47:12]. */
+#define BOOT_TABLE_PA_MASK UINT64_C(0x0000ffffffff000)
+
+__attribute__((section(".boot.text.early_mmu")))
+void aarch64_build_boot_window(uint64_t tables[6][512], unsigned table,
+                               uint64_t base, uint64_t end)
+{
+    const uint64_t table_flags = AARCH64_PT_DESC_VALID | AARCH64_PT_DESC_TABLE;
+    const uint64_t low_end = (uint64_t)AARCH64_BOOT_MAP_END;
+    const uint64_t block = (uint64_t)AARCH64_BOOT_BLOCK_SIZE;
+
+    if (base < low_end) {
+        /* Inside the identity map: the builder left these blocks Normal. */
+        uint64_t *pmd = tables[2 + (unsigned)(base >> 30)];
+        for (uint64_t pa = base; pa < end; pa += block)
+            pmd[(pa >> 21) & 511] = pa | BOOT_DEVICE_BLOCK;
+        return;
+    }
+    {
+        /* One L1 slot (1 GiB) per window; a slot may already carry the
+         * other window's table, which is then extended in place. */
+        uint64_t *pmd;
+        uint64_t desc = tables[1][base >> 30];
+        if (desc & AARCH64_PT_DESC_VALID) {
+            pmd = (uint64_t *)(uintptr_t)(desc & BOOT_TABLE_PA_MASK);
+        } else {
+            pmd = tables[table];
+            tables[1][base >> 30] = (uintptr_t)pmd | table_flags;
+        }
+        for (unsigned i = 0; i < 512; ++i) {
+            uint64_t pa = (base & ~(uint64_t)0x3fffffff) + ((uint64_t)i << 21);
+            if (pa >= base && pa < end)
+                pmd[i] = pa | BOOT_DEVICE_BLOCK;
+        }
+    }
+}

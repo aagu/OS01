@@ -98,19 +98,72 @@ _Static_assert(RT_DESC_UXN == (UINT64_C(1)<<54), "UXN bit");
  * install a handoff keep the documented behavior. */
 #define RT_B_BASE  (AARCH64_BOOT_BLOCK_BASE)
 #define RT_B_END   (AARCH64_BOOT_BLOCK_END)
-static struct aarch64_device_window rt_d_window = {
-    AARCH64_BOOT_DEVICE_BASE,
-    AARCH64_BOOT_DEVICE_END,
+/* D may be two windows: the handoff's, plus the console's own block when it
+ * sits outside (device_window.c). Listed ascending, never overlapping. */
+static struct aarch64_device_windows rt_d_windows = {
+    { { AARCH64_BOOT_DEVICE_BASE, AARCH64_BOOT_DEVICE_END }, },
+    1u,
 };
-#define RT_D_BASE  (rt_d_window.base_pa)
-#define RT_D_END   (rt_d_window.end_pa)
 
-static void rt_refresh_d_window(void)
+static void rt_refresh_d_windows(void)
 {
-    aarch64_device_window_get(&rt_d_window);
+    aarch64_device_windows_get(&rt_d_windows);
+}
+
+static size_t rt_window_blocks(const struct aarch64_device_window *w)
+{
+    return (size_t)((w->end_pa - w->base_pa) >> RT_L2_SHIFT);
+}
+
+/* The device windows as one PA-ascending stream of 2 MiB blocks: how many
+ * there are, and the PA of the n-th. */
+static size_t rt_d_blocks(void)
+{
+    size_t n = 0u;
+    size_t i;
+    for (i = 0u; i < rt_d_windows.count && i < AARCH64_DEVICE_WINDOWS; ++i)
+        n += rt_window_blocks(&rt_d_windows.window[i]);
+    return n;
+}
+
+static uint64_t rt_d_block_pa(size_t n)
+{
+    size_t i;
+    for (i = 0u; i < rt_d_windows.count && i < AARCH64_DEVICE_WINDOWS; ++i) {
+        size_t blocks = rt_window_blocks(&rt_d_windows.window[i]);
+        if (n < blocks)
+            return rt_d_windows.window[i].base_pa + ((uint64_t)n << RT_L2_SHIFT);
+        n -= blocks;
+    }
+    return 0u;
 }
 
 /* ── Input validation ───────────────────────────────────────── */
+
+/* Validate the device windows themselves: 2 MiB-aligned, inside the PA the
+ * tree can encode, and ascending without overlap (the expected iterator
+ * merges them as one PA-ordered stream). Returns 0, or -1 with *err set. */
+static int rt_validate_windows(int *err)
+{
+    size_t i;
+
+    if (rt_d_windows.count == 0u || rt_d_windows.count > AARCH64_DEVICE_WINDOWS) {
+        *err = -EINVAL;
+        return -1;
+    }
+    for (i = 0u; i < rt_d_windows.count; ++i) {
+        uint64_t s = rt_d_windows.window[i].base_pa;
+        uint64_t e = rt_d_windows.window[i].end_pa;
+
+        if ((s & (RT_PAGE_2M - 1u)) != 0u || (e & (RT_PAGE_2M - 1u)) != 0u ||
+            s >= e || e > RT_PA_LIMIT) { *err = -EINVAL; return -1; }
+        if (i > 0u && s < rt_d_windows.window[i - 1u].end_pa) {
+            *err = -EINVAL;
+            return -1;
+        }
+    }
+    return 0;
+}
 
 /* Validate the ram list and ensure no R entry overlaps B or D. The
  * arena planner already enforces this for production paths; the
@@ -125,7 +178,9 @@ static int rt_validate_ram(const struct MEMORY_RANGE *ram, size_t count,
     uint64_t prev_end = 0;
     int have_prev = 0;
     size_t i;
+    size_t k;
 
+    if (rt_validate_windows(err) != 0) return -1;
     if (ram == NULL) { if (count != 0) { *err = -EINVAL; return -1; } return 0; }
     if (count > MEMORY_RANGE_MAX) { *err = -EINVAL; return -1; }
 
@@ -145,9 +200,12 @@ static int rt_validate_ram(const struct MEMORY_RANGE *ram, size_t count,
          * here defensively. */
         if (s < RT_B_END && e > RT_B_BASE) { *err = -EINVAL; return -1; }
 
-        /* R/D Device conflict: any RAM range that touches the
-         * Device window is illegal. */
-        if (s < RT_D_END && e > RT_D_BASE) { *err = -EINVAL; return -1; }
+        /* R/D Device conflict: any RAM range that touches a device
+         * window is illegal. */
+        for (k = 0u; k < rt_d_windows.count; ++k) {
+            if (s < rt_d_windows.window[k].end_pa &&
+                e > rt_d_windows.window[k].base_pa) { *err = -EINVAL; return -1; }
+        }
 
         if (have_prev && s <= prev_end) { *err = -EINVAL; return -1; }
         prev_end = e;
@@ -226,10 +284,13 @@ static int rt_walk_expected_blocks(const struct MEMORY_RANGE *ram, size_t count,
         if (rc != 0) return rc;
     }
 
-    /* D: exact override, kernel RW + DEVICE. */
-    for (pa = RT_D_BASE; pa < RT_D_END; pa += RT_PAGE_2M) {
-        rc = cb(ctx, pa, AARCH64_PT_KERNEL_RW | AARCH64_PT_DEVICE);
-        if (rc != 0) return rc;
+    /* D: exact override, kernel RW + DEVICE — every device window. */
+    for (i = 0u; i < rt_d_windows.count && i < AARCH64_DEVICE_WINDOWS; ++i) {
+        for (pa = rt_d_windows.window[i].base_pa;
+             pa < rt_d_windows.window[i].end_pa; pa += RT_PAGE_2M) {
+            rc = cb(ctx, pa, AARCH64_PT_KERNEL_RW | AARCH64_PT_DEVICE);
+            if (rc != 0) return rc;
+        }
     }
 
     /* R: kernel RW, never overlaps B/D (validated upstream). */
@@ -445,7 +506,7 @@ int aarch64_runtime_tree_build(const struct MEMORY_RANGE *ram, size_t count,
     if (ops->alloc == NULL || ops->resolve == NULL) return -EINVAL;
     if (count > MEMORY_RANGE_MAX) return -EINVAL;
     if (ram == NULL && count > 0u) return -EINVAL;
-    rt_refresh_d_window();
+    rt_refresh_d_windows();
     if (arena->table_base_pa == 0u) return -EINVAL;
     if ((arena->table_base_pa & (RT_PAGE_4K - 1u)) != 0u) return -EINVAL;
     if (arena->table_pages == 0u) return -EINVAL;
@@ -742,7 +803,8 @@ static int rt_iter_take(rt_tree_iter_t *it, uint64_t *out_pa,
  * Three streams merged by lowest next PA — no assumption about the
  * PA ordering of D, B and R (a relocated B may sit below, between or
  * above parts of R):
- *   - D: (RT_D_END - RT_D_BASE) / 0x200000 entries (runtime window).
+ *   - D: every 2 MiB block of the device windows, as one PA-ascending
+ *     sequence (rt_d_blocks / rt_d_block_pa).
  *   - B: 1 entry at RT_B_BASE.
  *   - R: per ram range, PA-ascending.
  */
@@ -771,8 +833,8 @@ static void rt_exp_iter_init(rt_exp_iter_t *it,
     }
     it->ram = ram;
     it->count = count;
-    /* D: one entry per 2 MiB block of the runtime window. */
-    it->d_done = 0;
+    /* D: one entry per 2 MiB block of every device window. */
+    it->d_done = rt_d_blocks() == 0u;
     /* B: 1 entry. */
     it->b_done = 0;
     /* R: start at ram[0].phys_start if count > 0. */
@@ -795,7 +857,7 @@ static int rt_exp_iter_advance(rt_exp_iter_t *it)
     uint32_t perm = 0;
 
     if (!it->d_done) {
-        uint64_t p = RT_D_BASE + (uint64_t)it->d_idx * RT_PAGE_2M;
+        uint64_t p = rt_d_block_pa(it->d_idx);
         if (p < best_pa) { best_pa = p; source = 0; perm = AARCH64_PT_KERNEL_RW | AARCH64_PT_DEVICE; }
     }
     if (!it->b_done) {
@@ -813,7 +875,7 @@ static int rt_exp_iter_advance(rt_exp_iter_t *it)
     switch (source) {
     case 0:
         ++it->d_idx;
-        if ((it->d_idx * RT_PAGE_2M) >= (RT_D_END - RT_D_BASE)) {
+        if (it->d_idx >= rt_d_blocks()) {
             it->d_done = 1;
         }
         break;
@@ -873,7 +935,7 @@ int aarch64_runtime_tree_validate(const struct MEMORY_RANGE *ram, size_t count,
     if (ops == NULL || tree == NULL || vbuf == NULL) return -EINVAL;
     if (ops->resolve == NULL) return -EINVAL;
     if (tree->root_pa == 0u) return -EIO;
-    rt_refresh_d_window();
+    rt_refresh_d_windows();
     if ((tree->root_pa & (RT_PAGE_4K - 1u)) != 0u) return -EIO;
     if (tree->table_base_pa > tree->table_used_end_pa) return -EIO;
     if ((tree->table_base_pa & (RT_PAGE_4K - 1u)) != 0u) return -EIO;

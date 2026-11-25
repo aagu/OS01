@@ -143,6 +143,9 @@ $(UEFI_RUNTIME_STAMP): FORCE
 	      printf "uefi-runtime-cflags: %s\n" "$(UEFI_RUNTIME_CFLAGS)"; \
 	      printf "uefi-runtime-make: %s\n" "$(UEFI_RUNTIME_MAKE)"; \
 	      printf "aarch64-boot-block-base: %s\n" "$(if $(filter aarch64,$(UEFI_ARCH_FAMILY)),$(AARCH64_BOOT_BLOCK_BASE),none)"; \
+	      printf "aarch64-firmware-console-pa: %s\n" "$(if $(filter aarch64,$(UEFI_ARCH_FAMILY)),$(or $(AARCH64_FIRMWARE_CONSOLE_PA),none))"; \
+	      printf "aarch64-fw-console-beacon: %s\n" "$(if $(filter aarch64,$(UEFI_ARCH_FAMILY)),$(or $(AARCH64_FW_CONSOLE_BEACON),0))"; \
+	      printf "aarch64-skip-ebs: %s\n" "$(if $(filter aarch64,$(UEFI_ARCH_FAMILY)),$(or $(AARCH64_SKIP_EBS),0))"; \
 	      printf "profile: %s %s\n" "$(PROFILE)" "$(BUILD_DIR)"; \
 	      printf "uefi-clang: %s\n" "$$($(UEFI_DIGEST_CLANG) --version 2>/dev/null | head -1)"; \
 	      find thirdpart/posix-uefi -type f \

@@ -13,6 +13,12 @@
  * defaults. Per the device-tree spec, a node's reg is interpreted with
  * the PARENT's #address-cells/#size-cells, so the cells values are
  * inherited down the tree as nodes open.
+ *
+ * Devices may sit on nested buses (BCM2712 keeps its PL011 and GIC-400
+ * under /soc): every enclosing bus's ranges property translates a child
+ * address one level up, and a bus without ranges is transparent. Only
+ * enabled nodes are used, with one exception spelled out in
+ * scan_close_node().
  */
 #include <stdint.h>
 
@@ -89,12 +95,36 @@ static int compat_matches(const uint8_t *value, uint32_t len,
     return 0;
 }
 
+/* status is absent, or is exactly okay/ok: the firmware left the node on. */
+static int node_is_enabled(const uint8_t *status, uint32_t len)
+{
+    return !status || compat_matches(status, len, "okay") ||
+           compat_matches(status, len, "ok");
+}
+
 struct early_mmio_scan {
     uint64_t window_base;      /* byte-aligned low bound, pre-snap */
     uint64_t window_end;       /* byte-aligned high bound, pre-snap */
     uint64_t console_base;
     int have_device;
     int have_console;
+    int console_enabled;       /* the chosen console came from an enabled node */
+};
+
+/* Every open node's cells and the properties the close hook needs, indexed
+ * by depth (1 = root). A node's reg and ranges are encoded with the cells
+ * of the node above it, which is what translating an address walks. */
+struct fdt_ancestry {
+    unsigned address_cells[FDT_MAX_DEPTH + 1];
+    unsigned size_cells[FDT_MAX_DEPTH + 1];
+    const uint8_t *compatible[FDT_MAX_DEPTH + 1];
+    uint32_t compat_len[FDT_MAX_DEPTH + 1];
+    const uint32_t *reg[FDT_MAX_DEPTH + 1];
+    uint32_t reg_len[FDT_MAX_DEPTH + 1];
+    const uint32_t *ranges[FDT_MAX_DEPTH + 1];
+    uint32_t ranges_len[FDT_MAX_DEPTH + 1];
+    const uint8_t *status[FDT_MAX_DEPTH + 1];
+    uint32_t status_len[FDT_MAX_DEPTH + 1];
 };
 
 static void scan_add_reg(struct early_mmio_scan *scan, uint64_t base,
@@ -109,19 +139,79 @@ static void scan_add_reg(struct early_mmio_scan *scan, uint64_t base,
     scan->have_device = 1;
 }
 
+/* Translate `addr`, a bus address in the parent space of the node at
+ * `depth`, into the CPU physical view: each enclosing bus with a non-empty
+ * ranges remaps it through its first covering entry, buses without one are
+ * transparent, and the root's own ranges is never applied. Returns 0 when
+ * a bus cannot be decoded or no entry covers the address. */
+static int to_cpu_pa(const struct fdt_ancestry *an, unsigned depth,
+                     uint64_t *addr)
+{
+    unsigned d;
+
+    for (d = depth - 1; d > 1; --d) {
+        const uint8_t *ranges = (const uint8_t *)an->ranges[d];
+        uint32_t len = an->ranges_len[d];
+        unsigned child_cells = an->address_cells[d];
+        unsigned size_cells = an->size_cells[d];
+        unsigned parent_cells = an->address_cells[d - 1];
+        uint32_t stride;
+        uint32_t off;
+        int hit = 0;
+
+        if (!len)
+            continue;
+        if (child_cells < 1 || child_cells > 2 ||
+            size_cells < 1 || size_cells > 2 ||
+            parent_cells < 1 || parent_cells > 2)
+            return 0;
+        /* One entry = <child-addr: bus cells> <parent-addr: parent cells>
+         * <size: bus cells>. */
+        stride = (child_cells + parent_cells + size_cells) * 4u;
+        if (len % stride != 0u)
+            return 0;
+        for (off = 0; off < len && !hit; off += stride) {
+            const uint32_t *entry = (const uint32_t *)(ranges + off);
+            uint64_t child = load_be_cells(entry, child_cells);
+            uint64_t size = load_be_cells(entry + child_cells + parent_cells,
+                                          size_cells);
+            uint64_t parent;
+            uint64_t delta;
+
+            /* Containment without computing child + size (may overflow). */
+            if (*addr < child || *addr - child >= size)
+                continue;
+            parent = load_be_cells(entry + child_cells, parent_cells);
+            delta = *addr - child;
+            if (parent > (~UINT64_C(0)) - delta)
+                return 0;
+            *addr = parent + delta;
+            hit = 1;
+        }
+        if (!hit)
+            return 0;
+    }
+    return 1;
+}
+
 /* Fold one closed node into the scan. The window union consumes every
  * reg pair of the matched device (GICD/GICC/v2m; the UART's own range
  * too — the window must cover the console). The UART additionally
  * records its first base as the early console PA. */
 static void scan_close_node(struct early_mmio_scan *scan,
-                            const uint8_t *compatible, uint32_t compat_len,
-                            const uint32_t *reg, uint32_t reg_len,
-                            unsigned address_cells, unsigned size_cells)
+                            const struct fdt_ancestry *an, unsigned depth)
 {
+    unsigned address_cells = an->address_cells[depth - 1];
+    unsigned size_cells = an->size_cells[depth - 1];
+    const uint8_t *compatible = an->compatible[depth];
+    uint32_t compat_len = an->compat_len[depth];
+    const uint32_t *reg = an->reg[depth];
+    uint32_t reg_len = an->reg_len[depth];
     const uint32_t *cell;
     uint32_t remain;
     int is_uart = 0;
     int is_gic = 0;
+    int on;
 
     if (!compatible)
         return;
@@ -131,6 +221,13 @@ static void scan_close_node(struct early_mmio_scan *scan,
     if ((!is_uart && !is_gic) || !reg || address_cells == 0 ||
         size_cells == 0)
         return;
+    /* A node the firmware parked is absent — except that a disabled PL011
+     * stands in as the console while nothing enabled has shown up, so the
+     * kernel still gets a diagnostics port instead of printing into
+     * nowhere. */
+    on = node_is_enabled(an->status[depth], an->status_len[depth]);
+    if (!on && (!is_uart || scan->have_console))
+        return;
 
     cell = reg;
     remain = reg_len;
@@ -138,13 +235,21 @@ static void scan_close_node(struct early_mmio_scan *scan,
         uint64_t base = load_be_cells(cell, address_cells);
         uint64_t size = load_be_cells(cell + address_cells, size_cells);
 
-        scan_add_reg(scan, base, size);
-        if (is_uart && !scan->have_console && size != 0) {
-            scan->console_base = base;
-            scan->have_console = 1;
-        }
         cell += address_cells + size_cells;
         remain -= (address_cells + size_cells) * 4u;
+        if (!to_cpu_pa(an, depth, &base))
+            continue;   /* no ranges entry covers it: no CPU address */
+        scan_add_reg(scan, base, size);
+        if (is_uart && size != 0) {
+            if (!scan->have_console) {
+                scan->console_base = base;
+                scan->have_console = 1;
+                scan->console_enabled = on;
+            } else if (on && !scan->console_enabled) {
+                scan->console_base = base;
+                scan->console_enabled = 1;
+            }
+        }
     }
 }
 
@@ -154,18 +259,11 @@ int aarch64_fdt_early_mmio(const void *fdt, uint32_t fdt_size,
     const uint8_t *blob = (const uint8_t *)fdt;
     const uint8_t *blob_end = blob + fdt_size;
     struct early_mmio_scan scan;
-    unsigned address_cells[FDT_MAX_DEPTH + 1];
-    unsigned size_cells[FDT_MAX_DEPTH + 1];
-    /* Per-depth captured node props: a node's compatible/reg must
-     * survive its children (e.g. the GIC's v2m frame subnode), so a
-     * single slot is not enough — each depth keeps its own. */
-    const uint8_t *node_compatible[FDT_MAX_DEPTH + 1];
-    uint32_t node_compat_len[FDT_MAX_DEPTH + 1];
-    const uint32_t *node_reg[FDT_MAX_DEPTH + 1];
-    uint32_t node_reg_len[FDT_MAX_DEPTH + 1];
+    struct fdt_ancestry an;
     uint32_t totalsize, off_struct, size_struct, off_strings;
     uint32_t version, cursor, struct_end;
     unsigned depth = 0;
+    int saw_end = 0;
 
     if (!out || !blob || fdt_size < FDT_HEADER_SIZE)
         return 0;
@@ -185,11 +283,10 @@ int aarch64_fdt_early_mmio(const void *fdt, uint32_t fdt_size,
 
     for (unsigned i = 0; i < sizeof(scan); ++i)
         ((uint8_t *)&scan)[i] = 0;
-    address_cells[0] = 2;
-    size_cells[0] = 2;
+    an.address_cells[0] = 2;
+    an.size_cells[0] = 2;
 
     cursor = off_struct;
-    int saw_end = 0;
     while (cursor + 4 <= struct_end) {
         uint32_t token = load_be32(blob + cursor);
         cursor += 4;
@@ -210,22 +307,23 @@ int aarch64_fdt_early_mmio(const void *fdt, uint32_t fdt_size,
             if (depth >= FDT_MAX_DEPTH)
                 return 0;
             depth++;
-            address_cells[depth] = address_cells[depth - 1];
-            size_cells[depth] = size_cells[depth - 1];
-            node_compatible[depth] = 0;
-            node_compat_len[depth] = 0;
-            node_reg[depth] = 0;
-            node_reg_len[depth] = 0;
+            an.address_cells[depth] = an.address_cells[depth - 1];
+            an.size_cells[depth] = an.size_cells[depth - 1];
+            an.compatible[depth] = 0;
+            an.compat_len[depth] = 0;
+            an.reg[depth] = 0;
+            an.reg_len[depth] = 0;
+            an.ranges[depth] = 0;
+            an.ranges_len[depth] = 0;
+            an.status[depth] = 0;
+            an.status_len[depth] = 0;
             continue;
         }
         if (token == FDT_END_NODE) {
             if (depth == 0)
                 return 0;
             /* reg is sized by the PARENT's cells (depth-1 values). */
-            scan_close_node(&scan, node_compatible[depth],
-                            node_compat_len[depth], node_reg[depth],
-                            node_reg_len[depth],
-                            address_cells[depth - 1], size_cells[depth - 1]);
+            scan_close_node(&scan, &an, depth);
             depth--;
             continue;
         }
@@ -248,16 +346,22 @@ int aarch64_fdt_early_mmio(const void *fdt, uint32_t fdt_size,
 
             if (prop_name_is(name, blob_end, "#address-cells")) {
                 if (len == 4)
-                    address_cells[depth] = load_be32(value);
+                    an.address_cells[depth] = load_be32(value);
             } else if (prop_name_is(name, blob_end, "#size-cells")) {
                 if (len == 4)
-                    size_cells[depth] = load_be32(value);
+                    an.size_cells[depth] = load_be32(value);
             } else if (prop_name_is(name, blob_end, "compatible")) {
-                node_compatible[depth] = value;
-                node_compat_len[depth] = len;
+                an.compatible[depth] = value;
+                an.compat_len[depth] = len;
             } else if (prop_name_is(name, blob_end, "reg")) {
-                node_reg[depth] = (const uint32_t *)value;
-                node_reg_len[depth] = len;
+                an.reg[depth] = (const uint32_t *)value;
+                an.reg_len[depth] = len;
+            } else if (prop_name_is(name, blob_end, "ranges")) {
+                an.ranges[depth] = (const uint32_t *)value;
+                an.ranges_len[depth] = len;
+            } else if (prop_name_is(name, blob_end, "status")) {
+                an.status[depth] = value;
+                an.status_len[depth] = len;
             }
 
             cursor = (cursor + len + 3u) & ~UINT32_C(3);

@@ -107,7 +107,12 @@ struct aarch64_early_mmio_handoff {
  * a GICv2 interrupt controller) was found and the derived window is
  * sane (1..1024 blocks). Returns 0 on any malformed blob, unmatched
  * tree or unusable window — the caller then leaves the boot_context
- * fields unset so the kernel falls back to its compile-time defaults. */
+ * fields unset so the kernel falls back to its compile-time defaults.
+ *
+ * Devices are matched on any bus; addresses are translated through each
+ * enclosing bus's ranges property, and nodes with status != okay are
+ * skipped (a disabled PL011 still stands in as the console when no
+ * enabled one exists). */
 int aarch64_fdt_early_mmio(const void *fdt, uint32_t fdt_size,
                            struct aarch64_early_mmio_handoff *out);
 

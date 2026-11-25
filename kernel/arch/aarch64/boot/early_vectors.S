@@ -1,3 +1,5 @@
+#include <arch/aarch64/boot_offsets.h>
+
 .section .boot.text, "ax"
 .globl boot_vectors
 .balign 2048
@@ -54,6 +56,48 @@ boot_vectors:
 .hidden aarch64_boot_print_c
 aarch64_boot_print_c:
     b       .Lprint_c
+
+#if defined(AARCH64_FIRMWARE_CONSOLE_PA) && AARCH64_FW_CONSOLE_BEACON
+/* Bring-up marker on the HDMI framebuffer: a 16x16 white block at
+ * (600 + slot*20, 140), using the boot_context in x19. Proves how far the
+ * kernel got when the serial UART is unreachable. w10 is the pixel
+ * colour. Clobbers x0-x9; preserves x10 and x19 (so it is safe before
+ * the stack exists, too). */
+.globl aarch64_boot_fb_mark
+.hidden aarch64_boot_fb_mark
+aarch64_boot_fb_mark:
+    cbz     x19, 9f
+    ldr     w0, [x19, #BOOT_CTX_FLAGS_OFF]
+    tbz     w0, #0, 9f                  /* BOOT_CTX_FLAG_FRAMEBUFFER */
+    ldr     x2, [x19, #BOOT_CTX_GRAPHICS_FB_BASE_OFF]
+    cbz     x2, 9f
+    ldr     w3, [x19, #BOOT_CTX_GRAPHICS_STRIDE_OFF]
+    cbz     w3, 9f
+    mov     w4, #600
+    mov     w5, #20
+    madd    w4, w1, w5, w4              /* x = slot*20 + 600 */
+    mov     w5, #140                    /* y */
+    mov     x6, #16
+1:  mov     x7, #16
+    mul     x8, x5, x3
+    add     x8, x8, x4
+    lsl     x8, x8, #2
+    add     x8, x2, x8
+2:  str     w10, [x8], #4
+    subs    x7, x7, #1
+    b.ne    2b
+    add     w5, w5, #1
+    subs    x6, x6, #1
+    b.ne    1b
+9:  ret
+#endif
+
+/* Global entry for head.S's fail-closed checks: 16 hex digits of x0
+ * through the same console. Clobbers x0-x3 and x30. */
+.globl aarch64_boot_print_x64
+.hidden aarch64_boot_print_x64
+aarch64_boot_print_x64:
+    b       .Lprint_x64
 
 .Lprint_x64:
     /* print 16 hex digits of x0, MSB first.  Uses x9 as counter,

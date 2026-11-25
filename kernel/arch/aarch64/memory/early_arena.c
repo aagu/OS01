@@ -78,17 +78,19 @@ extern struct Physical_Memory_Manager PMMngr;
 #define PAGE_2M            UINT64_C(0x200000)
 #define PAGE_4K            UINT64_C(0x1000)
 
-/* D window: runtime value (device_window.c). Static default = the
- * compile-time QEMU window so host tests that never install a handoff
- * keep the documented behavior. */
-static struct aarch64_device_window d_window = {
-    AARCH64_BOOT_DEVICE_BASE,
-    AARCH64_BOOT_DEVICE_END,
+/* D windows: runtime values (device_window.c) — the handoff's device
+ * window and, when the console sits outside it, the console's own block.
+ * Static default = the compile-time QEMU window so host tests that never
+ * install a handoff keep the documented behavior. Static storage, not a
+ * local: the preflight runs on the 4 KiB boot stack. */
+static struct aarch64_device_windows d_windows = {
+    { { AARCH64_BOOT_DEVICE_BASE, AARCH64_BOOT_DEVICE_END }, },
+    1u,
 };
 
-static void refresh_d_window(void)
+static void refresh_d_windows(void)
 {
-    aarch64_device_window_get(&d_window);
+    aarch64_device_windows_get(&d_windows);
 }
 
 /* ── Frozen arena state ─────────────────────────────────────── */
@@ -132,6 +134,7 @@ static int validate_ranges(const struct MEMORY_RANGE *ram, size_t count)
 {
     uint64_t prev_end = 0;
     size_t i;
+    size_t k;
     int have_prev = 0;
     size_t ram_zones = 0;
 
@@ -154,11 +157,13 @@ static int validate_ranges(const struct MEMORY_RANGE *ram, size_t count)
          * refuses defensively. */
         if (s < AARCH64_B_END && e > AARCH64_B_BASE) return -EINVAL;
 
-        /* R/D conflict: any range touching the runtime device
-         * window (d_window, from the boot handoff) is illegal —
-         * that region is reserved for Device-nGnRnE mappings, not
-         * RAM. */
-        if (s < d_window.end_pa && e > d_window.base_pa) return -EINVAL;
+        /* R/D conflict: any range touching a runtime device window
+         * (d_windows, from the boot handoff) is illegal — those regions
+         * are reserved for Device-nGnRnE mappings, not RAM. */
+        for (k = 0u; k < d_windows.count; ++k) {
+            if (s < d_windows.window[k].end_pa &&
+                e > d_windows.window[k].base_pa) return -EINVAL;
+        }
 
         if (have_prev && s <= prev_end) return -EINVAL;
         prev_end = e;
@@ -196,12 +201,15 @@ static int count_buckets(const struct MEMORY_RANGE *ram, size_t count,
         if (b512 < 2u) pud_used[b512 >> 6] |= 1ULL << (b512 & 63u);
         if (b1g < 1024u) pmd_used[b1g >> 6] |= 1ULL << (b1g & 63u);
     }
-    /* D is always present too. */
-    for (p = d_window.base_pa; p < d_window.end_pa; p += PAGE_2M) {
-        b512 = p >> 39;
-        b1g  = p >> 30;
-        if (b512 < 2u) pud_used[b512 >> 6] |= 1ULL << (b512 & 63u);
-        if (b1g < 1024u) pmd_used[b1g >> 6] |= 1ULL << (b1g & 63u);
+    /* D is always present too: each device window in turn. */
+    for (i = 0u; i < d_windows.count; ++i) {
+        for (p = d_windows.window[i].base_pa; p < d_windows.window[i].end_pa;
+             p += PAGE_2M) {
+            b512 = p >> 39;
+            b1g  = p >> 30;
+            if (b512 < 2u) pud_used[b512 >> 6] |= 1ULL << (b512 & 63u);
+            if (b1g < 1024u) pmd_used[b1g >> 6] |= 1ULL << (b1g & 63u);
+        }
     }
     /* R entries: iterate every 2 MiB block. */
     for (i = 0u; i < count; ++i) {
@@ -329,7 +337,7 @@ int aarch64_early_arena_plan(const struct MEMORY_RANGE *ram, size_t count,
     if (out != NULL) zero_arena(out);
     if (ram == NULL || out == NULL) return -EINVAL;
     if (count == 0u || count > MEMORY_RANGE_MAX) return -EINVAL;
-    refresh_d_window();
+    refresh_d_windows();
 
     rc = validate_ranges(ram, count);
     if (rc != 0) return rc;
@@ -557,7 +565,7 @@ static uint64_t estimate_need_bytes(const struct MEMORY_RANGE *ram, size_t count
     int rc;
 
     if (ram == NULL || count == 0u) return 0u;
-    refresh_d_window();
+    refresh_d_windows();
     rc = count_buckets(ram, count, &puds, &pmds);
     if (rc != 0) return 0u;
     table_pages = 1u + puds + pmds;

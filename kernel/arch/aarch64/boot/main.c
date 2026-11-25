@@ -185,8 +185,9 @@ static const char *boot_map_check_exact_block(const char *what, uint64_t desc,
 
 /* Walk one installed L2 table in place: every one of the 512 slots must
  * match the layout contract exactly, classified by what the slot covers:
- *   - the runtime D device window (the slots its PA range covers in
- *     this table): Device, PXN|UXN;
+ *   - a device window — the handoff's, plus the console's own block when
+ *     it lies outside it (the slots its PA range covers in this table):
+ *     Device, PXN|UXN;
  *   - the configured boot block B (the one table/slot picked by
  *     base>>30 / (base>>21)&511): Normal, UXN set, PXN clear;
  *   - everything else: plain Normal PXN|UXN.
@@ -196,39 +197,26 @@ static const char *boot_map_check_exact_block(const char *what, uint64_t desc,
 static const char *boot_map_walk_pmd_table(const uint64_t *pmd,
                                            const char *name,
                                            uint64_t pa_base,
-                                           const struct aarch64_device_window *dev,
+                                           const struct aarch64_device_windows *dev,
                                            unsigned b_table,
                                            unsigned b_slot,
                                            unsigned table_index)
 {
-    /* Device-slot range covered by THIS table's 1 GiB span, from the
-     * runtime device window (empty when the window sits elsewhere). */
-    unsigned dev_from, dev_to;
-    {
-        uint64_t t_pa = pa_base;
-        uint64_t t_end = pa_base + UINT64_C(0x40000000);
-        uint64_t dev_from_pa = dev->base_pa > t_pa ? dev->base_pa : t_pa;
-        uint64_t dev_to_pa = (dev->end_pa < t_end ? dev->end_pa : t_end) - 1;
-
-        if (dev->base_pa < t_end && dev->end_pa > t_pa) {
-            dev_from = (unsigned)((dev_from_pa - t_pa) >> 21);
-            dev_to = (unsigned)((dev_to_pa - t_pa) >> 21);
-        } else {
-            dev_from = 1;
-            dev_to = 0;   /* empty range */
-        }
-    }
-
     for (unsigned i = 0; i < 512; i++) {
         char what[32];
         uint64_t pa = pa_base + (uint64_t)i * UINT64_C(0x200000);
         uint64_t expected_desc;
+        unsigned device = 0;
 
         strcpy(what, name);
         boot_map_fmt_u64(what + strlen(what), i);
         strcat(what, "]");
 
-        if (i >= dev_from && i <= dev_to)
+        for (unsigned k = 0; !device && k < dev->count; k++) {
+            device = pa >= dev->window[k].base_pa && pa < dev->window[k].end_pa;
+        }
+
+        if (device)
             expected_desc = pa | UINT64_C(0x60000000000401);
         else if (table_index == b_table && i == b_slot)
             expected_desc = pa | UINT64_C(0x40000000000705);
@@ -259,6 +247,7 @@ static void aarch64_boot_map_selftest(void)
     uint64_t *pud = NULL;
     const uint64_t *pmd_low0 = NULL;
     const uint64_t *pmd_low1 = NULL;
+    struct aarch64_device_windows dev;
 
     /* Step 1: read raw TTBR0_EL1 and validate it exactly the way
      * aarch64_pt_smoke_test() does. */
@@ -310,9 +299,8 @@ static void aarch64_boot_map_selftest(void)
         const uint64_t b = (uint64_t)AARCH64_BOOT_BLOCK_BASE;
         const unsigned b_table = (unsigned)(b >> 30);
         const unsigned b_slot = (unsigned)((b >> 21) & 511);
-        struct aarch64_device_window dev;
 
-        aarch64_device_window_get(&dev);
+        aarch64_device_windows_get(&dev);
         r = boot_map_walk_pmd_table(pmd_low0, "PMD_low0[", 0,
                                     &dev, b_table, b_slot, 0);
         if (r != NULL) {
@@ -325,6 +313,51 @@ static void aarch64_boot_map_selftest(void)
         if (r != NULL) {
             fail_reason = r;
             goto fail;
+        }
+    }
+
+    /* Step 4: a PUD slot above the identity map carries nothing unless a
+     * device window sits there; one that does must be exactly that window
+     * — every 2 MiB block inside a window Device, every other block of the
+     * 1 GiB slot invalid (head.S gives each such window its own L2 table). */
+    for (unsigned slot = 2; slot < 512; slot++) {
+        uint64_t slot_base = (uint64_t)slot << 30;
+        unsigned touches = 0;
+
+        for (unsigned k = 0; k < dev.count && k < AARCH64_DEVICE_WINDOWS; k++) {
+            touches |= dev.window[k].base_pa < slot_base + UINT64_C(0x40000000) &&
+                       dev.window[k].end_pa > slot_base;
+        }
+        if (!touches) {
+            if (pud[slot] != 0) {
+                fail_reason = "PUD slot above the identity map is mapped without a window";
+                goto fail;
+            }
+            continue;
+        }
+        r = boot_map_check_table("PUD[high]", pud[slot], &pmd_pa);
+        if (r != NULL) {
+            fail_reason = r;
+            goto fail;
+        }
+        const uint64_t *pmd_high = (const uint64_t *)(uintptr_t)(pmd_pa + ARCH_PAGE_OFFSET);
+        for (unsigned i = 0; i < 512; i++) {
+            char what[40];
+            uint64_t pa = slot_base + (uint64_t)i * UINT64_C(0x200000);
+            unsigned device = 0;
+
+            strcpy(what, "PMD_high[");
+            boot_map_fmt_u64(what + strlen(what), i);
+            strcat(what, "]");
+            for (unsigned k = 0; !device && k < dev.count && k < AARCH64_DEVICE_WINDOWS; k++) {
+                device = pa >= dev.window[k].base_pa && pa < dev.window[k].end_pa;
+            }
+            r = boot_map_check_exact_block(what, pmd_high[i],
+                                           device ? pa | UINT64_C(0x60000000000401) : 0);
+            if (r != NULL) {
+                fail_reason = r;
+                goto fail;
+            }
         }
     }
 
@@ -554,10 +587,16 @@ void arch_boot_memory(const struct boot_context *bootctx)
      * change gate rejects TTBR1 writes once smp_starting is set — the
      * virtio-blk subsys probes in SUBSYS_PHASE_STORAGE, which runs after
      * percpu bring-up but before the APs are IPI-ready. */
+#if defined(AARCH64_VIRTIO_MMIO) && !AARCH64_VIRTIO_MMIO
+    /* Platform without virtio-mmio (e.g. Raspberry Pi 5): there is no
+     * window to map, and 0x0a000000 lies inside RAM, so the QEMU map
+     * would be refused. Storage bring-up for such a board comes later. */
+#else
     if (arch_virtio_mmio_map_early() != 0) {
         kputs("FATAL: virtio-mmio window map failed\n");
         for (;;) arch_cpu_halt();
     }
+#endif
 
     aarch64_boot_fb_init(bootctx);
     if (aarch64_page_table_probe_prepare()) {

@@ -39,6 +39,12 @@
 #define AARCH64_BOOT_DEVICE_BASE  0x08000000
 #define AARCH64_BOOT_DEVICE_END   0x0a000000
 #define AARCH64_BOOT_MAP_END      0x80000000
+#ifndef AARCH64_BOOT_HIGH_END
+/* How far above the identity map the boot tables still reach: the one
+ * 512 GiB span their single L0 entry covers. A Device window or a console
+ * block placed there gets its own L2 table (head.S, early_mmu.c). */
+#define AARCH64_BOOT_HIGH_END     0x8000000000
+#endif
 
 #define AARCH64_BOOT_BLOCK_END    (AARCH64_BOOT_BLOCK_BASE + AARCH64_BOOT_BLOCK_SIZE)
 #define AARCH64_KERNEL_ENTRY      (AARCH64_BOOT_BLOCK_BASE + 0x80000)

@@ -53,6 +53,15 @@ aarch64_boot_observed_entry:
     ldr     x0, [x0]
     ret
 
+/* Returns the early-MMIO console PA parked by head.S (0 = no handoff), so
+ * high-half C resolves the pre-DTB console exactly like head.S and the
+ * early vectors do. */
+.globl aarch64_boot_early_console_pa
+aarch64_boot_early_console_pa:
+    ldr     x0, =aarch64_boot_early_mmio_console
+    ldr     x0, [x0]
+    ret
+
 .globl aarch64_boot_page_tables_addr
 aarch64_boot_page_tables_addr:
     ldr     x0, =boot_page_tables
