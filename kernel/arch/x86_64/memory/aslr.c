@@ -34,6 +34,17 @@ _Static_assert(X86_USER_PIE_BIAS_BITS == 16U &&
 _Static_assert(X86_USER_PIE_MAX_END <= X86_USER_HEAP_LIMIT,
                "x86_64 PIE max runtime end must not exceed heap limit");
 
+_Static_assert(X86_USER_STACK_RND_BASE >= X86_USER_STACK_BASE,
+               "x86_64 ASLR stack base must sit at or above floor");
+_Static_assert((X86_USER_STACK_RND_BASE & (X86_USER_STACK_SIZE - 1U)) == 0,
+               "x86_64 ASLR stack base must be 2 MiB aligned");
+_Static_assert(X86_USER_STACK_RND_BITS >= 12U && X86_USER_STACK_RND_BITS <= 24U,
+               "x86_64 ASLR stack entropy width out of supported range");
+_Static_assert(X86_USER_STACK_RND_END > X86_USER_STACK_RND_BASE,
+               "x86_64 ASLR stack window must not wrap");
+_Static_assert(X86_USER_STACK_RND_END + 0x10000ULL <= X86_USER_MMAP_RND_BASE,
+               "x86_64 ASLR stack+TLS window must stay below mmap ASLR window");
+
 uint64_t x86_aslr_derive_mmap_base(uint64_t raw_entropy)
 {
     uint64_t mask = (UINT64_C(1) << X86_USER_MMAP_RND_BITS) - 1U;
@@ -82,5 +93,31 @@ int x86_aslr_get_pie_bias(uint64_t *out_bias)
     uint64_t raw = ((uint64_t)entropy[0]) | (((uint64_t)entropy[1]) << 8U);
     aslr_wipe_bytes(entropy, sizeof(entropy));
     *out_bias = X86_USER_PIE_BIAS_BASE + ((raw & 0xFFFFULL) << 12U);
+    return 0;
+}
+
+uint64_t x86_aslr_derive_stack_base(uint64_t raw_entropy)
+{
+    uint64_t mask = (UINT64_C(1) << X86_USER_STACK_RND_BITS) - 1U;
+    return X86_USER_STACK_RND_BASE + ((raw_entropy & mask) << 21U);
+}
+
+int x86_aslr_init_stack_base(mm_t *mm)
+{
+    if (!mm)
+        return -EINVAL;
+
+    uint8_t entropy[32];
+    if (!kernel_random_get_strong(entropy)) {
+        aslr_wipe_bytes(entropy, sizeof(entropy));
+        return -EAGAIN;
+    }
+
+    uint64_t raw = 0;
+    for (size_t i = 0; i < 8; i++)
+        raw |= ((uint64_t)entropy[i]) << (i * 8U);
+
+    aslr_wipe_bytes(entropy, sizeof(entropy));
+    mm->start_stack = x86_aslr_derive_stack_base(raw);
     return 0;
 }

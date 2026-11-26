@@ -60,6 +60,8 @@ FORBIDDEN_MACROS = [
     "X86_USER_PIE_LINK_END", "X86_USER_PIE_BIAS_BASE",
     "X86_USER_PIE_BIAS_BITS", "X86_USER_PIE_BIAS_SPAN",
     "X86_USER_PIE_BIAS_END", "X86_USER_PIE_MAX_END",
+    "X86_USER_STACK_RND_BASE", "X86_USER_STACK_RND_BITS",
+    "X86_USER_STACK_RND_SPAN", "X86_USER_STACK_RND_END",
     # private include guards (the arch facade _ARCH_MMU_H is allowed:
     # memory/mmu.h pulls it for ARCH_PAGE_OFFSET)
     "_ARCH_X86_64_MMU_H", "_ARCH_X86_64_VMM_H", "_ARCH_X86_64_PTE_H",
@@ -80,6 +82,7 @@ FORBIDDEN_SYMBOLS = [
     "do_mmap", "fork_vma_copy",
     # x86 ASLR private API (arch/x86_64/aslr.h only)
     "x86_aslr_derive_mmap_base", "x86_aslr_init_mmap_base", "x86_aslr_get_pie_bias",
+    "x86_aslr_derive_stack_base", "x86_aslr_init_stack_base",
     "x86_elf_pie_prepare", "x86_elf_pie_dispose",
     # x86 uaccess ownership (arch/x86_64/uaccess.h only)
     "strnlen_user", "user_write_range_begin",

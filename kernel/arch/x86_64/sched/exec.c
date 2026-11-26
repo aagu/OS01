@@ -170,18 +170,19 @@ static int setup_user_stack_check_capacity(char *const argv[], char *const envp[
  * Returns 0 on success, -1 if AT_RANDOM STRONG-only entropy is
  * unavailable (rejects WEAK/NONE per spec §6, AAGU-5 §交付物 3).
  * Stack layout itself stays infallible — -1 sources ONLY from AT_RANDOM. */
-static int setup_user_stack(uint8_t *kstack, char *const argv[], char *const envp[],
+static int setup_user_stack(uint8_t *kstack, uint64_t stack_base,
+                            char *const argv[], char *const envp[],
                             int s_argc, int s_envc,
                             const x86_elf_image_t *image,
                             uint64_t *out_argv_ptr, uint64_t *out_envp_ptr,
                             uint64_t *out_rsp)
 {
-#define KSTACK(va) (kstack + ((va) - X86_USER_STACK_BASE))
+#define KSTACK(va) (kstack + ((va) - stack_base))
     ASSERT(s_argc + s_envc <= STARTUP_STR_MAX);
     uint64_t *str_offset = (uint64_t *)kmalloc(STARTUP_STR_MAX * sizeof(uint64_t));
     if (!str_offset) return -1;
     int si = 0;
-    uint64_t rsp = X86_USER_STACK_TOP;
+    uint64_t rsp = stack_base + X86_USER_STACK_SIZE - 16;
 
     /* strings, descending */
     for (int i = 0; i < s_argc; i++) {
@@ -506,6 +507,19 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
     tsk->mm = mm;
     thd->cr3 = (uint64_t)mm->pgdir;
 
+    int stack_aslr_rc = x86_aslr_init_stack_base(mm);
+    if (stack_aslr_rc != 0) {
+        debug_task("spawn: ASLR stack_base init failed (%d) for '%s'\n", stack_aslr_rc, path);
+        if (tsk->files) { files_unpin(tsk->files); tsk->files = NULL; }
+        if (tsk->fpu_save) kfree(tsk->fpu_save);
+        destroy_unpublished_user_mm(mm);
+        kfree(mm);
+        kfree(thd);
+        kfree(raw_alloc);
+        vfs_node_put(node);
+        return stack_aslr_rc;
+    }
+
     // 5. Load ELF segments into the new address space
     x86_elf_image_t elf_img = {0};
     int load_rc = elf_load(node, mm, &elf_img);
@@ -563,15 +577,15 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
         kfree(raw_alloc);
         return -1;
     }
+    uint64_t stack_base = mm->start_stack;
     x86_vmm_map_2m(user_pgd, stack_page->phy_address,
-                 X86_USER_STACK_BASE, PAGE_USER_PMD | PAGE_NO_EXEC);
-    mm->start_stack = X86_USER_STACK_BASE;
+                 stack_base, PAGE_USER_PMD | PAGE_NO_EXEC);
 
     // ── 6.5 Construct the SysV initial stack (argc/argv/envp/auxv) ──
     uint8_t *kstack = (uint8_t *)Phy_To_Virt(stack_page->phy_address);
     uint64_t user_rsp = 0, user_arg_ptr = 0, user_env_ptr = 0;
 
-    if (setup_user_stack(kstack, (char *const *)argv, NULL, s_argc, s_envc,
+    if (setup_user_stack(kstack, stack_base, (char *const *)argv, NULL, s_argc, s_envc,
                          &elf_img, &user_arg_ptr, &user_env_ptr, &user_rsp) != 0) {
         /* AT_RANDOM STRONG-only 失败 — 清理已分配资源后返回 -EAGAIN。
          * 顺序与现有 elf_load 失败路径一致，**外加** task_list_lock
@@ -726,6 +740,15 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
         return -ENOMEM;
     }
     new_mm->pgdir = (uint64_t *)Virt_To_Phy((uint64_t)new_pgd);
+
+    int stack_aslr_rc = x86_aslr_init_stack_base(new_mm);
+    if (stack_aslr_rc != 0) {
+        destroy_unpublished_user_mm(new_mm);
+        kfree(new_mm);
+        vfs_node_put(node);
+        return stack_aslr_rc;
+    }
+
     // 5. Load ELF segments into the new address space
     x86_elf_image_t elf_img = {0};
     int load_rc = elf_load(node, new_mm, &elf_img);
@@ -765,15 +788,15 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
         kfree(new_mm);
         return -ENOMEM;
     }
+    uint64_t stack_base = new_mm->start_stack;
     x86_vmm_map_2m(new_pgd, stack_page->phy_address,
-                 X86_USER_STACK_BASE, PAGE_USER_PMD | PAGE_NO_EXEC);
-    new_mm->start_stack = X86_USER_STACK_BASE;
+                 stack_base, PAGE_USER_PMD | PAGE_NO_EXEC);
 
     // ── 6.5 Construct the SysV initial stack (argc/argv/envp/auxv) ──
     uint8_t *kstack = (uint8_t *)Phy_To_Virt(stack_page->phy_address);
     uint64_t user_rsp = 0, user_arg_ptr = 0, user_env_ptr = 0;
 
-    if (setup_user_stack(kstack, (char *const *)argv, (char *const *)envp,
+    if (setup_user_stack(kstack, stack_base, (char *const *)argv, (char *const *)envp,
                          s_argc, s_envc, &elf_img,
                          &user_arg_ptr, &user_env_ptr, &user_rsp) != 0) {
         /* AT_RANDOM STRONG-only 失败 — 走 staged 失败路径：
@@ -876,7 +899,8 @@ int task_selftest_auxv_probe(char *const argv[], char *const envp[],
     uint64_t argp, envpp, rsp;
     x86_elf_image_t exec_img = {0};
     memset(task_selftest_stack_img, 0, sizeof(task_selftest_stack_img));
-    if (setup_user_stack(task_selftest_stack_img, argv, envp, argc, envc,
+    if (setup_user_stack(task_selftest_stack_img, X86_USER_STACK_BASE,
+                         argv, envp, argc, envc,
                          &exec_img, &argp, &envpp, &rsp) != 0) {
         return -1;   /* selftest 中 AT_RANDOM 失败 → probe 失败 */
     }

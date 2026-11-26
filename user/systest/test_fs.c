@@ -428,9 +428,10 @@ void test_proc_maps(void)
 
         if (strstr(line, "[stack]")) {
             has_stack = 1;
-            // Positive: stack at [USER_STACK_BASE, USER_STACK_BASE + 2 MiB).
-            // USER_STACK_BASE = 0x20400000 (USER_ENVELOPE_SIZE = 512 MiB).
-            if (start == 0x20400000UL && end == 0x20600000UL)
+            volatile unsigned long stack_probe = 0;
+            unsigned long sp_base = (unsigned long)(uintptr_t)&stack_probe & ~0x1FFFFFUL;
+            if (start == sp_base && end == sp_base + 0x200000UL &&
+                start >= 0x20400000UL && start < 0x2020400000UL)
                 stack_at_right_addr = 1;
             // Negative: must NOT include 0x600000 (legacy guard, kept
             // for backward compatibility even though the stack no

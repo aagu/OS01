@@ -172,6 +172,29 @@ static void reset_rng_seq(bool ok0, uint64_t val0, bool ok1, uint64_t val1)
     }
 }
 
+static void reset_rng_seq3(bool ok0, uint64_t val0,
+                           bool ok1, uint64_t val1,
+                           bool ok2, uint64_t val2)
+{
+    g_rng_calls = 0;
+    g_rng_seq_ok[0] = ok0; g_rng_seq_u64[0] = val0;
+    g_rng_seq_ok[1] = ok1; g_rng_seq_u64[1] = val1;
+    g_rng_seq_ok[2] = ok2; g_rng_seq_u64[2] = val2;
+    g_rng_seq_ok[3] = true; g_rng_seq_u64[3] = val2 + 1;
+}
+
+static void reset_rng_seq4(bool ok0, uint64_t val0,
+                           bool ok1, uint64_t val1,
+                           bool ok2, uint64_t val2,
+                           bool ok3, uint64_t val3)
+{
+    g_rng_calls = 0;
+    g_rng_seq_ok[0] = ok0; g_rng_seq_u64[0] = val0;
+    g_rng_seq_ok[1] = ok1; g_rng_seq_u64[1] = val1;
+    g_rng_seq_ok[2] = ok2; g_rng_seq_u64[2] = val2;
+    g_rng_seq_ok[3] = ok3; g_rng_seq_u64[3] = val3;
+}
+
 bool kernel_random_get_strong(uint8_t out[32])
 {
     int idx = g_rng_calls++;
@@ -206,6 +229,7 @@ static vfs_node_t g_fake_node;
 static struct Page g_fake_stack_page;
 static void *g_stack_backing = NULL;
 static void *g_user_pgd_backing = NULL;
+static uint64_t g_last_stack_base = X86_USER_STACK_BASE;
 
 void aslr_exec_record_switch_mm(uint64_t *pgdir)
 {
@@ -340,8 +364,8 @@ void x86_vmm_map_2m(uint64_t *pgdir, uint64_t phy_addr, uint64_t virt_addr, uint
 {
     (void)pgdir;
     (void)phy_addr;
-    (void)virt_addr;
     (void)flags;
+    g_last_stack_base = virt_addr;
 }
 
 files_t *files_dup(files_t *src) { return src; }
@@ -404,6 +428,7 @@ static void reset_exec_fixture(void)
     g_last_thd = NULL;
     g_last_raw = NULL;
     g_last_fpu = NULL;
+    g_last_stack_base = X86_USER_STACK_BASE;
 
     kfree_mm_calls = 0;
     kfree_old_mm_calls = 0;
@@ -436,15 +461,17 @@ static void reset_exec_fixture(void)
 TEST_FUNC(test_spawn_aslr_strong_success)
 {
     reset_exec_fixture();
+    uint64_t r0 = 0x0000000000001234ULL;
     uint64_t r1 = 0x0000000012345678ULL;
     uint64_t r2 = 0x0000000087654321ULL;
-    reset_rng_seq(true, r1, true, r2);
+    reset_rng_seq3(true, r0, true, r1, true, r2);
 
     const char *argv[] = { "/bin/init", NULL };
     int64_t pid = spawn_user_task("/bin/init", argv);
     assert_true(pid > 0);
-    assert_eq(2, g_rng_calls);
+    assert_eq(3, g_rng_calls);
     assert_not_null(user_init_task);
+    assert_eq(x86_aslr_derive_stack_base(r0), user_init_task->mm->start_stack);
     assert_eq(x86_aslr_derive_mmap_base(r1), user_init_task->mm->mmap_base);
     assert_eq(X86_USER_ADDR_LIMIT, user_init_task->addr_limit);
 }
@@ -473,7 +500,7 @@ TEST_FUNC(test_spawn_aslr_entropy_fail_closed)
 TEST_FUNC(test_spawn_at_random_fail_after_aslr)
 {
     reset_exec_fixture();
-    reset_rng_seq(true, 0x0000000012345678ULL, false, 0x0ULL);
+    reset_rng_seq3(true, 0x1234ULL, true, 0x0000000012345678ULL, false, 0x0ULL);
 
     const char *argv[] = { "/bin/init", NULL };
     int64_t pid = spawn_user_task("/bin/init", argv);
@@ -499,9 +526,10 @@ TEST_FUNC(test_exec_aslr_strong_success)
     g_old_mm = old_mm;
     g_current.mm = old_mm;
 
+    uint64_t r0 = 0x0000000000005678ULL;
     uint64_t r1 = 0x000000000abcdef1ULL;
     uint64_t r2 = 0x000000000fedcba2ULL;
-    reset_rng_seq(true, r1, true, r2);
+    reset_rng_seq3(true, r0, true, r1, true, r2);
     g_mock_elf_fs_base = 0x20600040ULL;   /* static TLS thread pointer */
 
     pt_regs_t regs;
@@ -511,8 +539,9 @@ TEST_FUNC(test_exec_aslr_strong_success)
 
     int64_t rc = sys_exec("/bin/sh", &regs, argv, envp);
     assert_eq(0, rc);
-    assert_eq(2, g_rng_calls);
+    assert_eq(3, g_rng_calls);
     assert_true(g_current.mm != old_mm);
+    assert_eq(x86_aslr_derive_stack_base(r0), g_current.mm->start_stack);
     assert_eq(x86_aslr_derive_mmap_base(r1), g_current.mm->mmap_base);
     assert_eq(1, switch_mm_calls);
     assert_true(switch_mm_last_pgdir == g_current.mm->pgdir);
@@ -576,7 +605,7 @@ TEST_FUNC(test_exec_at_random_fail_preserves_old_mm)
     g_old_mm = old_mm;
     g_current.mm = old_mm;
 
-    reset_rng_seq(true, 0x0000000011223344ULL, false, 0ULL);
+    reset_rng_seq3(true, 0x1234ULL, true, 0x0000000011223344ULL, false, 0ULL);
 
     pt_regs_t regs;
     memset(&regs, 0, sizeof(regs));
@@ -596,20 +625,9 @@ TEST_FUNC(test_exec_at_random_fail_preserves_old_mm)
     free(old_mm);
 }
 
-static void reset_rng_seq3(bool ok0, uint64_t val0,
-                           bool ok1, uint64_t val1,
-                           bool ok2, uint64_t val2)
-{
-    g_rng_calls = 0;
-    g_rng_seq_ok[0] = ok0; g_rng_seq_u64[0] = val0;
-    g_rng_seq_ok[1] = ok1; g_rng_seq_u64[1] = val1;
-    g_rng_seq_ok[2] = ok2; g_rng_seq_u64[2] = val2;
-    g_rng_seq_ok[3] = true; g_rng_seq_u64[3] = val2 + 1;
-}
-
 static const void *stack_va_ptr(uint64_t va)
 {
-    return (const void *)((const uint8_t *)g_stack_backing + (va - X86_USER_STACK_BASE));
+    return (const void *)((const uint8_t *)g_stack_backing + (va - g_last_stack_base));
 }
 
 static uint64_t stack_read_u64(uint64_t va)
@@ -662,7 +680,7 @@ static void verify_stack_auxv(uint64_t rsp, int exp_argc, bool is_pie,
         else if (tag == AT_ENTRY) { seen_entry = true; assert_eq(exp_entry, val); }
         else if (tag == AT_BASE) { seen_base = true; assert_eq(0ULL, val); }
         else if (tag == AT_PAGESZ) { seen_pagesz = true; assert_eq(4096ULL, val); }
-        else if (tag == AT_PLATFORM) { seen_plat = true; assert_true(val >= X86_USER_STACK_BASE); }
+        else if (tag == AT_PLATFORM) { seen_plat = true; assert_true(val >= g_last_stack_base && val < g_last_stack_base + X86_USER_STACK_SIZE); }
         else if (tag == AT_RANDOM) {
             seen_rand = true;
             uint64_t rand_first_u64 = stack_read_u64(val);
@@ -698,10 +716,11 @@ TEST_FUNC(test_pie_spawn_and_exec_auxv_3rng_success)
     g_old_mm = old_mm;
     g_current.mm = old_mm;
 
-    uint64_t r0 = 0x0002ULL; /* PIE bias = 0x402000 */
-    uint64_t r1 = 0x0000000012345678ULL; /* mmap_base */
-    uint64_t r2 = 0xCAFEBABEDEADBEEFULL; /* AT_RANDOM */
-    reset_rng_seq3(true, r0, true, r1, true, r2);
+    uint64_t r0 = 0x0005ULL; /* stack_base */
+    uint64_t r1 = 0x0002ULL; /* PIE bias = 0x402000 */
+    uint64_t r2 = 0x0000000012345678ULL; /* mmap_base */
+    uint64_t r3 = 0xCAFEBABEDEADBEEFULL; /* AT_RANDOM */
+    reset_rng_seq4(true, r0, true, r1, true, r2, true, r3);
 
     pt_regs_t regs;
     memset(&regs, 0, sizeof(regs));
@@ -710,10 +729,11 @@ TEST_FUNC(test_pie_spawn_and_exec_auxv_3rng_success)
 
     int64_t rc = sys_exec("/bin/pie", &regs, argv, envp);
     assert_eq(0, rc);
-    assert_eq(3, g_rng_calls);
-    uint64_t B = X86_USER_PIE_BIAS_BASE + ((r0 & 0xFFFFULL) << 12);
+    assert_eq(4, g_rng_calls);
+    assert_eq(x86_aslr_derive_stack_base(r0), g_last_stack_base);
+    uint64_t B = X86_USER_PIE_BIAS_BASE + ((r1 & 0xFFFFULL) << 12);
     assert_eq(B + 0x1234ULL, regs.rip);
-    verify_stack_auxv(regs.rsp, 2, true, B + 0x1234ULL, B + 0x40ULL, 4ULL, r2);
+    verify_stack_auxv(regs.rsp, 2, true, B + 0x1234ULL, B + 0x40ULL, 4ULL, r3);
 
     /* Now spawn_user_task with PIE */
     reset_exec_fixture();
@@ -721,27 +741,27 @@ TEST_FUNC(test_pie_spawn_and_exec_auxv_3rng_success)
     g_mock_elf_entry = 0x2000ULL;
     g_mock_elf_phdr = 0x40ULL;
     g_mock_elf_phnum = 3ULL;
-    reset_rng_seq3(true, r0, true, r1, true, r2);
+    reset_rng_seq4(true, r0, true, r1, true, r2, true, r3);
     int64_t pid = spawn_user_task("/bin/pie", argv);
     assert_true(pid > 0);
-    assert_eq(3, g_rng_calls);
+    assert_eq(4, g_rng_calls);
     (void)g_prepared_rsp;
     (void)g_prepared_rip;
 
-    /* ET_EXEC sys_exec: 2 RNG calls and 3 auxv pairs */
+    /* ET_EXEC sys_exec: 3 RNG calls and 3 auxv pairs */
     reset_exec_fixture();
     old_mm = (mm_t *)__real_calloc(1, sizeof(mm_t));
     old_mm->mmap_base = 0x40000000ULL;
     old_mm->pgdir = (uint64_t *)__real_calloc(1, 4096);
     g_old_mm = old_mm;
     g_current.mm = old_mm;
-    reset_rng_seq3(true, r1, true, r2, true, 0);
+    reset_rng_seq3(true, r0, true, r2, true, r3);
     memset(&regs, 0, sizeof(regs));
     rc = sys_exec("/bin/exec", &regs, argv, envp);
     assert_eq(0, rc);
-    assert_eq(2, g_rng_calls);
+    assert_eq(3, g_rng_calls);
     assert_eq(0x401000ULL, regs.rip);
-    verify_stack_auxv(regs.rsp, 2, false, 0, 0, 0, r2);
+    verify_stack_auxv(regs.rsp, 2, false, 0, 0, 0, r3);
 }
 
 TEST_FUNC(test_pie_three_stage_eagain_and_error_propagation)
@@ -749,11 +769,11 @@ TEST_FUNC(test_pie_three_stage_eagain_and_error_propagation)
     const char *argv[] = { "/bin/pie", NULL };
     const char *envp[] = { NULL };
 
-    /* 3 stages of -EAGAIN on spawn_user_task */
-    for (int stage = 0; stage < 3; stage++) {
+    /* 4 stages of -EAGAIN on spawn_user_task */
+    for (int stage = 0; stage < 4; stage++) {
         reset_exec_fixture();
         g_mock_elf_is_pie = true;
-        reset_rng_seq3(stage != 0, 1, stage != 1, 2, stage != 2, 3);
+        reset_rng_seq4(stage != 0, 1, stage != 1, 2, stage != 2, 3, stage != 3, 4);
         int64_t pid = spawn_user_task("/bin/pie", argv);
         assert_eq(-EAGAIN, pid);
         assert_eq(stage + 1, g_rng_calls);
@@ -767,8 +787,8 @@ TEST_FUNC(test_pie_three_stage_eagain_and_error_propagation)
         assert_eq(1, kfree_raw_calls);
     }
 
-    /* 3 stages of -EAGAIN on sys_exec */
-    for (int stage = 0; stage < 3; stage++) {
+    /* 4 stages of -EAGAIN on sys_exec */
+    for (int stage = 0; stage < 4; stage++) {
         reset_exec_fixture();
         g_mock_elf_is_pie = true;
         mm_t *old_mm = (mm_t *)__real_calloc(1, sizeof(mm_t));
@@ -776,7 +796,7 @@ TEST_FUNC(test_pie_three_stage_eagain_and_error_propagation)
         old_mm->pgdir = (uint64_t *)__real_calloc(1, 4096);
         g_old_mm = old_mm;
         g_current.mm = old_mm;
-        reset_rng_seq3(stage != 0, 1, stage != 1, 2, stage != 2, 3);
+        reset_rng_seq4(stage != 0, 1, stage != 1, 2, stage != 2, 3, stage != 3, 4);
 
         pt_regs_t regs;
         memset(&regs, 0, sizeof(regs));
@@ -796,10 +816,12 @@ TEST_FUNC(test_pie_three_stage_eagain_and_error_propagation)
     int errs[2] = { -ENOEXEC, -ENOMEM };
     for (int i = 0; i < 2; i++) {
         reset_exec_fixture();
+        reset_rng_seq(true, 1, true, 2);
         g_mock_elf_rc = errs[i];
         assert_eq(errs[i], spawn_user_task("/bin/bad", argv));
 
         reset_exec_fixture();
+        reset_rng_seq(true, 1, true, 2);
         g_mock_elf_rc = errs[i];
         mm_t *old_mm = (mm_t *)__real_calloc(1, sizeof(mm_t));
         old_mm->pgdir = (uint64_t *)__real_calloc(1, 4096);

@@ -169,6 +169,7 @@ typedef struct {
 static int x86_elf_tls_describe(const elf64_ehdr_t *ehdr,
                                 const elf64_phdr_t *phdrs,
                                 uint64_t file_size,
+                                uint64_t stack_end,
                                 x86_elf_tls_t *out)
 {
     memset(out, 0, sizeof(*out));
@@ -269,9 +270,9 @@ static int x86_elf_tls_describe(const elf64_ehdr_t *ehdr,
         return -ENOEXEC;
     uint64_t tp_off = (D + step - 1) & ~(step - 1);
 
-    if (X86_USER_STACK_END > UINT64_MAX - tp_off)
+    if (stack_end > UINT64_MAX - tp_off)
         return -ENOEXEC;
-    uint64_t TP = X86_USER_STACK_END + tp_off;
+    uint64_t TP = stack_end + tp_off;
 
     if (TP > UINT64_MAX - 8)
         return -ENOEXEC;
@@ -280,7 +281,7 @@ static int x86_elf_tls_describe(const elf64_ehdr_t *ehdr,
         return -ENOEXEC;
     uint64_t map_end = (tp8 + PAGE_4K_SIZE - 1) & PAGE_4K_MASK;
 
-    if (map_end - X86_USER_STACK_END > X86_TLS_SPAN_MAX)
+    if (map_end - stack_end > X86_TLS_SPAN_MAX)
         return -ENOEXEC;
 
     out->image_vaddr = tls->p_vaddr;
@@ -335,13 +336,14 @@ static int x86_elf_tls_copy(uint64_t *pgd, uint64_t src, uint64_t dst,
     return 0;
 }
 
-static int x86_elf_tls_map(mm_t *mm, uint64_t bias, const x86_elf_tls_t *tls)
+static int x86_elf_tls_map(mm_t *mm, uint64_t bias, uint64_t stack_end,
+                           const x86_elf_tls_t *tls)
 {
     if (!tls || tls->fs_base == 0)
         return 0;
 
     uint64_t *pgd = (uint64_t *)Phy_To_Virt((uint64_t)mm->pgdir);
-    uint64_t start = X86_USER_STACK_END;
+    uint64_t start = stack_end;
     uint64_t end   = tls->map_end;
 
     /* No overlapping VMA anywhere in the span. */
@@ -502,8 +504,11 @@ int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
 
     /* TLS validation runs after the image check and before the PIE
      * bias snapshot (nothing is allocated on failure). */
+    uint64_t stack_end = mm->start_stack
+                       ? (mm->start_stack + X86_USER_STACK_SIZE)
+                       : X86_USER_STACK_END;
     x86_elf_tls_t tls;
-    ret = x86_elf_tls_describe(&ehdr, phdrs, file_size, &tls);
+    ret = x86_elf_tls_describe(&ehdr, phdrs, file_size, stack_end, &tls);
     if (ret != 0) {
         if (is_pie)
             x86_elf_pie_dispose(&pie);
@@ -667,7 +672,7 @@ int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
     /* ── 7.6 Static TLS: last fallible load step.  The helper owns
      * its temporary VMA and leaf rollback; on failure the PT_LOAD
      * leaves are released by the common rollback below. ─── */
-    rc = x86_elf_tls_map(mm, bias, &tls);
+    rc = x86_elf_tls_map(mm, bias, stack_end, &tls);
     if (rc != 0)
         goto rollback;
 

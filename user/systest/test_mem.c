@@ -1248,10 +1248,19 @@ void test_mmap_execute_protection(void)
 
 #define ASLR_RND_BASE 0x0000400000000000UL
 #define ASLR_RND_END  0x0000410000000000UL
+#define ASLR_STACK_RND_BASE 0x20400000UL
+#define ASLR_STACK_RND_END  0x2020400000UL
+#define ASLR_STACK_SIZE     0x200000UL
 
 static int aslr_in_window(uint64_t addr)
 {
     return (addr & 0xFFFUL) == 0 && addr >= ASLR_RND_BASE && addr < ASLR_RND_END;
+}
+
+static int aslr_stack_in_window(uint64_t sp)
+{
+    uint64_t base = sp & ~(ASLR_STACK_SIZE - 1UL);
+    return base >= ASLR_STACK_RND_BASE && base < ASLR_STACK_RND_END;
 }
 
 void test_aslr_mmap_exec_randomized(void)
@@ -1469,6 +1478,75 @@ void test_aslr_mmap_fixed_and_bounds(void)
                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     CHECKF(huge == MAP_FAILED && errno == ENOMEM, "aslr_64t_exhaustion_no_wrap",
            "ENOMEM", "got huge=%p errno=%d", huge, errno);
+}
+
+void test_aslr_stack_randomized(void)
+{
+    uint64_t bases[10];
+    int unique = 0;
+    char *argv[] = { (char *)"aslr-probe", NULL };
+
+    for (int i = 0; i < 10; i++) {
+        char buf[256];
+        int st = 0;
+        int n = exec_capture_argv("/bin/systest", argv, buf, sizeof(buf), &st);
+        uint64_t sp = 0;
+        const char *stack_line = (n > 0) ? strstr(buf, "STACK ") : NULL;
+        if (n <= 0 || !WIFEXITED(st) || WEXITSTATUS(st) != 0 ||
+            !stack_line || parse_hex16_line(stack_line, "STACK", &sp) != 0) {
+            FAIL("aslr_stack_randomized",
+                 "iter %d probe failed n=%d st=%#x buf='%s'", i, n, st, buf);
+            return;
+        }
+        if (!aslr_stack_in_window(sp)) {
+            FAIL("aslr_stack_randomized",
+                 "iter %d sp=%016lx out of stack ASLR window", i, (unsigned long)sp);
+            return;
+        }
+        uint64_t base = sp & ~(ASLR_STACK_SIZE - 1UL);
+        bases[i] = base;
+        int seen = 0;
+        for (int j = 0; j < i; j++) {
+            if (bases[j] == base) {
+                seen = 1;
+                break;
+            }
+        }
+        if (!seen)
+            unique++;
+    }
+
+    CHECKF(unique >= 8, "aslr_stack_randomized",
+           "unique=%d/10", "expected >=8 unique 2MiB stack bases, got %d/10", unique);
+
+    /* fork() preserves parent's randomized stack base */
+    volatile uint64_t parent_marker = 0;
+    uint64_t parent_base = (uint64_t)(uintptr_t)&parent_marker & ~(ASLR_STACK_SIZE - 1UL);
+    int fds[2];
+    if (pipe(fds) == 0) {
+        int64_t pid = fork();
+        if (pid == 0) {
+            close(fds[0]);
+            volatile uint64_t child_marker = 0;
+            uint64_t child_base = (uint64_t)(uintptr_t)&child_marker & ~(ASLR_STACK_SIZE - 1UL);
+            write(fds[1], &child_base, sizeof(child_base));
+            close(fds[1]);
+            _exit(0);
+        } else if (pid > 0) {
+            close(fds[1]);
+            uint64_t child_base = 0;
+            ssize_t r = read(fds[0], &child_base, sizeof(child_base));
+            close(fds[0]);
+            int st = 0;
+            waitpid(pid, &st, 0);
+            CHECKF(r == (ssize_t)sizeof(child_base) && child_base == parent_base &&
+                   aslr_stack_in_window(parent_base),
+                   "aslr_stack_fork_inherit",
+                   "parent=%016lx child=%016lx",
+                   "mismatch parent=%016lx child=%016lx",
+                   (unsigned long)parent_base, (unsigned long)child_base);
+        }
+    }
 }
 
 /* ── ASLR-B: Static PIE probe & acceptance ─────────────────── */

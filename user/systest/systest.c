@@ -174,7 +174,10 @@ static void aslr_probe(int argc, char **argv)
     p[0] = 0xA5;
     if (p[0] != 0xA5)
         _exit(99);
-    printf("MMAP %016lx\n", (unsigned long)(uintptr_t)p);
+    volatile unsigned long stack_marker = 0x5A5AUL;
+    printf("MMAP %016lx\nSTACK %016lx\n",
+           (unsigned long)(uintptr_t)p,
+           (unsigned long)(uintptr_t)&stack_marker);
     fflush(stdout);
     _exit(0);
 }
@@ -478,6 +481,7 @@ static const test_case_t tests[] = {
     {"aslr_mmap_exec_randomized", "aslr mmap exec randomized", test_aslr_mmap_exec_randomized, 1, 0},
     {"aslr_mmap_fork_inherit",    "aslr mmap fork inherit",    test_aslr_mmap_fork_inherit,    1, 0},
     {"aslr_mmap_fixed_and_bounds","aslr mmap fixed and bounds",test_aslr_mmap_fixed_and_bounds,1, 0},
+    {"aslr_stack_randomized",     "aslr stack randomized",     test_aslr_stack_randomized,     1, 0},
     {"aslr_pie",                  "aslr static pie",           test_aslr_pie,                  1, 0},
     // ── PT_TLS: raw arch_prctl + FS base lifecycle ──
     {"arch_prctl_fs",             "arch_prctl FS base",        test_arch_prctl_fs,             1, 0},

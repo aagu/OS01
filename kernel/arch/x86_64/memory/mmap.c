@@ -46,7 +46,9 @@ bool mm_user_range_protected(const mm_t *mm, uint64_t start, uint64_t end)
     if (end <= start)
         return false;
 
-    const uint64_t stack_end = X86_USER_STACK_END;
+    const uint64_t stack_base = mm->start_stack ? mm->start_stack : X86_USER_STACK_BASE;
+    const uint64_t stack_end = stack_base + X86_USER_STACK_SIZE;
+    const uint64_t stack_guard = stack_base - 0x1000UL;
 
     // ELF reserve envelope (image + inter-segment gaps).
     if (start < mm->start_brk && X86_USER_MIN_ADDR < end)
@@ -56,11 +58,14 @@ bool mm_user_range_protected(const mm_t *mm, uint64_t start, uint64_t end)
     // committed-boundary bookkeeping).
     if (start < X86_USER_HEAP_LIMIT && mm->start_brk < end)
         return true;
-    // Guard page between heap and stack.
+    // Guard page between heap and stack floor.
     if (start < X86_USER_STACK_BASE && X86_USER_HEAP_LIMIT < end)
         return true;
+    // Guard page immediately below randomized user stack.
+    if (start < stack_base && stack_guard < end)
+        return true;
     // User stack (2 MiB).
-    if (start < stack_end && X86_USER_STACK_BASE < end)
+    if (start < stack_end && stack_base < end)
         return true;
     return false;
 }
@@ -474,9 +479,12 @@ static int mmap_dev_commit(void *ctxp, uint64_t first_pa,
 static int mmap_find_gap_locked(mm_t *mm, uint64_t length,
                                 uint64_t upper_limit, uint64_t *out_addr)
 {
+    uint64_t stack_end = mm->start_stack
+                       ? (mm->start_stack + X86_USER_STACK_SIZE)
+                       : X86_USER_STACK_END;
     uint64_t search = mm->mmap_base;
-    if (search < X86_USER_STACK_END)
-        search = X86_USER_STACK_END;
+    if (search < stack_end)
+        search = stack_end;
     if ((search & (PAGE_4K_SIZE - 1)) != 0) {
         if (search > UINT64_MAX - (PAGE_4K_SIZE - 1))
             return -ENOMEM;
