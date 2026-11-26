@@ -12,6 +12,7 @@
 #define O_EXCL      0200
 #define O_NONBLOCK  04000
 #define O_NOCTTY    0400
+#define O_CLOEXEC   02000000
 
 #define F_DUPFD     0
 #define F_GETFD     1
@@ -31,6 +32,7 @@ extern "C" {
  * command is rejected with EINVAL without a syscall.  Returns the
  * command's value, or -1 with errno set. */
 int fcntl(int fd, int cmd, ...);
+int openat(int dirfd, const char *path, int flags, ...);
 
 #ifdef __cplusplus
 }

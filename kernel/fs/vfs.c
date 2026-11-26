@@ -1277,18 +1277,39 @@ static int resolve_at(int dirfd, const char *path,
         return 0;
     }
 
-    // Relative path — require AT_FDCWD for now.
-    if (dirfd != AT_FDCWD) return -EBADF;
-
+    // Relative path: AT_FDCWD uses current->files->cwd; otherwise resolve
+    // the open directory descriptor to its canonical path.
+    char *dir_buf = NULL;
     const char *cwd = "/";
-    if (current && current->files && current->files->cwd) {
-        cwd = current->files->cwd;
+    if (dirfd == AT_FDCWD) {
+        if (current && current->files && current->files->cwd)
+            cwd = current->files->cwd;
+    } else {
+        if (!current || !current->files || dirfd < 0 || dirfd >= NOFILE)
+            return -EBADF;
+        file_t *df = current->files->fd[dirfd];
+        if (!df || !df->node)
+            return -EBADF;
+        if (df->node->type != VFS_DIR)
+            return -ENOTDIR;
+        dir_buf = kmalloc(VFS_NAME_MAX);
+        if (!dir_buf)
+            return -ENOMEM;
+        int rrc = vfs_resolve_path(df->node, dir_buf, VFS_NAME_MAX);
+        if (rrc < 0) {
+            kfree(dir_buf);
+            return rrc;
+        }
+        cwd = dir_buf;
     }
 
     size_t cwd_len = strlen(cwd);
     int add_sep = (cwd_len > 0 && cwd[cwd_len - 1] != '/') ? 1 : 0;
     size_t total = cwd_len + add_sep + plen;
-    if (total + 1 > out_size) return -ENAMETOOLONG;
+    if (total + 1 > out_size) {
+        if (dir_buf) kfree(dir_buf);
+        return -ENAMETOOLONG;
+    }
 
     size_t off = 0;
     if (cwd_len > 0) {
@@ -1297,6 +1318,7 @@ static int resolve_at(int dirfd, const char *path,
     }
     if (add_sep) out[off++] = '/';
     memcpy(out + off, path, plen + 1);
+    if (dir_buf) kfree(dir_buf);
 
     return 0;
 }

@@ -93,6 +93,9 @@
 #define SYS_arch_prctl    79   // arch_prctl(op, arg) — raw FS base control
 #define SYS_readv         80   // readv(fd, iov, iovcnt)
 #define SYS_writev        81   // writev(fd, iov, iovcnt)
+#define SYS_openat        82   // openat(dirfd, path, flags, mode)
+#define SYS_dup3          83   // dup3(oldfd, newfd, flags)
+#define SYS_pipe2         84   // pipe2(fds, flags)
 
 // Compile-time cross-check: libc SYS_* values must mirror kernel/include/uapi/syscall.h.
 // If the kernel side changes these numbers, update this assertion or libc will

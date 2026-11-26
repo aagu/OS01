@@ -1420,19 +1420,22 @@ int64_t fd_ioctl(file_t *f, int cmd, void *arg)
 // slot is rolled back and BOTH file objects are released exactly
 // once by reference count — the pipe's own reference is dropped by
 // the last file release, so it is never freed twice.
-int64_t do_pipe(int *user_fds)
+int64_t do_pipe_flags(int *user_fds, int flags)
 {
     if (!current->files) return -EMFILE;
+    if (flags & ~(O_CLOEXEC | O_NONBLOCK)) return -EINVAL;
 
     pipe_t *p = pipe_alloc();
     if (!p) return -ENOMEM;
+
+    int extra = flags & O_NONBLOCK;
 
     // Reader file
     file_t *rf = file_alloc();
     if (!rf) { pipe_free(p); return -ENOMEM; }
     rf->type = FD_PIPE;
     rf->pipe = p;
-    rf->flags = O_RDONLY;
+    rf->flags = O_RDONLY | extra;
     rf->refcount = 1;
 
     // Writer file
@@ -1440,7 +1443,7 @@ int64_t do_pipe(int *user_fds)
     if (!wf) { file_free(rf); pipe_free(p); return -ENOMEM; }
     wf->type = FD_PIPE;
     wf->pipe = p;
-    wf->flags = O_WRONLY;
+    wf->flags = O_WRONLY | extra;
     wf->refcount = 1;
 
     // Snapshot the soft limit once: both slots are judged by the same
@@ -1484,4 +1487,9 @@ int64_t do_pipe(int *user_fds)
     debug_fs("pipe: pid=%d fds=[%d,%d]\n",
                   (int)current->pid, rfd, wfd);
     return 0;
+}
+
+int64_t do_pipe(int *user_fds)
+{
+    return do_pipe_flags(user_fds, 0);
 }

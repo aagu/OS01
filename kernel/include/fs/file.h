@@ -18,9 +18,11 @@
 #define O_RDONLY  0
 #define O_WRONLY  1
 #define O_RDWR    2
-#define O_CREAT   0100
-#define O_TRUNC   01000
-#define O_APPEND  02000
+#define O_CREAT    0100
+#define O_TRUNC    01000
+#define O_APPEND   02000
+#define O_NONBLOCK 04000
+#define O_CLOEXEC  02000000
 
 // ── Forward declarations ───────────────────────────────────
 
@@ -237,6 +239,7 @@ int64_t      fd_ioctl(file_t *f, int cmd, void *arg);
 
 // Create a pipe — fills fds[0] (read end), fds[1] (write end)
 int64_t       do_pipe(int *user_fds);
+int64_t       do_pipe_flags(int *user_fds, int flags);
 
 // ── Pipe API (exported for PTY) ──
 int64_t pipe_read_internal(pipe_t *p, void *buf, uint64_t size);

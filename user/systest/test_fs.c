@@ -79,7 +79,6 @@ void test_pipe(void)
     close(fds[1]);
 }
 
-
 // ── 14, 15: chdir, getcwd ──────────────────────────────────
 void test_chdir_getcwd(void)
 {
@@ -1609,5 +1608,75 @@ void test_readv_writev(void)
 
     close(fds[0]);
     close(fds[1]);
+}
+
+void test_openat_dup3_pipe2(void)
+{
+    /* 1. openat relative to dirfd (create + write + read back) */
+    mkdir("/tmp/oat", 0755);
+    int dfd = open("/tmp/oat", O_RDONLY);
+    if (dfd < 0) {
+        FAIL("openat_dup3_pipe2", "open dir failed errno=%d", errno);
+        rmdir("/tmp/oat");
+        return;
+    }
+
+    int fd = openat(dfd, "sub.txt", O_CREAT | O_RDWR, 0644);
+    CHECKF(fd >= 0, "openat_create_rel", "fd>=0", "got fd=%d errno=%d", fd, errno);
+    if (fd >= 0) {
+        write(fd, "OAT!", 4);
+        close(fd);
+    }
+
+    int fd2 = openat(dfd, "sub.txt", O_RDONLY);
+    char buf[8] = {0};
+    ssize_t rn = (fd2 >= 0) ? read(fd2, buf, 4) : -1;
+    CHECKF(rn == 4 && memcmp(buf, "OAT!", 4) == 0, "openat_read_rel",
+           "OAT!", "rn=%ld buf='%.4s'", (long)rn, buf);
+
+    /* 2. dup3: same fd -> EINVAL, bad flags -> EINVAL, valid dup3 -> works */
+    if (fd2 >= 0) {
+        errno = 0;
+        int dsame = dup3(fd2, fd2, 0);
+        CHECKF(dsame == -1 && errno == EINVAL, "dup3_same_fd_einval",
+               "EINVAL", "got %d errno=%d", dsame, errno);
+
+        errno = 0;
+        int dbad = dup3(fd2, fd2 + 1, 0x1234);
+        CHECKF(dbad == -1 && errno == EINVAL, "dup3_bad_flags_einval",
+               "EINVAL", "got %d errno=%d", dbad, errno);
+
+        int dok = dup3(fd2, fd2 + 1, O_CLOEXEC);
+        CHECKF(dok == fd2 + 1, "dup3_cloexec_ok", "fd2+1", "got %d errno=%d", dok, errno);
+        if (dok >= 0) close(dok);
+        close(fd2);
+    }
+
+    /* 3. pipe2: bad flags -> EINVAL, valid O_CLOEXEC | O_NONBLOCK -> works */
+    int pfds[2] = { -1, -1 };
+    errno = 0;
+    int pbad = pipe2(pfds, 0x1234);
+    CHECKF(pbad == -1 && errno == EINVAL, "pipe2_bad_flags_einval",
+           "EINVAL", "got %d errno=%d", pbad, errno);
+
+    int pok = pipe2(pfds, O_CLOEXEC | O_NONBLOCK);
+    CHECKF(pok == 0 && pfds[0] >= 0 && pfds[1] >= 0, "pipe2_ok",
+           "0", "got %d errno=%d", pok, errno);
+    if (pok == 0) {
+        int fl = fcntl(pfds[0], F_GETFL);
+        CHECKF((fl & O_NONBLOCK) != 0, "pipe2_nonblock_flag",
+               "O_NONBLOCK set", "fl=%#x", fl);
+        write(pfds[1], "P2", 2);
+        char pb[4] = {0};
+        ssize_t pr = read(pfds[0], pb, 2);
+        CHECKF(pr == 2 && memcmp(pb, "P2", 2) == 0, "pipe2_io",
+               "P2", "pr=%ld pb='%.2s'", (long)pr, pb);
+        close(pfds[0]);
+        close(pfds[1]);
+    }
+
+    close(dfd);
+    unlink("/tmp/oat/sub.txt");
+    rmdir("/tmp/oat");
 }
 

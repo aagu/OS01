@@ -136,6 +136,7 @@ void test_pselect_sleep(void);
 void test_putchar(void);
 void test_read(void);
 void test_readv_writev(void);
+void test_openat_dup3_pipe2(void);
 void test_readlink(void);
 void test_realpath_vfs(void);
 void test_reboot_skip(void);

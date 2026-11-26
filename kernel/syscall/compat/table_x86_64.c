@@ -69,7 +69,10 @@ const compat_syscall_nr_t linux_x86_64_table[LINUX_X86_64_NR_MAX] = {
     [217] = SYS_getdents64,
     [228] = SYS_clock_gettime,
     [231] = SYS_exit,          // exit_group
+    [257] = SYS_openat,
     [262] = SYS_fstatat,       // newfstatat
+    [292] = SYS_dup3,
+    [293] = SYS_pipe2,
     [302] = SYS_getrlimit,     // prlimit64 (adapter)
     [318] = SYS_getrandom,
 };

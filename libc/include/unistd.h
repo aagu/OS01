@@ -23,6 +23,7 @@ pid_t getsid(pid_t pid);
 
 // Open a file by path.  Returns fd, or -1 on error.
 int open(const char *path, int flags, ...);
+int openat(int dirfd, const char *path, int flags, ...);
 
 // Close a file descriptor.  Returns 0, or -1 on error.
 int close(int fd);
@@ -38,6 +39,7 @@ int dup(int oldfd);
 
 // Duplicate oldfd to a specific newfd.
 int dup2(int oldfd, int newfd);
+int dup3(int oldfd, int newfd, int flags);
 
 // ── Process API ────────────────────────────────────────────
 
@@ -57,6 +59,7 @@ char *getcwd(char *buf, size_t size);
 // ── Pipes ──────────────────────────────────────────────────
 
 int pipe(int fds[2]);
+int pipe2(int fds[2], int flags);
 
 // ── Exec ───────────────────────────────────────────────────
 int64_t execve(const char *path, char *const argv[], char *const envp[]);

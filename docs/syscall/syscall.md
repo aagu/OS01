@@ -88,6 +88,9 @@ System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`
 | 79 | `SYS_arch_prctl` | rdi=op, rsi=arg | Raw x86_64 FS base control: `ARCH_SET_FS` (0x1002) accepts an inclusive low-half address and installs a null FS selector plus the `IA32_FS_BASE` MSR (invalid values return `-EPERM`); `ARCH_GET_FS` (0x1003) writes the 8-byte live base to `arg` through uaccess (`-EFAULT`/`-ENOMEM`); any other opcode returns `-EINVAL`. Linux nr 158 maps here. |
 | 80 | `SYS_readv` | rdi=fd, rsi=iov, rdx=iovcnt | Scatter-gather read into `iovcnt` `struct iovec` buffers (`UIO_MAXIOV=1024`); Linux nr 19 maps here. |
 | 81 | `SYS_writev` | rdi=fd, rsi=iov, rdx=iovcnt | Scatter-gather write from `iovcnt` `struct iovec` buffers (`UIO_MAXIOV=1024`); Linux nr 20 maps here. |
+| 82 | `SYS_openat` | rdi=dirfd, rsi=path, rdx=flags, r10=mode | Open file relative to `dirfd` (`AT_FDCWD` or open directory fd); Linux nr 257 maps here. |
+| 83 | `SYS_dup3` | rdi=oldfd, rsi=newfd, rdx=flags | Duplicate `oldfd` to `newfd` (`oldfd == newfd` -> `-EINVAL`, only `O_CLOEXEC` accepted); Linux nr 292 maps here. |
+| 84 | `SYS_pipe2` | rdi=fds, rsi=flags | Create pipe with flags (`O_CLOEXEC \| O_NONBLOCK`, unknown bits -> `-EINVAL`); Linux nr 293 maps here. |
 
 ## Definitions
 

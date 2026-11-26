@@ -390,6 +390,7 @@ static const test_case_t tests[] = {
     {"orphan_reparent",   "orphan reparent",   test_orphan_reparent,         1, 0},
     {"read",              "read syscall",      test_read,                    1, 1},
     {"readv_writev",      "readv writev scatter-gather", test_readv_writev,  1, 0},
+    {"openat_dup3_pipe2", "openat dup3 pipe2", test_openat_dup3_pipe2,       1, 0},
     {"open_close",        "open close",        test_open_close,              1, 1},
     {"dup_dup2",          "dup dup2",          test_dup_dup2,                1, 0},
     {"pipe",              "pipe syscall",      test_pipe,                    1, 0},

@@ -215,6 +215,104 @@ out:
     return ret;
 }
 
+static __attribute__((noinline)) int64_t sys_open_at(int dirfd, const char *path, int flags)
+{
+    char *path_copy = NULL;
+    file_t *f = NULL;
+    vfs_node_t *node = NULL;
+    int64_t ret = 0;
+
+    if ((uint64_t)path >= current->addr_limit)
+        return -EFAULT;
+    if (!current->files)
+        return -EMFILE;
+
+    int plen = syscall_strnlen_user((uint64_t)(uintptr_t)path, VFS_NAME_MAX);
+    if (plen < 0) return -EFAULT;
+    if (plen >= VFS_NAME_MAX) return -ENAMETOOLONG;
+    path_copy = kmalloc(plen + 1);
+    if (!path_copy) return -ENOMEM;
+    if (copy_from_user_ft(path_copy, path, plen + 1) < 0) {
+        kfree(path_copy);
+        return -EFAULT;
+    }
+
+    int lookup_rc = vfs_lookup_at(dirfd, path_copy, LOOKUP_FOLLOW, &node);
+    if (lookup_rc < 0 && !(lookup_rc == -ENOENT && (flags & O_CREAT))) {
+        ret = lookup_rc;
+        goto out_open;
+    }
+
+    if (lookup_rc == -ENOENT && (flags & O_CREAT)) {
+        char *base_buf = NULL;
+        const char *base_dir = current->files ? current->files->cwd : "/";
+        if (dirfd != AT_FDCWD && path_copy[0] != '/') {
+            file_t *df = (dirfd >= 0 && dirfd < NOFILE) ? current->files->fd[dirfd] : NULL;
+            if (!df || !df->node) { ret = -EBADF; goto out_open; }
+            if (df->node->type != VFS_DIR) { ret = -ENOTDIR; goto out_open; }
+            base_buf = kmalloc(VFS_NAME_MAX);
+            if (!base_buf) { ret = -ENOMEM; goto out_open; }
+            if (vfs_resolve_path(df->node, base_buf, VFS_NAME_MAX) < 0) {
+                kfree(base_buf);
+                ret = -ENOENT;
+                goto out_open;
+            }
+            base_dir = base_buf;
+        }
+        int create_rc = vfs_create_file(path_copy, base_dir, &node);
+        if (base_buf) kfree(base_buf);
+        if (create_rc < 0) {
+            ret = create_rc;
+            goto out_open;
+        }
+    }
+
+    if (!node) {
+        ret = -ENOENT;
+        goto out_open;
+    }
+
+    if ((flags & O_TRUNC) && node->type == VFS_FILE) {
+        int trunc_rc = vfs_truncate(node, 0);
+        if (trunc_rc < 0) {
+            ret = trunc_rc;
+            goto out_open;
+        }
+    }
+
+    int rc = devfs_open_node(node, path_copy, flags, &f);
+    if (rc == -ENOSYS) {
+        f = file_alloc();
+        if (!f) { vfs_node_put(node); node = NULL; ret = -ENOMEM; goto out_open; }
+        f->type = FD_VFS;
+        f->node = node;
+        node = NULL;
+        f->flags = flags;
+        int open_rc = vfs_file_open(f);
+        if (open_rc < 0) { ret = open_rc; goto out_open; }
+    } else {
+        vfs_node_put(node);
+        node = NULL;
+        if (rc < 0) { ret = rc; goto out_open; }
+        if (!f) { ret = -ENOMEM; goto out_open; }
+    }
+
+    int newfd = fd_alloc(current->files, f);
+    if (newfd < 0) {
+        file_free(f);
+        f = NULL;
+        ret = newfd;
+        goto out_open;
+    }
+    f = NULL;
+    ret = newfd;
+out_open:
+    if (node) vfs_node_put(node);
+    if (f) file_free(f);
+    if (path_copy) kfree(path_copy);
+    return ret;
+}
+
 int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
 {
     int64_t syscall_result = -EINVAL;
@@ -343,115 +441,15 @@ rwv_done:
         break;
     }
     case SYS_open: {
-        // open(const char *path, int flags) → fd
-        const char *path = (const char *)ctx->args[0];
-        int flags = (int)ctx->args[1];
-        char *path_copy = NULL;
-        file_t *f = NULL;
-        vfs_node_t *node = NULL;
-
-        if ((uint64_t)path >= current->addr_limit) {
-            syscall_result = -EFAULT;
-            break;
-        }
-        if (!current->files) {
-            syscall_result = -EMFILE;
-            break;
-        }
-
-        // Bounded fault-tolerant copy of the user path.
-        // strnlen_user faults on bad addresses (returns -EFAULT) and
-        // bounds the length at VFS_NAME_MAX-1 (returns >= VFS_NAME_MAX
-        // -> ENAMETOOLONG).  copy_from_user_ft then materializes the
-        // kernel-side buffer with a single fault-tolerant pass.
-        int plen = syscall_strnlen_user((uint64_t)(uintptr_t)path, VFS_NAME_MAX);
-        if (plen < 0) { syscall_result = -EFAULT; break; }
-        if (plen >= VFS_NAME_MAX) { syscall_result = -ENAMETOOLONG; break; }
-        path_copy = kmalloc(plen + 1);
-        if (!path_copy) { syscall_result = -ENOMEM; break; }
-        if (copy_from_user_ft(path_copy, path, plen + 1) < 0) {
-            kfree(path_copy);
-            syscall_result = -EFAULT;
-            break;
-        }
-
-        int lookup_rc = vfs_lookup_at(AT_FDCWD, path_copy, LOOKUP_FOLLOW, &node);
-        if (lookup_rc < 0 && !(lookup_rc == -ENOENT && (flags & O_CREAT))) {
-            syscall_result = lookup_rc;
-            goto out_open;  /* releases path_copy and any owned node ref */
-        }
-
-        // O_CREAT: create file if it doesn't exist
-        if (lookup_rc == -ENOENT && (flags & O_CREAT)) {
-            const char *cwd = current->files ? current->files->cwd : "/";
-            int create_rc = vfs_create_file(path_copy, cwd, &node);
-            if (create_rc < 0) {
-                syscall_result = create_rc;
-                goto out_open;
-            }
-        }
-
-        if (!node) {
-            syscall_result = -ENOENT;
-            goto out_open;
-        }
-
-        // O_TRUNC: truncate regular files to size 0 via filesystem op
-        if ((flags & O_TRUNC) && node->type == VFS_FILE) {
-            int trunc_rc = vfs_truncate(node, 0);
-            if (trunc_rc < 0) {
-                syscall_result = trunc_rc;
-                goto out_open;
-            }
-        }
-
-        // devfs_open_node passes path_copy (kernel-side) to device
-        // .open callbacks.  None of the registered device opens
-        // (pty.c ptmx_open / ptsN_open) dereference the string, so
-        // this is safe; future device opens MUST treat the argument
-        // as kernel memory, not user memory.
-        int rc = devfs_open_node(node, path_copy, flags, &f);
-        if (rc == -ENOSYS) {
-            // Not a devfs device node → fall through to default FD_VFS
-            f = file_alloc();
-            if (!f) { vfs_node_put(node); node = NULL; syscall_result = -ENOMEM; goto out_open; }
-            f->type = FD_VFS;
-            f->node = node;  // takes ownership of lookup ref
-            node = NULL;     // f owns the ref now; don't double-put on cleanup
-            f->flags = flags;
-            // spec §6: generate the open-time snapshot after the node
-            // pin / file init and BEFORE the fd is published (fd_alloc
-            // below).  No-op without an open_file hook.  Failure rolls
-            // back through out_open's file_free; the hook unmounted its
-            // own partial state, so release_file is a no-op there.  The
-            // devfs branch above must NOT run this — device files keep
-            // their own open/release protocol.
-            int open_rc = vfs_file_open(f);
-            if (open_rc < 0) { syscall_result = open_rc; goto out_open; }
-        } else {
-            vfs_node_put(node);  // devfs path owns its own ref
-            node = NULL;
-            if (rc < 0) { syscall_result = rc; goto out_open; }
-            if (!f) { syscall_result = -ENOMEM; goto out_open; }
-        }
-
-        int newfd = fd_alloc(current->files, f);
-        if (newfd < 0) {
-            // The install was refused: the caller keeps its file
-            // reference and releases it here (fd_alloc took nothing).
-            file_free(f);
-            f = NULL;          // already freed
-            syscall_result = newfd;   // real errno (-EMFILE)
-            goto out_open;
-        }
-        f = NULL;  // fd_alloc took ownership
-        syscall_result = newfd;
-    out_open:
-        // Cleanup: free path_copy and any node/f refs still
-        // owned by this code path.
-        if (node) vfs_node_put(node);
-        if (f) file_free(f);
-        if (path_copy) kfree(path_copy);
+        syscall_result = sys_open_at(AT_FDCWD,
+                                     (const char *)ctx->args[0],
+                                     (int)ctx->args[1]);
+        break;
+    }
+    case SYS_openat: {
+        syscall_result = sys_open_at((int)ctx->args[0],
+                                     (const char *)ctx->args[1],
+                                     (int)ctx->args[2]);
         break;
     }
     case SYS_close: {
@@ -479,18 +477,41 @@ rwv_done:
         syscall_result = fd_dup2(current->files, oldfd, newfd);
         break;
     }
+    case SYS_dup3: {
+        int oldfd = (int)ctx->args[0];
+        int newfd = (int)ctx->args[1];
+        int flags = (int)ctx->args[2];
+        if (oldfd == newfd || (flags & ~O_CLOEXEC)) {
+            syscall_result = -EINVAL;
+            break;
+        }
+        syscall_result = fd_dup2(current->files, oldfd, newfd);
+        break;
+    }
     case SYS_pipe: {
         // pipe(int fds[2]) → 0 / -errno
         int *fds = (int *)ctx->args[0];
-        // Fast reject: ensure 8 bytes are mapped writable.  The
-        // authoritative _ft write happens in do_pipe.  NULL is
-        // rejected here (no graceful "ignore write" semantic).
         if (!fds ||
             !syscall_check_user_range((uint64_t)fds, sizeof(int) * 2, true)) {
             syscall_result = -EFAULT;
             break;
         }
         syscall_result = do_pipe(fds);
+        break;
+    }
+    case SYS_pipe2: {
+        int *fds = (int *)ctx->args[0];
+        int flags = (int)ctx->args[1];
+        if (flags & ~(O_CLOEXEC | O_NONBLOCK)) {
+            syscall_result = -EINVAL;
+            break;
+        }
+        if (!fds ||
+            !syscall_check_user_range((uint64_t)fds, sizeof(int) * 2, true)) {
+            syscall_result = -EFAULT;
+            break;
+        }
+        syscall_result = do_pipe_flags(fds, flags);
         break;
     }
     case SYS_chdir: {

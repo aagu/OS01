@@ -17,7 +17,7 @@
 | **P2** | 架构治理 / 扩展性 | 0 | 新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填该节 |
 | **P3** | GUI | 7 | GUI-4/5/6 + 优化与验证 4 |
 | **P4** | 硬件适配 | 5 | USB 2 · NVMe · HPET · ACPI S3 |
-| **P5** | ABI 扩展 / 兼容性 | 13 | syscall 与 libc 缺口（`readv/writev` 已于 2026-11-26 闭环） |
+| **P5** | ABI 扩展 / 兼容性 | 12 | syscall 与 libc 缺口（`readv/writev`、`openat/dup3/pipe2` 已于 2026-11-26 闭环） |
 
 推进顺序：**P0 → P1 → P2 → P3 / P4 → P5**；P3 GUI 与 P4 硬件可并行。
 
@@ -194,7 +194,6 @@ CSPRNG: seeded STRONG from UEFI GetRNG
 | rt_sigaction | 现代信号语义（SA_RESTART/si_value/实时信号），替换老 SYS_signal | 信号重构；**现状**：Linux 兼容层的 `rt_sigaction` 只是转发到旧 `SYS_signal` 的 ABI shim（`kernel/syscall/compat/proc.c:11-19`），无 SA_RESTART / 实时信号 | |
 | x86_64 signal 帧 FPU 区 | x86_64 `struct sigframe` 同样无 FPU 区（`kernel/include/uapi/time.h:95-106`，仅 200 B 通用寄存器 + blocked 掩码），signal handler 的 FP 使用会毁掉被打断上下文的 x87/SSE 状态。aarch64 侧已闭环（816 B 帧含 `fp[528]@288`，2026-11-21，见 [`arch.md`](arch.md) 与 [`changelog.md`](changelog.md)），本项为 x86_64 对齐任务 | aarch64 FP 帧实现 ✅（2026-11-21） | |
 | clone/pthread | 线程模型 + pthread_create | futex ✅；**x86_64 线程上下文前置已闭环（2026-11-24）**：ELF `PT_TLS`（Variant II）静态 TLS 在 spawn / exec 初始化、`%fs:0` 发布 TP、`arch_prctl`(79) 原生实现 + Linux 158→79 兼容映射、`IA32_FS_BASE` 在上下文切换中保存/恢复、fork 快照调用者 selector + base（`kernel/arch/x86_64/fs/elf.c`、`kernel/arch/x86_64/cpu/switch.c`、`kernel/arch/x86_64/syscall/sys_misc.c`、`kernel/arch/x86_64/sched/fork.c`）。**仍缺**：`kernel/include/uapi/syscall.h` 无 `SYS_clone`（Linux nr 56 在兼容表里直接映射到 `SYS_fork`，`kernel/syscall/compat/table_x86_64.c:43`），`libc/include/pthread.h:10-14` 只声明 mutex 一族，无 `pthread_create` / 线程 / 条件变量 / 信号量 / 递归 mutex；aarch64 侧 `futex` 已于 2026-11-26 闭环 | |
-| openat/dup3/pipe2 | 现代 syscall 变体 | 独立；ARCH-5 挂载树与 dcache 已就绪 ✅；**现状**：`SYS_fstatat` 已有（at 族部分落地，`kernel/include/uapi/syscall.h:101`），但 `openat`/`dup3`/`pipe2` 均未进 syscall 表 | |
 | FIFO 命名管道 | S_IFIFO 语义 + mkfifo | 独立；ARCH-5 已就绪 ✅（当前仅有 pipe 的合成 stat `S_IFIFO`，`kernel/syscall/sys_fs.c:565`，**无 mkfifo**） | |
 | alarm/setitimer | POSIX 定时器（busybox timeout 需要） | 独立；**现状**：`libc/unistd/alarm.c:2` 是静默空桩（无 syscall），`setitimer`/`getitimer` 完全未实现 | |
 | 作业控制（剩余部分） | **剩余**：SIGTSTP/SIGCONT 完整作业控制（bg/fg/jobs，当前仅作 ignore 处理，无 stop/continue 状态机——`TASK_STOPPED` 定义于 `kernel/include/sched/task.h:70` 但内核无任何置位点，`kernel/tty/tty.c:169-170` 明确 "SIGTSTP not implemented: just drop the char."）、控制终端与前台进程组的完整语义。**已具备**：setpgid/setsid/getpgid/getsid ✅、tcgetpgrp/tcsetpgrp ✅、tty ISIG + VINTR/VQUIT ✅、kill pid=0/-pid/-1 ✅、SIGWINCH 派发 ✅（PTY master `TIOCSWINSZ` 尺寸变化时 `signal_pgrp(pgrp, SIGWINCH)` 派发到前台进程组，`kernel/tty/pty.c:149`；`user/test_resolution.c` 的 `pty-watch` 观察者与 `qemutests/test_resolution_switcher.py` 场景给出运行期证据）。注意**未收到 SIGWINCH 时默认动作仍是忽略**（`SIG_DFL` ignore，见 `docs/signal/signal.md:25,71`；内核侧 `kernel/arch/x86_64/intr/trap.c:888` 把 `SIGWINCH` 列入非致命 `SIG_DFL` 集，`:928` 的默认忽略分支与 `:1052` 的致命判定同样跳过它） | tty termios ✅；PTY ✅ | |

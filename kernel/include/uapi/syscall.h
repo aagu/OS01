@@ -106,6 +106,9 @@
 #define SYS_arch_prctl    79   // arch_prctl(op, arg) — raw FS base control
 #define SYS_readv         80   // readv(fd, iov, iovcnt)
 #define SYS_writev        81   // writev(fd, iov, iovcnt)
+#define SYS_openat        82   // openat(dirfd, path, flags, mode)
+#define SYS_dup3          83   // dup3(oldfd, newfd, flags)
+#define SYS_pipe2         84   // pipe2(fds, flags)
 
 // ── arch_prctl(2) operations (Linux x86_64 UAPI values) ────
 #define ARCH_SET_FS       0x1002
