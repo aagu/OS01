@@ -323,6 +323,7 @@ else
 	@$(MAKE) -C tools check-deps HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools
 	@mkdir -p $(dir $@) $(dir $@)tmp
 	@rm -f $@.tmp
+	$(eval include $(OS01_ROOT)/config/rootfs.mk)
 	@# Product manifest (2026-11-21): the full unlocked aarch64 product
 	@# userspace on the ext2 rootfs.  /kernel.elf doubles as the mkdisk
 	@# --esp-kernel source (the aarch64 loader reads \kernel.elf from the
@@ -336,7 +337,10 @@ else
 	@# ext2 enables the real /bin/sh→busybox symlink (FAT had to carry a
 	@# copy); busybox dispatches on argv[0], terminal.elf's /bin/sh
 	@# fallback exec resolves through the link.
-	@printf 'symlink\t/bin/sh\tbusybox\n' >> $@.tmp
+	@for item in $(ROOTFS_SYMLINKS); do \
+	  dest=$${item%%=*}; target=$${item#*=}; \
+	  printf 'symlink\t%s\t%s\n' "$$dest" "$$target" >> $@.tmp; \
+	done
 	@mv $@.tmp $(dir $@)rootfs.product.manifest
 	@$(HOST_MKDISK) --output $@ --efi $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
 	  --temp-dir $(dir $@)tmp --rootfs-manifest $(dir $@)rootfs.product.manifest \

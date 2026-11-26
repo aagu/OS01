@@ -632,6 +632,7 @@ void test_time_conversion(void)
 // bits must match on the target exactly.  The old strtod could not
 // even accept this check: it lost the tail digits to repeated
 // multiply/divide, and strtold did not exist.
+#if defined(__x86_64__)
 static const char *fp_ld_expected = "\x35\xc2\x68\x21\xa2\xda\x0f\xc9\x00\x40";
 
 void test_float_precision(void)
@@ -664,6 +665,7 @@ void test_float_precision(void)
     CHECK3(w == pid && st == 0, "float ld fresh process",
            "child parse bit-identical");
 }
+#endif /* __x86_64__ */
 
 void test_linux_abi_compat(void)
 {
@@ -1072,7 +1074,6 @@ void test_libc_float(void)
     char *end;
     double d;
     float f;
-    long double ld;
     int ok;
 
     errno = 0;
@@ -1080,13 +1081,16 @@ void test_libc_float(void)
     ok = d == 3.5 && *end == '\0' && errno == 0;
     CHECK3(ok, "float strtod", ok ? "3.5" : "wrong value");
 
+#if defined(__x86_64__)
     // The long double must NOT be routed through a double: the value it
     // keeps is more precise than the double's.
+    long double ld;
     d = strtod("0.1", &end);
     ld = strtold("0.1", &end);
     ok = ld != (long double)d;
     CHECK3(ok, "float strtold keeps the extra bits",
            ok ? "long double is finer" : "same as double");
+#endif
 
     errno = 0;
     d = strtod("0x1.8p+1", &end);

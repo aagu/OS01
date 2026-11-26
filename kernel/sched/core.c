@@ -786,14 +786,27 @@ __attribute__((noreturn)) static void idle_task_resume(void)
 }
 
 #ifndef OS01_HOST_TEST
-/* ── task_files_pin_by_pid weak default ────────────────────────
- * The fd-table pin primitive belongs to the task exit path, which is
- * x86-only today (kernel/arch/x86_64/sched/exit.c holds the strong
- * definition).  aarch64 has no userspace fd tables yet, so the neutral
- * weak default answers NULL — procfs fd readers see an empty table. */
-__attribute__((weak)) files_t *task_files_pin_by_pid(int pid)
+#include <fs/file.h>
+
+/* Locate a task by pid under task_list_lock and pin its fd table so a
+ * /proc reader can inspect it without racing do_exit. */
+files_t *task_files_pin_by_pid(int pid)
 {
-    (void)pid;
-    return NULL;
+    files_t *fs = NULL;
+    uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
+    list_t *pos = init_task_union.task.list.next;
+    while (pos != &init_task_union.task.list) {
+        task_t *t = container_of(pos, task_t, list);
+        pos = task_list_next(pos);
+        if (t->pid == pid) {
+            if (t->files) {
+                fs = t->files;
+                files_pin(fs);
+            }
+            break;
+        }
+    }
+    spin_unlock_irqrestore(&task_list_lock, tl_flags);
+    return fs;
 }
 #endif /* !OS01_HOST_TEST */

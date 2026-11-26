@@ -359,7 +359,7 @@ USER_ARTIFACT_DIR := $(BUILD_DIR)/artifacts/user$(if $(USER_VARIANT),/$(USER_VAR
 # Directory apps that link the gfx/gui/lvgl/mbedTLS sysroot libraries are
 # x86-only until those libraries exist on this arch (user/apps.mk filters
 # these out of USER_PROGRAMS).
-USER_EXCLUDED_PROGRAMS := desktop doom doom_testctl test_gui_fault test_gui_input test_lvgl tetris usb_hid_probe test_display_owner test_gfx netmodeltest systest test_monitor test_monitor_test
+USER_EXCLUDED_PROGRAMS := desktop doom doom_testctl test_gui_fault test_gui_input test_lvgl tetris usb_hid_probe test_display_owner test_gfx netmodeltest test_monitor test_monitor_test
 UEFI_BUILD_DIR := $(BUILD_DIR)/uefi
 UEFI_RUNTIME_DIR := $(BUILD_DIR)/uefi-runtime
 UEFI_EFI   ?= $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI

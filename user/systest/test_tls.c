@@ -7,6 +7,8 @@
 
 #include "systest.h"
 
+#if defined(__x86_64__)
+
 #define TLS_NR_NATIVE  SYS_arch_prctl
 
 #define ARCH_SET_FS   0x1002
@@ -360,3 +362,5 @@ void test_pt_tls_exec(void)
     CHECK3(rc == 127, "pt_tls_exec exec rejection",
            "missing image exits 127");
 }
+
+#endif /* __x86_64__ */

@@ -48,7 +48,7 @@ struct aarch64_user_image;
  * envp NULL, then the auxv pair array terminated by AT_NULL.  The
  * image setup writes AT_RANDOM (16 CSPRNG bytes), AT_PAGESZ and
  * AT_NULL. */
-#define AARCH64_USER_AUXV_PAIRS  3u
+#define AARCH64_USER_AUXV_PAIRS  6u
 #define AARCH64_USER_AT_RANDOM_BYTES 16u
 
 /* Minimum free execution stack space below initial SP_EL0 after argv/envp

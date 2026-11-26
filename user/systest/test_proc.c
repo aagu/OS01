@@ -287,6 +287,7 @@ void test_kill_signal_deliver(void)
 }
 
 
+#if defined(__x86_64__)
 // The x86 signal frame's saved rax is at byte 0x80. Change it in
 // the restorer so an unconditional syscall result writeback loses the
 // sentinel and fails the test. No C prologue may alter the frame RSP.
@@ -327,6 +328,7 @@ void test_sigreturn_saved_frame(void)
                  : "memory", "cc");
     CHECK3(result == -EINVAL, "sigreturn invalid CS", "validation error written to rax");
 }
+#endif /* __x86_64__ */
 
 
 // ── 41: reboot (skipped) ───────────────────────────────────
@@ -1009,6 +1011,7 @@ void test_hostile(void)
         }
     }
 
+#if defined(__x86_64__)
     // ── H11: signal delivery write-stack E2E ────────────
     // Set RSP to the END of a single mapped page so the sigframe
     // write would cross into the next (unmapped) page.  The kernel's
@@ -1109,6 +1112,7 @@ void test_hostile(void)
                "h11_sigreturn_cross_page",
                "sigreturn with frame end in unmapped -> -EFAULT, no crash");
     }
+#endif /* __x86_64__ */
 }
 
 

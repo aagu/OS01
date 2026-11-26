@@ -358,7 +358,11 @@ void test_ext2_write(void)
 // path is functional end-to-end.
 void test_boot_fat_mount(void)
 {
+#if defined(__aarch64__)
+    const char *path = "/boot/kernel.elf";
+#else
     const char *path = "/boot/kernel.bin";
+#endif
 
     int fd = open(path, O_RDONLY);
     if (fd < 0) {
@@ -428,10 +432,17 @@ void test_proc_maps(void)
         if (strstr(line, "[stack]")) {
             has_stack = 1;
             volatile unsigned long stack_probe = 0;
+#if defined(__aarch64__)
+            unsigned long sp_addr = (unsigned long)(uintptr_t)&stack_probe;
+            if (start <= sp_addr && sp_addr < end &&
+                start >= 0x20400000UL && end <= 0x30408000UL)
+                stack_at_right_addr = 1;
+#else
             unsigned long sp_base = (unsigned long)(uintptr_t)&stack_probe & ~0x1FFFFFUL;
             if (start == sp_base && end == sp_base + 0x200000UL &&
                 start >= 0x20400000UL && start < 0x2020400000UL)
                 stack_at_right_addr = 1;
+#endif
             // Negative: must NOT include 0x600000 (legacy guard, kept
             // for backward compatibility even though the stack no
             // longer sits there).

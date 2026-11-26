@@ -54,6 +54,8 @@ struct aarch64_user_image {
     mm_t *mm;
     uint64_t root_pa;
     uint64_t entry;
+    uint64_t phdr_addr;
+    uint64_t phnum;
     uint64_t stack_pa;       /* first (lowest) stack page PA */
     uint64_t stack_pas[AARCH64_PRODUCT_STACK_PAGES];
     unsigned stack_pages;
@@ -141,6 +143,17 @@ int aarch64_user_image_load(const void *bytes, size_t size,
 
     image->root_pa = (uint64_t)(uintptr_t)image->mm->pgdir;
     image->entry = bias + view.ehdr.e_entry;
+    image->phnum = view.ehdr.e_phnum;
+    for (unsigned i = 0; i < view.phnum; i++) {
+        const elf64_phdr_t *ph = &view.phdrs[i];
+        if (ph->p_type == PT_LOAD &&
+            view.ehdr.e_phoff >= ph->p_offset &&
+            view.ehdr.e_phoff - ph->p_offset < ph->p_filesz) {
+            image->phdr_addr = bias + ph->p_vaddr +
+                               (view.ehdr.e_phoff - ph->p_offset);
+            break;
+        }
+    }
 
     /* Install the empty heap VMA before the first ELF leaf exists:
      * the brk window is part of the image contract, and a failure
@@ -468,12 +481,18 @@ int aarch64_user_image_setup_stack(struct aarch64_user_image *image,
     get_random_bytes(scratch + top_off, AARCH64_USER_AT_RANDOM_BYTES);
 
     uint64_t *auxv = frame + argc + 3 + envc;
-    auxv[0] = 25;               /* AT_RANDOM */
-    auxv[1] = random_ptr;
-    auxv[2] = 6;                /* AT_PAGESZ */
-    auxv[3] = PAGE_4K_SIZE;
-    auxv[4] = 0;                /* AT_NULL */
-    auxv[5] = 0;
+    auxv[0] = 3;                /* AT_PHDR */
+    auxv[1] = image->phdr_addr;
+    auxv[2] = 4;                /* AT_PHENT */
+    auxv[3] = sizeof(elf64_phdr_t);
+    auxv[4] = 5;                /* AT_PHNUM */
+    auxv[5] = image->phnum;
+    auxv[6] = 25;               /* AT_RANDOM */
+    auxv[7] = random_ptr;
+    auxv[8] = 6;                /* AT_PAGESZ */
+    auxv[9] = PAGE_4K_SIZE;
+    auxv[10] = 0;               /* AT_NULL */
+    auxv[11] = 0;
 
     for (unsigned si = 0; si < stack_pages; si++) {
         __builtin_memcpy((uint8_t *)Phy_To_Virt(image->stack_pas[si]),

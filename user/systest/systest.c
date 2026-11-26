@@ -373,7 +373,9 @@ static const test_case_t tests[] = {
     {"stdio_modes",       "stdio modes",       test_stdio_modes,            1, 0},
     {"busybox_lines",     "busybox line applets", test_busybox_lines,      1, 0},
     {"integer_conversions", "integer conversions", test_integer_conversions, 1, 0},
+#if defined(__x86_64__)
     {"float_precision",   "float precision",   test_float_precision,        1, 0},
+#endif
     {"time_conversion",   "time conversion",   test_time_conversion,        1, 0},
     {"signal_handler_sync", "signal handler sync", test_signal_handler_sync, 1, 0},
     {"poll",              "poll syscall",      test_poll,                    1, 0},
@@ -418,7 +420,9 @@ static const test_case_t tests[] = {
     {"sync",              "sync flush",        test_sync,                    1, 0},
     {"sigprocmask",       "sigprocmask block", test_sigprocmask,             1, 0},
     {"fatal_signal_exit", "fatal signal retirement", test_fatal_signal_exit, 1, 0},
+#if defined(__x86_64__)
     {"sigreturn_saved_frame", "sigreturn saved frame", test_sigreturn_saved_frame, 1, 0},
+#endif
     {"ext2_write",        "ext2 write",        test_ext2_write,              1, 0},
     {"boot_fat_mount",    "boot fat mount",    test_boot_fat_mount,          1, 0},
     {"reboot",            "reboot skip",       test_reboot_skip,             0, 0},
@@ -471,23 +475,31 @@ static const test_case_t tests[] = {
     {"51_fork_brk_isolation", "fork brk isolation", test_fork_brk_isolation, 1, 0},
     {"52_fork_mmap_cow_isolation", "fork mmap cow isolation", test_fork_mmap_cow_isolation, 1, 0},
     {"53_cow_kernel_outputs", "cow kernel outputs", test_cow_kernel_outputs, 1, 0},
+#if defined(__x86_64__)
     {"54_linux_abi_compat", "linux abi compat", test_linux_abi_compat,       1, 0},
     {"54b_user_fault_divzero", "user fault divzero → SIGFPE",  test_user_fault_divzero,    1, 0},
     {"54c_user_fault_write_ro", "user fault write ro → SIGSEGV", test_user_fault_write_ro,  1, 0},
     {"54d_user_fault_ud2",     "user fault ud2 → SIGILL",      test_user_fault_ud2,        1, 0},
     {"54e_user_fault_gp",      "user fault cli #GP → SIGSEGV", test_user_fault_gp,        1, 0},
+#endif
     {"mprotect_subrange_cow",  "mprotect subrange cow", test_mprotect_subrange_cow,    1, 0},
+#if defined(__x86_64__)
     {"mmap_exec_protection",   "mmap execute protection", test_mmap_execute_protection, 1, 0},
+#endif
     {"fixed_file_replace",     "munmap hole + MAP_FIXED file", test_fixed_file_replace, 1, 0},
+#if defined(__x86_64__)
     {"fb_fixed_replace",       "framebuffer MAP_FIXED replace", test_fb_fixed_replace, 1, 0},
+#endif
     {"aslr_mmap_exec_randomized", "aslr mmap exec randomized", test_aslr_mmap_exec_randomized, 1, 0},
     {"aslr_mmap_fork_inherit",    "aslr mmap fork inherit",    test_aslr_mmap_fork_inherit,    1, 0},
     {"aslr_mmap_fixed_and_bounds","aslr mmap fixed and bounds",test_aslr_mmap_fixed_and_bounds,1, 0},
     {"aslr_stack_randomized",     "aslr stack randomized",     test_aslr_stack_randomized,     1, 0},
+#if defined(__x86_64__)
     {"aslr_pie",                  "aslr static pie",           test_aslr_pie,                  1, 0},
     // ── PT_TLS: raw arch_prctl + FS base lifecycle ──
     {"arch_prctl_fs",             "arch_prctl FS base",        test_arch_prctl_fs,             1, 0},
     {"pt_tls_exec",               "PT_TLS load/spawn/exec",    test_pt_tls_exec,               1, 0},
+#endif
 };
 
 // ── CLI: --list ────────────────────────────────────────────

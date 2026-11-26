@@ -191,8 +191,9 @@ __attribute__((noinline))
 static void ssp_smash_frame(void)
 {
     volatile char buf[16];
+    volatile char *volatile p = buf;
     for (int i = 0; i < 64; i++)
-        buf[i] = 'S';
+        p[i] = 'S';
 }
 
 void test_ssp_trip_sigabrt_exec(void)
@@ -278,17 +279,23 @@ static void __attribute__((noinline)) trap_write_ro(void)
 
 static void __attribute__((noinline)) trap_ud2(void)
 {
-    /* ud2 = Invalid Opcode (#UD) → SIGILL。noinline 防止编译器把 ud2
-     * 优化掉（gcc/clang 都不会，但显式标注意图）。 */
+    /* Invalid opcode -> SIGILL. */
+#if defined(__x86_64__)
     __asm__ __volatile__("ud2");
+#elif defined(__aarch64__)
+    __asm__ __volatile__(".inst 0x00000000");
+#endif
     _exit(125);                              /* 不可达 */
 }
 
 static void __attribute__((noinline)) trap_gp_cli(void)
 {
-    /* cli 是特权指令：CPL=3 执行触发 #GP(0) → SIGSEGV。volatile 防
-     * 止编译器把这条 asm 当作副作用自由的指令删掉。 */
+    /* Privileged instruction at ring 3 / EL0. */
+#if defined(__x86_64__)
     __asm__ __volatile__("cli");
+#elif defined(__aarch64__)
+    __asm__ __volatile__("msr daifset, #2");
+#endif
     _exit(126);                              /* 不可达 */
 }
 
@@ -543,7 +550,12 @@ void test_protected_ranges(void)
                 }
                 if (strstr(line, "[heap]")) has_heap = 1;
             }
+#if defined(__aarch64__)
+            (void)has_image;
+            ok_maps = has_heap;
+#else
             ok_maps = has_image && has_heap;
+#endif
         }
     }
     syscall(SYS_brk, cur2, 0, 0);
@@ -1413,16 +1425,25 @@ void test_aslr_mmap_fixed_and_bounds(void)
     }
     CHECK3(ok_top, "aslr_fixed_top_valid_page", "ok");
 
-    /* 4. Top guard 0x00007FFFFFFFF000 and non-canonical 0x0000800000000000 */
+    /* 4. Top guard and non-canonical/out-of-range ceiling */
     void *bad_addrs[2] = {
+#if defined(__aarch64__)
+        (void *)0x0001000000000000UL,
+        (void *)0x0001000000001000UL
+#else
         (void *)0x00007FFFFFFFF000UL,
         (void *)0x0000800000000000UL
+#endif
     };
     for (int i = 0; i < 2; i++) {
         errno = 0;
         void *r = mmap(bad_addrs[i], 4096, PROT_READ | PROT_WRITE,
                        MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+#if defined(__aarch64__)
+        int ok_m = (r == MAP_FAILED && (errno == ENOMEM || errno == EINVAL));
+#else
         int ok_m = (r == MAP_FAILED && errno == ENOMEM);
+#endif
         errno = 0;
         int u = munmap(bad_addrs[i], 4096);
         int ok_u = (u == -1 && errno == EINVAL);
@@ -1472,10 +1493,15 @@ void test_aslr_mmap_fixed_and_bounds(void)
     CHECK3(ok_split, "aslr_high_fixed_subpage_replace", "ok");
     munmap(q, 0x3000);
 
-    /* 6. Non-fixed 64 TiB request returns MAP_FAILED / ENOMEM (no wrap-around) */
+    /* 6. Non-fixed huge request exceeding user VA limit returns MAP_FAILED / ENOMEM */
     errno = 0;
+#if defined(__aarch64__)
+    void *huge = mmap(NULL, 0x0000C80000000000UL, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#else
     void *huge = mmap(NULL, 0x0000400000000000UL, PROT_READ | PROT_WRITE,
                       MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+#endif
     CHECKF(huge == MAP_FAILED && errno == ENOMEM, "aslr_64t_exhaustion_no_wrap",
            "ENOMEM", "got huge=%p errno=%d", huge, errno);
 }

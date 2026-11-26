@@ -155,26 +155,3 @@ uint64_t do_exit(uint64_t exit_code)
     schedule();
     return 0;  // unreachable
 }
-
-// ── task_files_pin_by_pid ─────────────────────────────────
-// Locate a task by pid under task_list_lock and pin its fd table so a
-// /proc reader can inspect it without racing do_exit.
-files_t *task_files_pin_by_pid(int pid)
-{
-    files_t *fs = NULL;
-    uint64_t tl_flags = spin_lock_irqsave(&task_list_lock);
-    list_t *pos = init_task_union.task.list.next;
-    while (pos != &init_task_union.task.list) {
-        task_t *t = container_of(pos, task_t, list);
-        pos = task_list_next(pos);
-        if (t->pid == pid) {
-            if (t->files) {
-                fs = t->files;
-                files_pin(fs);   // atomic, safe under task_list_lock
-            }
-            break;
-        }
-    }
-    spin_unlock_irqrestore(&task_list_lock, tl_flags);
-    return fs;
-}
