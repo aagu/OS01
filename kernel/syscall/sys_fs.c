@@ -1,5 +1,6 @@
 #include <syscall/dispatch.h>
 #include <uapi/syscall.h>
+#include <uapi/uio.h>
 #include <sched/task.h>
 #include <memory/slab.h>
 #include <memory/uaccess.h>
@@ -256,6 +257,89 @@ int64_t sys_fs_dispatch(syscall_ctx_t *ctx)
 
         file_t *f = current->files->fd[fd];
         syscall_result = fd_read(f, buf, size);
+        break;
+    }
+    case SYS_readv:
+    case SYS_writev: {
+        int fd = (int)ctx->args[0];
+        const struct iovec *u_iov = (const struct iovec *)ctx->args[1];
+        int iovcnt = (int)(int64_t)ctx->args[2];
+        bool is_write = (ctx->nr == SYS_writev);
+
+        if (fd < 0 || fd >= NOFILE || !current->files ||
+            !current->files->fd[fd]) {
+            syscall_result = -EBADF;
+            break;
+        }
+        if (iovcnt < 0 || iovcnt > UIO_MAXIOV) {
+            syscall_result = -EINVAL;
+            break;
+        }
+        if (iovcnt == 0) {
+            syscall_result = 0;
+            break;
+        }
+        size_t iov_bytes = (size_t)iovcnt * sizeof(struct iovec);
+        uint64_t u_addr = (uint64_t)(uintptr_t)u_iov;
+        if (u_addr == 0 || u_addr >= current->addr_limit ||
+            iov_bytes > current->addr_limit - u_addr) {
+            syscall_result = -EFAULT;
+            break;
+        }
+
+        struct iovec *kiov = (struct iovec *)kmalloc(iov_bytes);
+        if (!kiov) {
+            syscall_result = -ENOMEM;
+            break;
+        }
+        if (copy_from_user_ft(kiov, u_iov, iov_bytes) < 0) {
+            kfree(kiov);
+            syscall_result = -EFAULT;
+            break;
+        }
+
+        size_t sum = 0;
+        int64_t prep_err = 0;
+        for (int i = 0; i < iovcnt; i++) {
+            if (kiov[i].iov_len > (size_t)(INT64_MAX - (int64_t)sum)) {
+                prep_err = -EINVAL;
+                break;
+            }
+            sum += kiov[i].iov_len;
+            if (kiov[i].iov_len > 0) {
+                uint64_t base = (uint64_t)(uintptr_t)kiov[i].iov_base;
+                if (base >= current->addr_limit ||
+                    kiov[i].iov_len > current->addr_limit - base) {
+                    prep_err = -EFAULT;
+                    break;
+                }
+            }
+        }
+        if (prep_err < 0) {
+            kfree(kiov);
+            syscall_result = prep_err;
+            break;
+        }
+
+        file_t *f = current->files->fd[fd];
+        int64_t total = 0;
+        for (int i = 0; i < iovcnt; i++) {
+            if (kiov[i].iov_len == 0)
+                continue;
+            int64_t rc = is_write
+                ? fd_write(f, kiov[i].iov_base, kiov[i].iov_len)
+                : fd_read(f, kiov[i].iov_base, kiov[i].iov_len);
+            if (rc < 0) {
+                syscall_result = (total > 0) ? total : rc;
+                goto rwv_done;
+            }
+            total += rc;
+            if ((size_t)rc < kiov[i].iov_len)
+                break;
+        }
+        syscall_result = total;
+rwv_done:
+        kfree(kiov);
         break;
     }
     case SYS_open: {

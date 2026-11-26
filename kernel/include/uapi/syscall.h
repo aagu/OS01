@@ -104,6 +104,8 @@
 #define SYS_msync         77   // msync(addr, length, flags)
 #define SYS_fsync         78   // fsync(fd)
 #define SYS_arch_prctl    79   // arch_prctl(op, arg) — raw FS base control
+#define SYS_readv         80   // readv(fd, iov, iovcnt)
+#define SYS_writev        81   // writev(fd, iov, iovcnt)
 
 // ── arch_prctl(2) operations (Linux x86_64 UAPI values) ────
 #define ARCH_SET_FS       0x1002

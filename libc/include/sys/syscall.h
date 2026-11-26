@@ -91,6 +91,8 @@
 #define SYS_msync         77   // msync(addr, length, flags)
 #define SYS_fsync         78   // fsync(fd)
 #define SYS_arch_prctl    79   // arch_prctl(op, arg) — raw FS base control
+#define SYS_readv         80   // readv(fd, iov, iovcnt)
+#define SYS_writev        81   // writev(fd, iov, iovcnt)
 
 // Compile-time cross-check: libc SYS_* values must mirror kernel/include/uapi/syscall.h.
 // If the kernel side changes these numbers, update this assertion or libc will

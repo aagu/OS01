@@ -389,6 +389,7 @@ static const test_case_t tests[] = {
     {"devfs_open_inherit", "devfs open inherit", test_devfs_open_inherited_fg_pgrp, 1, 0},
     {"orphan_reparent",   "orphan reparent",   test_orphan_reparent,         1, 0},
     {"read",              "read syscall",      test_read,                    1, 1},
+    {"readv_writev",      "readv writev scatter-gather", test_readv_writev,  1, 0},
     {"open_close",        "open close",        test_open_close,              1, 1},
     {"dup_dup2",          "dup dup2",          test_dup_dup2,                1, 0},
     {"pipe",              "pipe syscall",      test_pipe,                    1, 0},

@@ -86,6 +86,8 @@ System calls use `int $0x80` with syscall number in `rax` and arguments in `rdi`
 | 77 | `SYS_msync` | rdi=addr, rsi=length, rdx=flags | Synchronize a `MAP_SHARED` file mapping with its backing file (`MS_SYNC`/`MS_ASYNC`/`MS_INVALIDATE`) |
 | 78 | `SYS_fsync` | rdi=fd | Flush dirty shared-backing pages for `fd` to its backing file |
 | 79 | `SYS_arch_prctl` | rdi=op, rsi=arg | Raw x86_64 FS base control: `ARCH_SET_FS` (0x1002) accepts an inclusive low-half address and installs a null FS selector plus the `IA32_FS_BASE` MSR (invalid values return `-EPERM`); `ARCH_GET_FS` (0x1003) writes the 8-byte live base to `arg` through uaccess (`-EFAULT`/`-ENOMEM`); any other opcode returns `-EINVAL`. Linux nr 158 maps here. |
+| 80 | `SYS_readv` | rdi=fd, rsi=iov, rdx=iovcnt | Scatter-gather read into `iovcnt` `struct iovec` buffers (`UIO_MAXIOV=1024`); Linux nr 19 maps here. |
+| 81 | `SYS_writev` | rdi=fd, rsi=iov, rdx=iovcnt | Scatter-gather write from `iovcnt` `struct iovec` buffers (`UIO_MAXIOV=1024`); Linux nr 20 maps here. |
 
 ## Definitions
 

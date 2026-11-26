@@ -1547,3 +1547,67 @@ void test_dir_scan_vfs(void)
     rmdir("/tmp/dt");
 }
 
+#include <sys/uio.h>
+
+void test_readv_writev(void)
+{
+    int fds[2];
+    if (pipe(fds) < 0) {
+        FAIL("readv_writev", "pipe failed errno=%d", errno);
+        return;
+    }
+
+    char w0[] = "AB";
+    char w2[] = "CDEFG";
+    struct iovec wiov[3] = {
+        { w0, 2 },
+        { NULL, 0 },
+        { w2, 5 },
+    };
+    ssize_t wn = writev(fds[1], wiov, 3);
+    CHECKF(wn == 7, "writev_pipe", "wn=7", "got wn=%ld errno=%d", (long)wn, errno);
+
+    char r0[3] = {0}, r2[4] = {0};
+    struct iovec riov[3] = {
+        { r0, 3 },
+        { NULL, 0 },
+        { r2, 4 },
+    };
+    ssize_t rn = readv(fds[0], riov, 3);
+    int data_ok = (rn == 7) && (memcmp(r0, "ABC", 3) == 0) && (memcmp(r2, "DEFG", 4) == 0);
+    CHECKF(data_ok, "readv_pipe", "ABC+DEFG", "rn=%ld r0=%.3s r2=%.4s", (long)rn, r0, r2);
+
+    /* iovcnt == 0 returns 0 */
+    errno = 0;
+    ssize_t z = writev(fds[1], NULL, 0);
+    CHECKF(z == 0, "writev_zero_cnt", "0", "got %ld errno=%d", (long)z, errno);
+
+    /* Invalid iovcnt -> EINVAL */
+    errno = 0;
+    ssize_t neg = readv(fds[0], riov, -1);
+    CHECKF(neg == -1 && errno == EINVAL, "readv_neg_cnt", "EINVAL", "got %ld errno=%d", (long)neg, errno);
+
+    errno = 0;
+    ssize_t big = writev(fds[1], wiov, UIO_MAXIOV + 1);
+    CHECKF(big == -1 && errno == EINVAL, "writev_over_maxiov", "EINVAL", "got %ld errno=%d", (long)big, errno);
+
+    /* Bad fd -> EBADF */
+    errno = 0;
+    ssize_t bfd = readv(999, riov, 1);
+    CHECKF(bfd == -1 && errno == EBADF, "readv_ebadf", "EBADF", "got %ld errno=%d", (long)bfd, errno);
+
+    /* NULL iov with iovcnt=1 -> EFAULT */
+    errno = 0;
+    ssize_t niov = writev(fds[1], NULL, 1);
+    CHECKF(niov == -1 && errno == EFAULT, "writev_null_iov", "EFAULT", "got %ld errno=%d", (long)niov, errno);
+
+    /* Kernel-range iov_base -> EFAULT */
+    struct iovec bad_iov = { (void *)0xffff800000001000UL, 4 };
+    errno = 0;
+    ssize_t biov = writev(fds[1], &bad_iov, 1);
+    CHECKF(biov == -1 && errno == EFAULT, "writev_kernel_base", "EFAULT", "got %ld errno=%d", (long)biov, errno);
+
+    close(fds[0]);
+    close(fds[1]);
+}
+
