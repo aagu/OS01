@@ -1,7 +1,50 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-22）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-26）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
+
+---
+
+## 2026-11-26
+
+- feat(aarch64,uefi): **双平台 UEFI 启动配置落地（ESP `/config.txt`）+ bring-up 构建开关退役**（闭合 `docs/roadmap.md` P2「真机适配审计」中的「控制台地址构建期固化 / 平台分叉」层，spec [`docs/superpowers/specs/2026-11-25-aarch64-uefi-boot-config-design.md`](superpowers/specs/2026-11-25-aarch64-uefi-boot-config-design.md)、plan [`docs/superpowers/plans/2026-11-26-aarch64-uefi-boot-config.md`](superpowers/plans/2026-11-26-aarch64-uefi-boot-config.md)）：
+  - **公共 ESP `/config.txt` 解析器**（`boot/uefi/boot_config.c` / `boot_config.h`，提交 `38d62408`）：有界 4096 字节解析，允许 LF / CRLF / 末行无换行 / 空行 / `#` 整行注释，键值在首个空格或制表符处切分；文件内 NUL、裸 CR、超长内容为配置错误并报行号。`uefi_boot_platform`（`auto` / `qemu-virt` / `rpi5`）+ `uefi_boot_console`（`dtb` / `rp1-header`）+ `width` / `height`；`rp1-header` 要求显式 `platform rpi5`。**x86_64 兼容**：`resolution WxH` 与 `1440x900` 默认目标，x86 忽略 aarch64 平台 / 控制台项。
+  - **双平台镜像打包 + 开关退役**（提交 `59f5ced3`）：`AARCH64_PLATFORM` 构建参数只选镜像（`qemu-virt` 默认 → `image/aarch64-uefi.img`；`rpi5` → `image/rpi5/aarch64-uefi.img`），平台名**不进入编译参数、对象目录或 ELF 链接布局**；两份受版本控制的 ESP 配置 `config/aarch64/uefi-{qemu-virt,rpi5}.txt` 由 `tools/mkdisk.c` 注入各自 ESP 的 `/config.txt`。**删除** bring-up 期的 `AARCH64_FIRMWARE_CONSOLE_PA` / `AARCH64_VIRTIO_MMIO` / `AARCH64_FW_CONSOLE_BEACON` / `AARCH64_SKIP_EBS` 四个编译开关与 `P/Q/H/K`、HDMI 阶段写入。
+  - **DTB 选择 + 总线翻译 + 最终内存图校验**（提交 `7d5edd5d`）：优先取有效 EFI DTB 配置表，显式平台与 DT 根节点冲突即停机；**仅显式 RPi5 且 EFI DTB 项缺失时**才回退读 VideoCore 保留 DTB 窗口 `[0x1f0000, 0x210000)`（≤128 KiB，magic + totalsize + 内存图覆盖 + 非 MMIO 校验）；加载器与内核共用一致的 `ranges` 翻译与设备启用判断（空 `ranges` = 恒等映射，缺 `ranges` 的中间总线按无映射处理）。
+  - **handoff 前置校验 + M0/M1 窗口归一**（提交 `ea610e45`）：`boot_context` v3 新增 `BOOT_CONTEXT_CONSOLE_FIRMWARE_CONFIGURED`（`1u << 8`）；发布可信控制台 PA 前校验 magic / version / size / flag / 窗口与 console MMIO 的表示范围和对齐；M0 与 M1 采用同一组规范化 Device 窗口（主窗口 + 窗口外的固件控制台 2 MiB 块），2 GiB 以上每段须在一个 1 GiB L1 槽内且最高地址 < 512 GiB。
+  - **DTB virtio-mmio slot 映射前移**（提交 `ee25697e`）：`arch_boot_controllers()` 在 `dtb_init()` 成功后、`arch_boot_percpu()` 进入 SMP 门禁前映射 virtio-mmio，映射取 DTB 列出的 slot，`0x0a000000` 不再出现在架构映射策略里。
+  - **加固**（提交 `760b5018` / `5e23a1a0` / `9a72f624`）：UEFI 内存图查询、PL011 块跨度、DTB ranges 校验加固；允许非 MMIO 的固件 DTB 区域并把 `uefi_puts` 镜像到 ConOut；早期 MMIO helper 强制内联以支撑 MMU 开启前的校验。
+  - **验收**：`make test-host`（exit 0）、`make test-static`（exit 0，16 项静态审计全绿）、`python3 qemutests/aarch64_dtb_test.py` **44/44 PASS**（较 2026-11-23 的 41 例新增 3 例）、`python3 tools/tests/test_aarch64_uefi_images.py --build-root build/aarch64-clang` **PASS**（双镜像 `BOOTAA64.EFI` 与 `kernel.elf` 逐字节一致、`/config.txt` 各不相同、四组非法 `AARCH64_PLATFORM` 在解析期失败、QEMU-only 目标遇 `rpi5` 在固件获取前退出、RPi5 dry-run 不触碰 `QEMU_EFI.fd`）、`make PROFILE=aarch64-clang test-aarch64 MODE=smp` **PASS**（4 核 QEMU 引导）。
+  - **真机影响**：RPi5 板镜像改由 `AARCH64_PLATFORM=rpi5` 产出，控制台地址不再需要构建期常量，真机启动路径与 QEMU 路径共用同一份内核与 EFI 二进制。
+
+## 2026-11-25
+
+- feat(aarch64): **树莓派 5 真机首次跑通内核到 boot-3 fs/root**（推进 `docs/roadmap.md` P2「真机适配审计」，交接记录 [`docs/aarch64-rpi5-bringup-handoff-2026-11-25.md`](aarch64-rpi5-bringup-handoff-2026-11-25.md)，提交 `dbe83999`）：
+  - **真机进展**：树莓派 5 Model B Rev 1.0（固件 `boardrev c04170`，Worproject `RPI_EFI.fd`）上串口出现完整内核启动日志，HDMI 显示 Craton logo；M1 页表、DTB（4 CPUs、GIC-400、RP1 UART）、GICv2 驱动（`intids=320`）、clocksource / timer / timekeeping / thermal 子系统、`CSPRNG: seeded STRONG from UEFI GetRNG` 全部通过。**当前唯一阻断为根文件系统**：`[boot-3] FATAL stage=fs component=root rc=-19 phase=-1 cpu=-1`（`-ENODEV`，RPi5 无 virtio-mmio，内核无 SDHCI / PCIe-RP1 存储驱动）。
+  - **真机专属根因 ①：loader 交接前缺 D-cache clean**（`boot/uefi/arch/aarch64/boot.c` 的 `flush_handoff_caches()`）：loader 写内核镜像与 `boot_context` 走可缓存的 UEFI 映射，数据脏在 D-cache 而 DRAM 是旧值；`eret` 到 EL1（MMU 关）后取指 / 读 handoff 读到垃圾 → 异常进固件 VBAR 挂死。**QEMU 不模拟 cache，故只在真机显形**。修复为交接前按 VA 对 boot block / trampoline / boot_context / FDT 副本 / 内存图做 `dc civac`（到 PoC）+ `dsb sy; ic iallu; dsb sy; isb`。
+  - **真机专属根因 ②：RP1 UART 的 CPU 可见地址是 `0x1f00030000`（41 位）**：固件日志里的 `0x1c00030000`（37 位）是 VideoCore 自己的别名，ARM CPU 写不进去（静默丢弃）；DTB 的 `/axi/pcie@120000/ranges` 才是 CPU 侧真址。40-pin 排针 GPIO14/15 挂 RP1，SoC 的 PL011（DTB `serial@7d001000`）只到 3 针调试座。
+  - **真机专属根因 ③：DTB 来源回退**：`RPI_EFI` 未安装 EFI DTB 配置表，`find_fdt()` 增加回退读 VideoCore 加载 DTB 的 PA `0x1f0000`（magic + totalsize 校验，≤2 MiB）。
+  - **平台事实**：RPi5 在 UEFI 固件下是 `arm,gic-400`（GICv2 兼容，非 GICv3）；`gicv2: interrupt-controller@7fff9000` 位于 `/axi` 下；`/soc` 的 `ranges` 把 `0x7c000000..0x80000000` 翻译到 PA `0x10_7c000000..0x10_80000000`；PL011 `reg = <0x7d001000 0x200>`、`interrupts = <0x00 0x79 0x04>`（SPI 121 → GIC INTID 153）。
+  - **遗留**：交接时用户明确推迟的测试已于 2026-11-26 补齐大部分，仅剩交接前 D-cache clean 一项无宿主覆盖（见 2026-11-26 条目）。
+
+## 2026-11-24
+
+- feat(x86): **x86_64 静态 TLS（`PT_TLS`）与 `arch_prctl` 落地**（推进 `docs/roadmap.md` P5「clone/pthread」的 x86_64 前置，spec [`docs/superpowers/specs/2026-11-24-ptls-x86_64-design.md`](superpowers/specs/2026-11-24-ptls-x86_64-design.md)、plan [`docs/superpowers/plans/2026-11-24-ptls-x86_64.md`](superpowers/plans/2026-11-24-ptls-x86_64.md)）：
+  - **`PT_TLS` 装载与 Variant II 实例化**（提交 `4fff6275`，`kernel/arch/x86_64/fs/elf.c`）：预校验「非空且仅一个 `PT_TLS`」、`p_memsz != 0`、`p_filesz <= p_memsz`、合法对齐、地址不越映像窗口，带 TLS 的 `ET_EXEC` 拒绝 `PT_INTERP` / `PT_DYNAMIC`；页取整跨度上限 64 KiB。TLS 实例化为进程私有匿名 RW/NX 映射（起点 `X86_USER_STACK_END`），模板经目标页表拷贝，`[TP, TP+8)` 写自指针。静态 PIE 路径**不再无条件拒绝 `PT_TLS`**。
+  - **FS base 保存/恢复 + 原生 `arch_prctl`**（提交 `70eab92f`，`kernel/arch/x86_64/cpu/switch.c` / `syscall/sys_misc.c` / `sched/fork.c`）：`thread_t` 增 `fs_base` 字段，`__switch_to` 在保存 / 恢复选择子旁同步 `IA32_FS_BASE`；新增原生 `arch_prctl`(79) 与 Linux 158→79 兼容映射，`ARCH_SET_FS` / `ARCH_GET_FS` 以 `IA32_FS_BASE` 为后端；fork 快照调用者的活选择子 + 基线。
+  - **生命周期**：spawn 在入队前存 null 选择子 + TP；exec 在 IRQ 关闭的 mm / CR3 提交窗口内安装，失败 exec 保留原映像。
+  - **夹具与验收**：`user/systest/fixtures/` 下 TinyGo 形状的纯 `.tbss` `ET_EXEC`、`.tdata` + `.tbss` 静态 PIE 与无 TLS 对照三组，加结构化 readelf 门禁 `tools/tests/check_ptls_fixture.py`；guest 用例覆盖模板初始化、`%fs:0`、SET/GET、fork 隔离、失败 exec 保留、TLS→TLS 重 exec 与 TLS→普通清除。
+  - **边界**：本期**不做**用户线程 / `clone` / `CLONE_SETTLS` / pthread / 动态链接与 DSO TLS / 其他 TLS 访问模型 / TLS 地址随机化 / aarch64 TLS——`clone` / `pthread_create` 仍留在 `docs/roadmap.md` P5。
+  - **验收**：`make test-host` 全绿（含 `test_elf_load_4k` 新增 TLS 组、`test_x86_aslr_exec` 增补、`test_compat_linux` 的 158→79 映射）、`check_ptls_fixture.py --selftest` OK、`make OS01_SYSTEST=1 test-syscall` **130/130 PASS**。
+
+- feat(time): **墙钟锚定 RTC**（提交 `208dd1f0`，`kernel/time/timekeeping.c`、`kernel/include/time/timekeeping.h`）：
+  - **架构中立 timekeeping 子系统**：`timekeeping_init()` 经 `driver/rtc.h` → `arch_rtc_read` 取平台 RTC，失败则退回单调时钟；`timekeeping_real_ns()` 返回「RTC 锚定的墙钟 + 启动后单调增量」，`timekeeping_has_rtc()` 暴露「是否锚定成功」。以 `SUBSYS_INITCALL` 注册在 `clocksource` 之后（`SUBSYS_PHASE_4`）。
+  - **civil-to-days 转换**：`timekeeping_datetime_to_epoch()` 用 Howard Hinnant 算法做闰年 / 月长 / 1970 下界校验与 UTC → Unix epoch 转换。
+  - **syscall 接入**：`SYS_time` / `gettimeofday` 从「恒写 0（1970）」桩改为返回真实墙钟；`clock_gettime(CLOCK_REALTIME)` 改用 `timekeeping_real_ns()`，`CLOCK_MONOTONIC` 仍走 `arch_clocksource_read_ns()`。
+  - **边界**：RTC 后端目前只有 x86_64 CMOS RTC（`kernel/arch/x86_64/platform/rtc_cmos.c`）；aarch64 无 RTC 实现，`arch/rtc.h` 的弱默认返回 `false`，故 aarch64 上墙钟仍退回单调时钟。
+  - **验收**：宿主 `test_timekeeping` 与 `test_rtc_pie_calibration` 全绿，`user/date.c` 改读内核墙钟。
+
+- fix(libc): **API manifest 补登记 `msync` / `shm_open` / `shm_unlink` / `fsync`**（提交 `c019b312`，`scripts/audit_libc_api.py`）：`61b44ebb` 补了四个公开声明与实现但漏更 manifest，漂移检查在编译任何测试之前就中止全部宿主构建。
 
 ---
 
