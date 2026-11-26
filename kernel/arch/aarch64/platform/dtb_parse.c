@@ -294,9 +294,17 @@ static int finish_node(struct parse_state *s, const struct node *n, uint32_t dep
     }
     if (depth == 2 && contains(b, n->compatible, "arm,armv8-timer")) {
         if (s->timer || !enabled(b, n) ||
-            !n->interrupts.off || n->interrupts.len < 24 || n->interrupts.len % 12 ||
-            be32(b + n->interrupts.off + 12) != 1 ||
-            be32(b + n->interrupts.off + 16) != 14) return -4;
+            !n->interrupts.off || n->interrupts.len < 12 || n->interrupts.len % 12)
+            return -4;
+        bool has_cntp = false;
+        for (uint32_t off = 0; off < n->interrupts.len; off += 12) {
+            const uint8_t *ip = b + n->interrupts.off + off;
+            if (be32(ip) == 1 && be32(ip + 4) == 14) {
+                has_cntp = true;
+                break;
+            }
+        }
+        if (!has_cntp) return -4;
         s->timer = true;
         s->info->cntp_ppi = 30;
     }

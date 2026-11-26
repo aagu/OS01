@@ -23,7 +23,8 @@ def node(name, props=(), children=()):
 
 def fixture(cpus=(0,), address_cells=1, method='hvc', psci=True,
             disabled=(), enable='psci', missing=None, gicc=0x08010000,
-            uart_size=0x1000):
+            uart_size=0x1000,
+            timer_irqs=(1, 13, 4, 1, 14, 4, 1, 11, 4, 1, 10, 4)):
     children = []
     for cpu in cpus:
         reg = cells(cpu) if address_cells == 1 else cells(cpu >> 32, cpu & 0xffffffff)
@@ -40,7 +41,7 @@ def fixture(cpus=(0,), address_cells=1, method='hvc', psci=True,
         node('pl011@9000000', [('compatible', string('arm,pl011') + string('arm,primecell')),
              ('reg', cells(0, 0x09000000, 0, uart_size))]),
         node('timer', [('compatible', string('arm,armv8-timer')),
-             ('interrupts', cells(1, 13, 4, 1, 14, 4, 1, 11, 4, 1, 10, 4))]),
+             ('interrupts', cells(*timer_irqs))]),
     ]
     if psci:
         devices.append(node('psci', [('compatible', string('vendor,ignored') + string('arm,psci-0.2')),
@@ -156,6 +157,10 @@ def main():
         ('smc_conduit', fixture(method='smc'), 0, 0, [0]),
         ('affinity_normalized_duplicate', fixture(cpus=(0, 0x80000000)), 0, -2, []),
         ('capacity_exact', fixture(cpus=tuple(range(8))), 0, 0, list(range(8))),
+        ('timer_omits_secure_ppi', fixture(timer_irqs=(1, 14, 4, 1, 11, 4, 1, 10, 4)), 0, 0, [0]),
+        ('timer_single_cntp_ppi', fixture(timer_irqs=(1, 14, 4)), 0, 0, [0]),
+        ('timer_missing_cntp_ppi', fixture(timer_irqs=(1, 13, 4, 1, 11, 4)), 0, -4, []),
+        ('timer_bad_interrupts_len', fixture(timer_irqs=(1, 14)), 0, -4, []),
     ]
     one_cell_devices = fixture()
     one_cell_devices[1][:] = [('#address-cells', cells(1)), ('#size-cells', cells(1))]

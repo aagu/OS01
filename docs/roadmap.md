@@ -13,7 +13,7 @@
 |-------|------|---------|------|
 | **P0** | 工程与测试基础设施 | 0 | flake 账本入库已于 2026-11-21 闭环（见 [`changelog.md`](changelog.md)） |
 | **P1** | 安全加固 | 2 | UBSan/KASan 后续项（v1 已于 2026-11-22 闭环）+ ASLR 剩余范围（aarch64 尚未纳入 ASLR；x86_64 栈基址随机化已于 2026-11-26 闭环） |
-| **P2** | aarch64 适配 | 11 | 内存与执行体 0 · 能力齐平 4 · 架构统一 0 · 真机阻断 5（硬阻断 2 + 条件阻断 3）· 真机推进待办 2（RPi5 真机已跑到 boot-3 fs/root，剩根文件系统） |
+| **P2** | aarch64 适配 | 10 | 内存与执行体 0 · 能力齐平 4 · 架构统一 0 · 真机阻断 4（硬阻断 2 + 条件阻断 2）· 真机推进待办 2（RPi5 真机已跑到 boot-3 fs/root，剩根文件系统） |
 | **P2** | 架构治理 / 扩展性 | 0 | 新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填该节 |
 | **P3** | GUI | 7 | GUI-4/5/6 + 优化与验证 4 |
 | **P4** | 硬件适配 | 5 | USB 2 · NVMe · HPET · ACPI S3 |
@@ -129,7 +129,8 @@ CSPRNG: seeded STRONG from UEFI GetRNG
 |------|------|----------|----------|
 | GICv2 Group 0 / Non-secure Group 1 交接 | `kernel/arch/aarch64/intr/gic_driver.c` | 无 Security Extensions 时配置 Group 0；有 `SecurityExtn` 时假定固件已为 OS-owned SPI 及各核 SGI/PPI 配置 Group 1 与 NS-accessible PMR（跳过 IGROUPR 并校验 PMR 读回非零） | ✅ **软件侧已就绪**（2026-11-21）；**RPi5 真机部分取证已过**（GIC-400 上 `[gic] GICv2 driver: intids=320` 初始化成功，clocksource/timer/timekeeping 子系统就绪，`CSPRNG: seeded STRONG from UEFI GetRNG`）；**仍待**：TF-A Group 1 实测 + PMR 读回审计 + 实机 IRQ 覆盖（CNTP / 定向 SGI / PL011 RX→TTY）与物理 SError 注入，按 [`arch.md`](arch.md#aarch64-serror-与-gicv2-phase-22026-11-21) 的板级证据模板取证 |
 | 非 BSP CPU 强制 enable-method=psci | `kernel/arch/aarch64/platform/dtb_parse.c:161`（`exact(n->enable,"psci")`）、`:467`（非 BSP 无 psci → -3 FATAL） | spin-table 平台（老 RPi 固件、`cpu-release-addr`）全部 AP 拒启（-3 FATAL） | ❌ **仍开放**（RPi5 走 PSCI，不阻断本板）：若目标板需要，加 spin-table 等待路径 |
-| timer 中断形状校验偏脆（要求 interrupts 第二项 = PPI 14） | `kernel/arch/aarch64/platform/dtb_parse.c:295-300`（`len < 24 \|\| len % 12 \|\| data+12 != 1 \|\| data+16 != 14`；`cntp_ppi` 写死 30 = 16+14，GICv2 架构定值本身正确） | 真机 DT 省略 secure timer 项时条目位移被 -4 拒 | ❌ **仍开放**（RPi5 DTB 通过，不阻断本板）：改为按"non-secure physical timer 的 PPI 30"匹配而非固定槽位 |
+
+（注：`timer` 中断形状校验偏脆已于 2026-11-26 闭环，`dtb_parse.c` 改为扫描所有 3-cell 项匹配 `GIC_PPI(1)` + `14`（INTID 30），不再要求固定在第二槽位。）
 
 **真机推进待办（不阻断 rootfs 之前的板级能力，但真机验收必须补齐）**：
 
