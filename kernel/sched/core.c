@@ -30,7 +30,12 @@
 // .lock = { .lock = 1L }: mm_t.lock is a spinlock_T whose own field is
 // `lock`.  1 = unlocked; leaving it 0 would deadlock the first task that
 // takes it (INIT_TASK points .mm at this struct).
-mm_t init_mm = { .lock = { .lock = 1L } };
+mm_t init_mm = {
+#ifndef OS01_HOST_TEST
+    .vma_list = { .prev = &init_mm.vma_list, .next = &init_mm.vma_list },
+#endif
+    .lock = { .lock = 1L },
+};
 
 union task_union init_task_union __attribute__((__section__(".data.init_task"))) = {INIT_TASK(init_task_union.task)};
 

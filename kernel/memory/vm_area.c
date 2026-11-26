@@ -16,7 +16,7 @@
 
 vma_t *vm_area_lookup(mm_t *mm, uint64_t va)
 {
-    if (!mm)
+    if (!mm || !mm->vma_list.next)
         return NULL;
     list_t *pos = mm->vma_list.next;
     while (pos != &mm->vma_list) {
