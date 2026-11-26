@@ -3,6 +3,7 @@
 
 #define PSCI_VERSION_FID       UINT64_C(0x84000000)
 #define PSCI_CPU_ON64_FID      UINT64_C(0xc4000003)
+#define PSCI_SYSTEM_OFF_FID    UINT64_C(0x84000008)
 #define PSCI_SYSTEM_RESET64_FID UINT64_C(0xc4000009)
 
 static enum psci_conduit psci_conduit = PSCI_CONDUIT_NONE;
@@ -55,6 +56,13 @@ int32_t psci_cpu_on(uint64_t target_mpidr, uint64_t entry, uint64_t context_id)
         return -1;
     return (int32_t)(uint32_t)psci_call(PSCI_CPU_ON64_FID, target_mpidr,
                                          entry, context_id);
+}
+
+/* PSCI SYSTEM_OFF — the reboot(RB_POWER_OFF) backend.  Any non-SUCCESS
+ * return leaves the caller running. */
+int32_t psci_system_off(void)
+{
+    return (int32_t)(uint32_t)psci_call(PSCI_SYSTEM_OFF_FID, 0, 0, 0);
 }
 
 /* PSCI SYSTEM_RESET — the reboot(2) backend.  Any non-SUCCESS return

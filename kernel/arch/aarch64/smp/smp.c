@@ -200,12 +200,20 @@ int arch_smp_boot_aps(uint32_t cpu_count, arch_smp_ap_entry_t entry,
     kputu(AARCH64_SMP_TEST_NO_ACK_CPU);
     log_info("\n");
 
-    /* A valid uniprocessor platform needs no PSCI transport at all.  A
-     * multiprocessor platform without one FAILS CLOSED — the old
-     * degraded "boot with the BSP alone" continuation is gone. */
-    if (cpu_count > 1 && psci_init(topology->conduit) != 0) {
-        log_warn("[smp] reason=psci-unavailable\n");
-        return a64_smp_fail(1, SMP_STAGE_ACTIVATE, -ENODEV, -ENODEV);
+    /* A valid uniprocessor platform needs no PSCI transport for SMP,
+     * though we still initialize PSCI if DTB advertises it so
+     * SYSTEM_OFF / SYSTEM_RESET work in -smp 1. A multiprocessor
+     * platform without one FAILS CLOSED — the old degraded "boot with
+     * the BSP alone" continuation is gone. */
+    if (cpu_count > 1) {
+        if (psci_init(topology->conduit) != 0) {
+            log_warn("[smp] reason=psci-unavailable\n");
+            return a64_smp_fail(1, SMP_STAGE_ACTIVATE, -ENODEV, -ENODEV);
+        }
+    } else if (topology->psci_compatible &&
+               topology->conduit != PSCI_CONDUIT_NONE) {
+        if (psci_init(topology->conduit) != 0)
+            log_warn("[smp] reason=psci-unavailable (uniprocessor)\n");
     }
 
     const struct smp_boot_ops ops = {

@@ -78,16 +78,25 @@ int64_t sys_misc_dispatch(syscall_ctx_t *ctx)
         break;
     }
     case SYS_reboot: {
-        int cmd = (int)(int64_t)ctx->args[0];
-        (void)cmd;
-        log_info("[reboot] PSCI SYSTEM_RESET (cmd=%d)\n", cmd);
-        int32_t st = psci_system_reset();
-        // A failed reset returns to the caller (the reboot wrapper
-        // reports it); fall through to the reboot-not-supported path.
-        syscall_result = -EIO;
-        if (st != 0)
-            log_warn("[reboot] PSCI SYSTEM_RESET failed status=%d\n",
-                     (int)st);
+        uint32_t cmd = (uint32_t)ctx->args[0];
+        int32_t st;
+        if (cmd == (uint32_t)RB_POWER_OFF || cmd == (uint32_t)RB_HALT_SYSTEM) {
+            log_info("[reboot] PSCI SYSTEM_OFF (cmd=%u)\n", cmd);
+            st = psci_system_off();
+            syscall_result = -EIO;
+            if (st != 0)
+                log_warn("[reboot] PSCI SYSTEM_OFF failed status=%d\n",
+                         (int)st);
+        } else {
+            log_info("[reboot] PSCI SYSTEM_RESET (cmd=%u)\n", cmd);
+            st = psci_system_reset();
+            // A failed reset returns to the caller (the reboot wrapper
+            // reports it); fall through to the reboot-not-supported path.
+            syscall_result = -EIO;
+            if (st != 0)
+                log_warn("[reboot] PSCI SYSTEM_RESET failed status=%d\n",
+                         (int)st);
+        }
         break;
     }
     case SYS_uname: {
