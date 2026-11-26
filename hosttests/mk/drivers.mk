@@ -628,6 +628,17 @@ $(TEST_BLD)/aarch64_uefi_boot_memory.o: \
 LINK_CFLAGS_aarch64-uefi-boot-memory = $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC)
 LINK_GROUP_aarch64-uefi-boot-memory := $(TEST_BLD)/aarch64_uefi_boot_memory.o
 
+# AArch64 ASLR (kernel/arch/aarch64/memory/aslr.c)
+$(TEST_BLD)/aarch64_aslr.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/aslr.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/aslr.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/user_image.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/mmu.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -include $(TESTS_DIR)/hosttests/mock/test_platform.h -D__KERNEL_ARCH_CPU_H__ -D__SPINLOCK_H__ -I$(TESTS_DIR)/hosttests/mock $(LIBC_INC) $(KERNEL_INC) -c $< -o $@
+
+LINK_CFLAGS_aarch64-aslr = $(HOST_CFLAGS) $(FRAMEWORK_INC) -D__KERNEL_ARCH_CPU_H__ -D__SPINLOCK_H__ -I$(TESTS_DIR)/hosttests/mock $(LIBC_INC) $(KERNEL_INC)
+LINK_GROUP_aarch64-aslr := $(TEST_BLD)/aarch64_aslr.o
+
 .PHONY: test-aarch64-boot-elf
 test-aarch64-boot-elf: $(TEST_BLD)/test_aarch64_boot_elf.elf
 	$<

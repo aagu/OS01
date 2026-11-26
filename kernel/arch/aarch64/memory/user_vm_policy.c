@@ -598,7 +598,9 @@ int user_vm_map_image_page(mm_t *mm, uint64_t va, uint64_t pa, uint32_t flags)
         return -ENOMEM;
     rec->va      = va;
     rec->pa      = pa;
-    rec->source  = (va == AARCH64_USER_STACK_BASE)
+    uint64_t stk_base = mm->start_stack ? mm->start_stack : AARCH64_USER_STACK_BASE;
+    uint64_t stk_end  = stk_base + (uint64_t)AARCH64_PRODUCT_STACK_PAGES * PAGE_4K_SIZE;
+    rec->source  = (va >= stk_base && va < stk_end)
                        ? USER_VM_PAGE_STACK : USER_VM_PAGE_ELF;
     rec->logical = flags;
     rec->share   = USER_VM_PAGE_PRIVATE;
@@ -944,7 +946,10 @@ int64_t user_vm_mmap(mm_t *mm, const uint64_t args[6])
     }
 
     if (cand == 0) {
-        uint64_t cursor = USER_VM_MMAP_BASE;
+        uint64_t cursor = (mm->mmap_base >= USER_VM_MMAP_BASE &&
+                           mm->mmap_base < AARCH64_USER_LIMIT)
+                          ? PAGE_4K_ALIGN(mm->mmap_base)
+                          : USER_VM_MMAP_BASE;
         for (list_t *p = mm->vma_list.next; p != &mm->vma_list;
              p = p->next) {
             vma_t *v = container_of(p, vma_t, list);

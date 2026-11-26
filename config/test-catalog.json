@@ -1080,6 +1080,19 @@
       }
     },
     {
+      "id": "test_aarch64_aslr",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [
+        "memory.aarch64.aslr.default"
+      ],
+      "link": "aarch64-aslr",
+      "source": "hosttests/cases/test_aarch64_aslr.c"
+    },
+    {
       "kind": "host_test",
       "id": "test_aarch64_backend_4k",
       "layer": "host",

@@ -12,7 +12,7 @@
 | 优先级 | 主题 | 未完成项 | 备注 |
 |-------|------|---------|------|
 | **P0** | 工程与测试基础设施 | 0 | flake 账本入库已于 2026-11-21 闭环（见 [`changelog.md`](changelog.md)） |
-| **P1** | 安全加固 | 2 | UBSan/KASan 后续项（v1 已于 2026-11-22 闭环）+ ASLR 剩余范围（aarch64 尚未纳入 ASLR；x86_64 栈基址随机化已于 2026-11-26 闭环） |
+| **P1** | 安全加固 | 2 | UBSan/KASan 后续项（v1 已于 2026-11-22 闭环）+ ASLR 剩余范围（x86_64 全套与 aarch64 `mmap_base`/栈基址随机化已于 2026-11-26 闭环，仅剩 aarch64 静态 PIE `ET_DYN`） |
 | **P2** | aarch64 适配 | 10 | 内存与执行体 0 · 能力齐平 4 · 架构统一 0 · 真机阻断 4（硬阻断 2 + 条件阻断 2）· 真机推进待办 2（RPi5 真机已跑到 boot-3 fs/root，剩根文件系统） |
 | **P2** | 架构治理 / 扩展性 | 0 | 新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填该节 |
 | **P3** | GUI | 7 | GUI-4/5/6 + 优化与验证 4 |
@@ -37,7 +37,7 @@ AAGU-5 arch entropy facade（STRONG-only 控制流）→ 用户堆与 ELF 映射
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
 | UBSan + KASan 后续项 | x86_64 内核插桩 **v1 已闭环（2026-11-22）**（`KERNEL_UBSAN=1` / `KERNEL_KASAN=1` 独立 knob、两阶段影子、slab 毒化钩子、UBSan 运行时、探针端到端验证，见 [`build.md`](build/build.md) 与 [`changelog.md`](changelog.md)）。**剩余四项**：① 栈插桩（需 Linux 式早期文件排除清单）；② 全局插桩 / 全局红 zone（需 `.init_array.1` 扫描）；③ aarch64 接入（UBSan 运行时本身架构中立，但两个 knob 当前都门禁在 x86_64 profile，`mk/project.mk:472-473` 的定义与 `:523-525` 的 profile 门禁）；④ 偶发 LAPIC 影子 `0xff` 待诊断（报告已带影子帧 PA） | v1 ✅ | ArvernOS |
-| ASLR 剩余范围 | ASLR-A（`mmap_base` 随机化）与 ASLR-B（静态 PIE 与镜像基址随机化）均于 2026-11-22 闭环，x86_64 用户栈基址随机化于 2026-11-26 闭环（16-bit 2 MiB PMD 粒度 `[0x20400000, 0x2020400000)`，`x86_aslr_init_stack_base()` STRONG-only fail-closed），**完整用户态 ASLR 尚缺一项**：**aarch64 尚未纳入 ASLR**——aarch64 已有 EL0 用户态，但当前 ASLR 只覆盖 x86_64 | ASLR-A ✅、ASLR-B ✅、x86_64 栈 ASLR ✅ | |
+| ASLR 剩余范围 | ASLR-A（`mmap_base` 随机化）与 ASLR-B（静态 PIE 与镜像基址随机化）均于 2026-11-22 闭环，x86_64 用户栈基址随机化于 2026-11-26 闭环（16-bit 2 MiB PMD 粒度 `[0x20400000, 0x2020400000)`，`x86_aslr_init_stack_base()` STRONG-only fail-closed），aarch64 `mmap_base`（28-bit 4 KiB 粒度 `[0x0000400000000000, 0x0000410000000000)`）与用户栈基址随机化（16-bit 4 KiB 粒度 `[0x20400000, 0x30400000)`，`aarch64_aslr_init_mmap_base()` / `aarch64_aslr_init_stack_base()` STRONG-only fail-closed）亦于 2026-11-26 闭环。**完整用户态 ASLR 尚缺一项**：**aarch64 静态 PIE（`ET_DYN` + `R_AARCH64_RELATIVE`）**——当前 aarch64 用户态仍以 `-fno-pic -fno-pie` 构建 `ET_EXEC` 镜像 | ASLR-A ✅、ASLR-B ✅、x86_64 栈 ASLR ✅、aarch64 `mmap_base`/栈 ASLR ✅ | |
 
 ## 🏗 P2 aarch64 适配
 
