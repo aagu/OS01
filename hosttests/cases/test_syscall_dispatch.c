@@ -178,25 +178,25 @@ int main(void)
         return 1;
     }
 
-    /* The time, resource, proc, and putchar syscall groups are served on
+    /* The time, resource, proc, futex, and putchar syscall groups are served on
      * aarch64 product userspace (OS01_HAS_USERSPACE=1). */
     if (!syscall_has_handler(SYS_time) || !syscall_has_handler(SYS_gettimeofday) ||
         !syscall_has_handler(SYS_nanosleep) || !syscall_has_handler(SYS_times) ||
         !syscall_has_handler(SYS_getrlimit) || !syscall_has_handler(SYS_setrlimit) ||
         !syscall_has_handler(SYS_umask) || !syscall_has_handler(SYS_setpgid) ||
         !syscall_has_handler(SYS_getpgid) || !syscall_has_handler(SYS_setsid) ||
-        !syscall_has_handler(SYS_getsid) || !syscall_has_handler(SYS_putchar)) {
-        fprintf(stderr, "AArch64 userspace time/proc/resource/putchar group must be served\n");
+        !syscall_has_handler(SYS_getsid) || !syscall_has_handler(SYS_putchar) ||
+        !syscall_has_handler(SYS_futex)) {
+        fprintf(stderr, "AArch64 userspace time/proc/resource/futex/putchar group must be served\n");
         return 1;
     }
 
     /* Numbers the AArch64 port does not serve: a socket call (the
      * socket group lives in the x86-only OS01_SYSCALL_A64_SUBSET
      * block; OS01_HAS_NET=0 is why aarch64 could not serve it anyway),
-     * the unimplemented getpeername slot, futex (x86-only block), an
+     * the unimplemented getpeername slot, arch_prctl, an
      * out-of-range number, and a high-bit polluted number. */
     if (syscall_has_handler(SYS_socket) || syscall_has_handler(SYS_getpeername) ||
-        syscall_has_handler(SYS_futex) ||
         syscall_has_handler(SYS_arch_prctl) ||
         syscall_has_handler(UINT64_MAX) ||
         syscall_has_handler((1ULL << 32) | SYS_getpid)) {
@@ -204,7 +204,7 @@ int main(void)
         return 1;
     }
     const uint64_t hidden[] = {
-        SYS_socket, SYS_getpeername, SYS_futex, SYS_arch_prctl, UINT64_MAX,
+        SYS_socket, SYS_getpeername, SYS_arch_prctl, UINT64_MAX,
         (1ULL << 32) | SYS_getpid,
     };
     for (unsigned i = 0; i < sizeof(hidden) / sizeof(hidden[0]); i++) {

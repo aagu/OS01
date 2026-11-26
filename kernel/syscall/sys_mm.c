@@ -1,17 +1,17 @@
 #include <syscall/dispatch.h>
 #include <uapi/syscall.h>
 #include <errno.h>
+#include <sched/task.h>
+#include <uapi/futex.h>
+#include <sync/futex.h>
 #ifdef OS01_SYSCALL_A64_SUBSET
 #include <arch/syscall.h>
 #else
 /* x86-only includes (mm_set_brk / do_mmap / do_mprotect / do_munmap
  * are x86 VMA-owner declarations — mm-architecture-boundaries
  * Task 3): guarded so the AArch64 A64-subset build never sees them. */
-#include <sched/task.h>
 #include <memory/vma.h>
 #include <arch/x86_64/vma.h>
-#include <uapi/futex.h>
-#include <sync/futex.h>
 #endif
 
 int64_t sys_mm_dispatch(syscall_ctx_t *ctx)
@@ -27,6 +27,23 @@ int64_t sys_mm_dispatch(syscall_ctx_t *ctx)
     case SYS_munmap:
     case SYS_msync:
         return arch_syscall_user_vm(ctx->nr, ctx->args);
+    case SYS_futex: {
+        int *uaddr = (int *)ctx->args[0];
+        int op = (int)ctx->args[1];
+        int val = (int)ctx->args[2];
+
+        if ((uint64_t)uaddr >= current->addr_limit)
+            return -EFAULT;
+
+        switch (op) {
+        case FUTEX_WAIT:
+            return do_futex_wait(uaddr, val);
+        case FUTEX_WAKE:
+            return do_futex_wake(uaddr, val);
+        default:
+            return -EINVAL;
+        }
+    }
     default:
         return -EINVAL;
     }

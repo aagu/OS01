@@ -82,6 +82,7 @@ static const syscall_entry_t syscall_table[SYS_arch_prctl + 1] = {
     [SYS_getpgid] = { sys_proc_dispatch, "getpgid" },
     [SYS_setsid] = { sys_proc_dispatch, "setsid" },
     [SYS_getsid] = { sys_proc_dispatch, "getsid" },
+    [SYS_futex] = { sys_mm_dispatch, "futex" },
 #endif
 
 /* The fs syscall group is served by the arch-neutral kernel/syscall/sys_fs.c.
@@ -125,7 +126,6 @@ static const syscall_entry_t syscall_table[SYS_arch_prctl + 1] = {
 #endif /* !OS01_SYSCALL_A64_SUBSET || OS01_HAS_VFS */
 #ifndef OS01_SYSCALL_A64_SUBSET
     [SYS_msync] = { sys_mm_dispatch, "msync" },
-    [SYS_futex] = { sys_mm_dispatch, "futex" },
     [SYS_putchar] = { sys_misc_dispatch, "putchar" },
     [SYS_getrandom] = { sys_misc_dispatch, "getrandom" },
     [SYS_sync] = { sys_misc_dispatch, "sync" },
