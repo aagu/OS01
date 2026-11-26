@@ -13,7 +13,7 @@
 |-------|------|---------|------|
 | **P0** | 工程与测试基础设施 | 0 | flake 账本入库已于 2026-11-21 闭环（见 [`changelog.md`](changelog.md)） |
 | **P1** | 安全加固 | 1 | UBSan/KASan 后续项（v1 已于 2026-11-22 闭环）；ASLR 全覆盖（x86_64 与 aarch64 的 `mmap_base`、栈基址与静态 PIE 均已于 2026-11-26 闭环） |
-| **P2** | aarch64 适配 | 10 | 内存与执行体 0 · 能力齐平 4 · 架构统一 0 · 真机阻断 4（硬阻断 2 + 条件阻断 2）· 真机推进待办 2（RPi5 真机已跑到 boot-3 fs/root，剩根文件系统） |
+| **P2** | aarch64 适配 | 9 | 内存与执行体 0 · 能力齐平 4 · 架构统一 0 · 真机阻断 4（硬阻断 2 + 条件阻断 2）· 真机推进待办 1（RPi5 真机已跑到 boot-3 fs/root，剩根文件系统） |
 | **P2** | 架构治理 / 扩展性 | 0 | 新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填该节 |
 | **P3** | GUI | 7 | GUI-4/5/6 + 优化与验证 4 |
 | **P4** | 硬件适配 | 5 | USB 2 · NVMe · HPET · ACPI S3 |
@@ -136,7 +136,7 @@ CSPRNG: seeded STRONG from UEFI GetRNG
 | 项 | 内容 | 状态 |
 |----|------|------|
 | 4 核 SMP / AP 启动实测 | RPi5 DTB 报 4 CPUs（`[dtb] /cpus: 4 CPUs, BSP MPIDR=0x0`），目前只跑通 BSP；AP 启动需 PSCI 实测（DTB `psci conduit=1`）与 `SUBSYS_INITCALL` 下的 SMP 门禁验证 | ❌ **仍开放** |
-| RPi5 bring-up 测试补齐 | 用户在 handoff 时明确推迟的测试，**已于 2026-11-26 补齐大部分**：`find_fdt` 的 RPi5 firmware 模式与 partial ranges（`hosttests/cases/test_aarch64_fdt_early.c`）、两段高地址 Device 窗口（同 L1 槽去重、控制台块在窗口外、跨 1 GiB 槽）（`hosttests/cases/test_aarch64_device_window.c`）、`/config.txt` 平台 / 控制台矩阵（`hosttests/cases/test_uefi_boot_config.c`）、DTB virtio-mmio slot 映射（`hosttests/cases/test_aarch64_virtio_mmio_map.c`）、UEFI 内存图最终校验（`hosttests/cases/test_aarch64_uefi_boot_memory.c`）、双平台镜像与 build gate（`tools/tests/test_aarch64_uefi_images.py`）。**仍缺**：交接前 D-cache clean 的可测断言（`boot/uefi/arch/aarch64/boot.c` 的 `flush_handoff_caches()` 无宿主测试覆盖——该路径只在真机显形，QEMU 不模拟 cache） | 🟡 **部分闭环**：仅剩 D-cache clean 一项 |
+| RPi5 bring-up 测试补齐 | 用户在 handoff 时明确推迟的测试已**全部闭环（2026-11-26）**：`find_fdt` 的 RPi5 firmware 模式与 partial ranges（`hosttests/cases/test_aarch64_fdt_early.c`）、两段高地址 Device 窗口（同 L1 槽去重、控制台块在窗口外、跨 1 GiB 槽）（`hosttests/cases/test_aarch64_device_window.c`）、`/config.txt` 平台 / 控制台矩阵（`hosttests/cases/test_uefi_boot_config.c`）、DTB virtio-mmio slot 映射（`hosttests/cases/test_aarch64_virtio_mmio_map.c`）、UEFI 内存图最终校验（`hosttests/cases/test_aarch64_uefi_boot_memory.c`）、双平台镜像与 build gate（`tools/tests/test_aarch64_uefi_images.py`）与交接前 D-cache clean 断言（`hosttests/cases/test_aarch64_handoff_cache.c`，覆盖 `CTR_EL0.DminLine` 解码、全区域 `dc civac` 覆盖与 `dsb sy -> ic iallu -> dsb sy -> isb` 屏障顺序） | ✅ **已闭环**（2026-11-26） |
 
 **平台能力上限（非阻断，选型需知）**：PA 上限 40-bit/1 TiB（`kernel/arch/aarch64/head.S:252-268` TCR IPS=0b010、`kernel/arch/aarch64/memory/page_table.c:51`；**IPS 仍为编译期硬编码，全树未实现 `ID_AA64MMFR0_EL1.PARange` 动态探测，>40-bit PA 平台不支持**——RPi5 的 `0x107d000000` 设备窗口是 39 位，仍在限内）；早期 identity map 为 [0x00000000, 0x80000000)（`kernel/arch/aarch64/head.S:168-212`，`aarch64_build_boot_page_tables` 调用在 `:199-212`，范围常量 `AARCH64_BOOT_MAP_END=0x80000000` 见 `kernel/include/arch/aarch64/boot_layout.h:41`）；**Device 窗口优先取 boot_context handoff 运行时派生值**（`kernel/arch/aarch64/head.S:199-211`，含 `:168-197` 的 fail-closed 校验），无 handoff 时才回落 QEMU 常量 [0x08000000,0x0a000000)（`kernel/arch/aarch64/head.S:205-206`）；窗口跨 2 GiB 时走 `AARCH64_BOOT_HIGH_END`（512 GiB）内的 1 GiB 槽（L1 slot 65 / 124，RPi5 真机已验证），控制台块在窗口之外时单独映射；aarch64 已接 RNDR/RNDRRS（`kernel/arch/aarch64/cpu/random.c:30-60,110-122`，
 经 `ID_AA64ISAR0_EL1.RNDR` 探测，输出 STRONG/WEAK/NONE），STRONG 池可用，无 RNDR 的板只剩 EFI_RNG_PROTOCOL

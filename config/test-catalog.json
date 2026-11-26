@@ -1190,6 +1190,19 @@
       }
     },
     {
+      "id": "test_aarch64_handoff_cache",
+      "layer": "host",
+      "subsystem": "boot",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [
+        "boot.uefi.aarch64_handoff_cache"
+      ],
+      "link": "aarch64-uefi-boot-memory",
+      "source": "hosttests/cases/test_aarch64_handoff_cache.c"
+    },
+    {
       "id": "test_aarch64_harness",
       "layer": "harness",
       "subsystem": "test-framework",

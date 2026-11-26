@@ -811,46 +811,63 @@ void arch_puts(const char *s)
  * hang) or reads a stale boot_context. QEMU does not model caches, so this
  * only shows up on hardware. Per-VA `dc civac` over the exact regions
  * avoids depending on cache geometry from CCSIDR. */
-static uint32_t cache_line_bytes(void)
-{
-    uint64_t ctr;
+#include "cache_handoff.h"
 
+static uint64_t hw_read_ctr(void *ctx)
+{
+    (void)ctx;
+    uint64_t ctr;
     __asm__ __volatile__("mrs %0, ctr_el0" : "=r"(ctr));
-    return 4u << ((uint32_t)(ctr >> 16) & 0xfu);   /* CTR_EL0.DminLine */
+    return ctr;
 }
 
-static void clean_invalidate_dcache(uint64_t base, uint64_t size, uint32_t line)
+static void hw_dc_civac(void *ctx, uint64_t addr)
 {
-    uint64_t addr = base & ~(uint64_t)(line - 1u);
-    uint64_t end = (base + size + line - 1u) & ~(uint64_t)(line - 1u);
+    (void)ctx;
+    __asm__ __volatile__("dc civac, %0" :: "r"(addr) : "memory");
+}
 
-    for (; addr < end; addr += line)
-        __asm__ __volatile__("dc civac, %0" :: "r"(addr) : "memory");
+static void hw_dsb_sy(void *ctx)
+{
+    (void)ctx;
+    __asm__ __volatile__("dsb sy" ::: "memory");
+}
+
+static void hw_ic_iallu(void *ctx)
+{
+    (void)ctx;
+    __asm__ __volatile__("ic iallu" ::: "memory");
+}
+
+static void hw_isb(void *ctx)
+{
+    (void)ctx;
+    __asm__ __volatile__("isb" ::: "memory");
 }
 
 static void flush_handoff_caches(void)
 {
-    uint32_t line = cache_line_bytes();
+    const struct aarch64_handoff_cache_regions regions = {
+        .boot_block_base = (uint64_t)AARCH64_BOOT_BLOCK_BASE,
+        .boot_block_size = (uint64_t)(AARCH64_BOOT_BLOCK_END -
+                                      AARCH64_BOOT_BLOCK_BASE),
+        .trampoline_base = (uint64_t)AARCH64_TRAMPOLINE_BASE,
+        .page_size = (uint64_t)AARCH64_PAGE_SIZE,
+        .ctx_phys = (uint64_t)aarch64_ctx_phys,
+        .fdt_phys = (uint64_t)aarch64_fdt_phys,
+        .fdt_pages = (uint64_t)aarch64_fdt_pages,
+        .mmap_phys = (uint64_t)aarch64_mmap_phys,
+        .mmap_pages = (uint64_t)aarch64_mmap_pages,
+    };
+    const struct aarch64_cache_ops hw_ops = {
+        .read_ctr = hw_read_ctr,
+        .dc_civac = hw_dc_civac,
+        .dsb_sy = hw_dsb_sy,
+        .ic_iallu = hw_ic_iallu,
+        .isb = hw_isb,
+    };
 
-    clean_invalidate_dcache((uint64_t)AARCH64_BOOT_BLOCK_BASE,
-                            (uint64_t)(AARCH64_BOOT_BLOCK_END -
-                                       AARCH64_BOOT_BLOCK_BASE), line);
-    clean_invalidate_dcache((uint64_t)AARCH64_TRAMPOLINE_BASE,
-                            (uint64_t)AARCH64_PAGE_SIZE, line);
-    if (aarch64_ctx_phys != 0u)
-        clean_invalidate_dcache((uint64_t)aarch64_ctx_phys,
-                                (uint64_t)AARCH64_PAGE_SIZE, line);
-    if (aarch64_fdt_phys != 0u && aarch64_fdt_pages != 0u)
-        clean_invalidate_dcache((uint64_t)aarch64_fdt_phys,
-                                (uint64_t)aarch64_fdt_pages *
-                                    (uint64_t)AARCH64_PAGE_SIZE, line);
-    if (aarch64_mmap_phys != 0u && aarch64_mmap_pages != 0u)
-        clean_invalidate_dcache((uint64_t)aarch64_mmap_phys,
-                                (uint64_t)aarch64_mmap_pages *
-                                    (uint64_t)AARCH64_PAGE_SIZE, line);
-    __asm__ __volatile__("dsb sy" ::: "memory");
-    __asm__ __volatile__("ic iallu" ::: "memory");
-    __asm__ __volatile__("dsb sy\n\tisb" ::: "memory");
+    aarch64_flush_handoff_caches(&regions, &hw_ops, NULL);
 }
 
 __attribute__((noreturn)) void arch_enter_kernel(uint64_t entry,
