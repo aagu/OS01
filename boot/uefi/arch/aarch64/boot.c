@@ -104,13 +104,10 @@ static void uefi_puts(const char *s)
         while (off < total) {
             uintn_t chunk = total - off;
             if (EFI_ERROR(ser->Write(ser, &chunk, (void *)(s + off))) ||
-                chunk == 0) {
-                conout_puts(s + off);
-                return;
-            }
+                chunk == 0)
+                break;
             off += chunk;
         }
-        return;
     }
     conout_puts(s);
 }

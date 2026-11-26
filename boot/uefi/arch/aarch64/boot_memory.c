@@ -69,11 +69,13 @@ bool aarch64_fw_dtb_readable(const void *map, uint32_t entry_size,
                 return false;
             if (desc.num_pages == 0u)
                 continue;
-            if (desc.type != AARCH64_UEFI_MEM_RESERVED &&
-                desc.type != AARCH64_UEFI_MEM_CONVENTIONAL)
+            if (desc.type == AARCH64_UEFI_MEM_MMIO ||
+                desc.type == AARCH64_UEFI_MEM_MMIO_PORT_SPACE ||
+                desc.type == AARCH64_UEFI_MEM_UNUSABLE ||
+                desc.type == AARCH64_UEFI_MEM_PAL_CODE ||
+                desc.type > AARCH64_UEFI_MEM_PAL_CODE)
                 continue;
-            if ((desc.attribute & AARCH64_UEFI_ATTR_WB) == 0u ||
-                (desc.attribute & AARCH64_UEFI_ATTR_RP) != 0u)
+            if ((desc.attribute & AARCH64_UEFI_ATTR_RP) != 0u)
                 continue;
             if (desc.phys_start <= covered && desc_end > next_covered)
                 next_covered = desc_end;
