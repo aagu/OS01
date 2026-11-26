@@ -10,7 +10,6 @@
 #include <errno.h>
 #include <log/log.h>
 #include <kernel.h>
-#include <arch/x86_64/uaccess.h>
 #include <fs/vfs.h>
 
 // ── exec argv/envp bounded deep-copy (Task 5, Cat A') ───────

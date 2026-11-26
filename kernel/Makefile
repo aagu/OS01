@@ -200,6 +200,7 @@ KERNEL_C_SOURCES += fs/boot.c fs/vfs.c fs/devfs.c fs/dcache.c \
                    sync/completion.c sync/seqlock.c \
                    sched/boot_stdio.c \
                    syscall/sys_fs.c syscall/sys_time.c \
+                   syscall/sys_proc.c syscall/sys_resource.c \
                    arch/thermal.c
 # Userspace gate (2026-11-19): kernel_start_userspace (boot-5
 # orchestration) links into the aarch64 product kernel now that the

@@ -21,12 +21,21 @@
 #include <memory/shared_backing.h>
 #include <arch/aarch64/psci.h>
 #include <uapi/time.h>                 /* struct utsname (kernel UAPI) */
+#include <driver/serial.h>
 #include <log/log.h>
 
 int64_t sys_misc_dispatch(syscall_ctx_t *ctx)
 {
     int64_t syscall_result = -EINVAL;
     switch (ctx->nr) {
+    case SYS_putchar: {
+        char c = (char)ctx->args[0];
+        uint64_t sf = spin_lock_irqsave(&serial_lock);
+        write_serial_unlocked(c);
+        spin_unlock_irqrestore(&serial_lock, sf);
+        syscall_result = (unsigned char)c;
+        break;
+    }
     case SYS_getrandom: {
         // getrandom(void *buf, size_t len, unsigned int flags)
         uint64_t addr  = ctx->args[0];

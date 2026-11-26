@@ -178,11 +178,15 @@ int main(void)
         return 1;
     }
 
-    /* The time syscall group is served on aarch64 product userspace
-     * (kernel/syscall/sys_time.c, OS01_HAS_USERSPACE=1). */
+    /* The time, resource, proc, and putchar syscall groups are served on
+     * aarch64 product userspace (OS01_HAS_USERSPACE=1). */
     if (!syscall_has_handler(SYS_time) || !syscall_has_handler(SYS_gettimeofday) ||
-        !syscall_has_handler(SYS_nanosleep) || !syscall_has_handler(SYS_times)) {
-        fprintf(stderr, "AArch64 userspace time group must be served\n");
+        !syscall_has_handler(SYS_nanosleep) || !syscall_has_handler(SYS_times) ||
+        !syscall_has_handler(SYS_getrlimit) || !syscall_has_handler(SYS_setrlimit) ||
+        !syscall_has_handler(SYS_umask) || !syscall_has_handler(SYS_setpgid) ||
+        !syscall_has_handler(SYS_getpgid) || !syscall_has_handler(SYS_setsid) ||
+        !syscall_has_handler(SYS_getsid) || !syscall_has_handler(SYS_putchar)) {
+        fprintf(stderr, "AArch64 userspace time/proc/resource/putchar group must be served\n");
         return 1;
     }
 

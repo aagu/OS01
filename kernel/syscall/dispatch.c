@@ -63,6 +63,7 @@ static const syscall_entry_t syscall_table[SYS_arch_prctl + 1] = {
  * keep the frozen 15-entry subset contract; the handler lives in
  * kernel/arch/aarch64/syscall/sys_misc.c. */
 #if defined(OS01_SYSCALL_A64_SUBSET) && OS01_HAS_USERSPACE
+    [SYS_putchar] = { sys_misc_dispatch, "putchar" },
     [SYS_getrandom] = { sys_misc_dispatch, "getrandom" },
     [SYS_sync] = { sys_misc_dispatch, "sync" },
     [SYS_reboot] = { sys_misc_dispatch, "reboot" },
@@ -74,6 +75,13 @@ static const syscall_entry_t syscall_table[SYS_arch_prctl + 1] = {
     [SYS_gettimeofday] = { sys_time_dispatch, "gettimeofday" },
     [SYS_nanosleep] = { sys_time_dispatch, "nanosleep" },
     [SYS_times] = { sys_time_dispatch, "times" },
+    [SYS_getrlimit] = { sys_resource_dispatch, "getrlimit" },
+    [SYS_setrlimit] = { sys_resource_dispatch, "setrlimit" },
+    [SYS_umask] = { sys_proc_dispatch, "umask" },
+    [SYS_setpgid] = { sys_proc_dispatch, "setpgid" },
+    [SYS_getpgid] = { sys_proc_dispatch, "getpgid" },
+    [SYS_setsid] = { sys_proc_dispatch, "setsid" },
+    [SYS_getsid] = { sys_proc_dispatch, "getsid" },
 #endif
 
 /* The fs syscall group is served by the arch-neutral kernel/syscall/sys_fs.c.
@@ -117,8 +125,6 @@ static const syscall_entry_t syscall_table[SYS_arch_prctl + 1] = {
 #endif /* !OS01_SYSCALL_A64_SUBSET || OS01_HAS_VFS */
 #ifndef OS01_SYSCALL_A64_SUBSET
     [SYS_msync] = { sys_mm_dispatch, "msync" },
-    [SYS_getrlimit] = { sys_resource_dispatch, "getrlimit" },
-    [SYS_setrlimit] = { sys_resource_dispatch, "setrlimit" },
     [SYS_futex] = { sys_mm_dispatch, "futex" },
     [SYS_putchar] = { sys_misc_dispatch, "putchar" },
     [SYS_getrandom] = { sys_misc_dispatch, "getrandom" },
@@ -139,11 +145,6 @@ static const syscall_entry_t syscall_table[SYS_arch_prctl + 1] = {
     [SYS_getifaddr] = { sys_net_dispatch, "getifaddr" },
     [SYS_getsockopt] = { sys_net_dispatch, "getsockopt" },
     [SYS_shutdown] = { sys_net_dispatch, "shutdown" },
-    [SYS_umask] = { sys_proc_dispatch, "umask" },
-    [SYS_setpgid] = { sys_proc_dispatch, "setpgid" },
-    [SYS_getpgid] = { sys_proc_dispatch, "getpgid" },
-    [SYS_setsid] = { sys_proc_dispatch, "setsid" },
-    [SYS_getsid] = { sys_proc_dispatch, "getsid" },
 #endif
 };
 bool syscall_has_handler(uint64_t nr)
