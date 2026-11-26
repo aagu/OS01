@@ -55,7 +55,8 @@ bool aarch64_boot_console_firmware_configured(void);
 #define AARCH64_EARLY_MMIO_MAX_BLOCKS  1024u
 #define AARCH64_EARLY_MMIO_PL011_SPAN  UINT64_C(0x48)
 
-static inline bool aarch64_early_mmio_range_valid(uint64_t base, uint64_t end)
+static inline __attribute__((always_inline)) bool
+aarch64_early_mmio_range_valid(uint64_t base, uint64_t end)
 {
     if (base >= end || end > (uint64_t)AARCH64_BOOT_HIGH_END)
         return false;
@@ -71,7 +72,8 @@ static inline bool aarch64_early_mmio_range_valid(uint64_t base, uint64_t end)
     return true;
 }
 
-static inline bool aarch64_early_mmio_valid(const struct boot_context *ctx)
+static inline __attribute__((always_inline)) bool
+aarch64_early_mmio_valid(const struct boot_context *ctx)
 {
     uint64_t win_base;
     uint64_t win_size;
