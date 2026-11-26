@@ -34,6 +34,18 @@ _Static_assert(AARCH64_USER_STACK_RND_END +
                AARCH64_USER_MMAP_FLOOR,
                "aarch64 ASLR stack window must stay below USER_VM_MMAP_BASE");
 
+_Static_assert(AARCH64_USER_PIE_LINK_END > 0 &&
+               (AARCH64_USER_PIE_LINK_END & 0xFFFULL) == 0,
+               "aarch64 PIE link end must be nonzero and 4 KiB aligned");
+_Static_assert(AARCH64_USER_PIE_BIAS_BASE >= AARCH64_USER_MIN &&
+               (AARCH64_USER_PIE_BIAS_BASE & 0xFFFULL) == 0,
+               "aarch64 PIE bias base must be >= AARCH64_USER_MIN and 4 KiB aligned");
+_Static_assert(AARCH64_USER_PIE_BIAS_BITS == 16U &&
+               AARCH64_USER_PIE_BIAS_END > AARCH64_USER_PIE_BIAS_BASE,
+               "aarch64 PIE bias window invalid");
+_Static_assert(AARCH64_USER_PIE_MAX_END <= AARCH64_USER_STACK_GUARD,
+               "aarch64 PIE max runtime end must not exceed heap limit");
+
 static void aarch64_aslr_wipe_bytes(uint8_t *buf, size_t len)
 {
     volatile uint8_t *p = buf;
@@ -96,5 +108,19 @@ int aarch64_aslr_init_stack_base(mm_t *mm)
         return rc;
 
     mm->start_stack = aarch64_aslr_derive_stack_base(raw);
+    return 0;
+}
+
+int aarch64_aslr_get_pie_bias(uint64_t *out_bias)
+{
+    if (!out_bias)
+        return -EINVAL;
+
+    uint64_t raw = 0;
+    int rc = aarch64_aslr_sample_strong_u64(&raw);
+    if (rc != 0)
+        return rc;
+
+    *out_bias = AARCH64_USER_PIE_BIAS_BASE + ((raw & 0xFFFFULL) << 12U);
     return 0;
 }

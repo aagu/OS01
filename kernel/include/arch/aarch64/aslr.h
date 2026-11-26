@@ -28,6 +28,14 @@
 #define AARCH64_USER_MMAP_RND_SPAN  (UINT64_C(1) << (AARCH64_USER_MMAP_RND_BITS + 12U))
 #define AARCH64_USER_MMAP_RND_END   (AARCH64_USER_MMAP_RND_BASE + AARCH64_USER_MMAP_RND_SPAN)
 
+/* Static PIE load window (16-bit 4 KiB-aligned bias below heap limit) */
+#define AARCH64_USER_PIE_LINK_END   UINT64_C(0x02000000)
+#define AARCH64_USER_PIE_BIAS_BASE  UINT64_C(0x00400000)
+#define AARCH64_USER_PIE_BIAS_BITS  16U
+#define AARCH64_USER_PIE_BIAS_SPAN  (UINT64_C(1) << (AARCH64_USER_PIE_BIAS_BITS + 12U))
+#define AARCH64_USER_PIE_BIAS_END   (AARCH64_USER_PIE_BIAS_BASE + AARCH64_USER_PIE_BIAS_SPAN)
+#define AARCH64_USER_PIE_MAX_END    (AARCH64_USER_PIE_BIAS_END - UINT64_C(0x1000) + AARCH64_USER_PIE_LINK_END)
+
 /**
  * Derive a 4 KiB-aligned user mmap_base within
  * [AARCH64_USER_MMAP_RND_BASE, AARCH64_USER_MMAP_RND_END) from raw entropy.
@@ -53,5 +61,14 @@ uint64_t aarch64_aslr_derive_stack_base(uint64_t raw_entropy);
  * is unavailable, or -EINVAL if mm is NULL.
  */
 int aarch64_aslr_init_stack_base(mm_t *mm);
+
+/**
+ * Sample a 4 KiB-aligned static-PIE load bias in
+ * [AARCH64_USER_PIE_BIAS_BASE, AARCH64_USER_PIE_BIAS_END) using
+ * kernel_random_get_strong(). Fails closed with -EAGAIN (leaving
+ * *out_bias untouched) when STRONG entropy is unavailable, or -EINVAL
+ * if out_bias is NULL.
+ */
+int aarch64_aslr_get_pie_bias(uint64_t *out_bias);
 
 #endif /* _ARCH_AARCH64_ASLR_H */

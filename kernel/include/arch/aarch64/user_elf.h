@@ -36,9 +36,13 @@ struct aarch64_elf_view {
     elf64_phdr_t *phdrs;
     unsigned phnum;
     /* ALIGN_UP(max(p_vaddr + p_memsz), 4096) from the shared layout
-     * validator; the production image constructor seeds the heap VMA
-     * from this.  Reset to 0 on parse failure and on release. */
+     * validator (ET_EXEC) or PIE link validator (ET_DYN); the
+     * production image constructor seeds the heap VMA from this
+     * (+ bias for ET_DYN). Reset to 0 on parse failure and on release. */
     uint64_t heap_base;
+    bool is_pie;
+    uint64_t rela_off;
+    uint32_t rela_count;
 };
 
 /* Parse and validate a memory-resident ET_EXEC image.

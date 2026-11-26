@@ -126,10 +126,10 @@ $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE) $(USER_ASLR_B_EXEC_FIXTURE) $(USER_PTLS_
 BUSYBOX_ARCH_DIR := $(if $(filter aarch64-none-elf,$(RUNTIME_TARGET_user)),aarch64,x86_64)
 BUSYBOX_A64      := $(filter aarch64-none-elf,$(RUNTIME_TARGET_user))
 BUSYBOX_LINK     := $(TARGET_CCLD) -fuse-ld=lld
-BUSYBOX_LINKSCRIPT := $(if $(BUSYBOX_A64),$(OS01_ROOT)/libc/arch/aarch64/user.ld,$(OS01_ROOT)/libc/arch/x86_64/user-pie.ld)
-BUSYBOX_SED_A64  := $(if $(BUSYBOX_A64),-e "s|-fstack-protector-strong|-fstack-protector-strong -DBB_ARCH_FIXED_PAGESIZE=4096|" -e "s|-static -nostartfiles|-static -nostdlib -nostartfiles|")
+BUSYBOX_LINKSCRIPT := $(OS01_ROOT)/libc/arch/$(BUSYBOX_ARCH_DIR)/user-pie.ld
+BUSYBOX_SED_A64  := $(if $(BUSYBOX_A64),-e "s|-fstack-protector-strong|-fstack-protector-strong -fPIE -DBB_ARCH_FIXED_PAGESIZE=4096|" -e "s|CONFIG_EXTRA_LDFLAGS=.*|CONFIG_EXTRA_LDFLAGS=\"\"|" -e "s|CONFIG_EXTRA_LDLIBS=.*|CONFIG_EXTRA_LDLIBS=\"c\"|")
 BUSYBOX_SED_X86  := $(if $(BUSYBOX_A64),,-e "s|-fstack-protector-strong|-fstack-protector-strong -fPIE -mcmodel=small|" -e "s|CONFIG_EXTRA_LDFLAGS=.*|CONFIG_EXTRA_LDFLAGS=\"\"|" -e "s|CONFIG_EXTRA_LDLIBS=.*|CONFIG_EXTRA_LDLIBS=\"c\"|")
-BUSYBOX_MAKE_EXTRA := $(if $(BUSYBOX_A64),,CFLAGS_busybox="-static-pie -nostdlib -L$$genabs/usr/lib $$genabs/usr/lib/crt0.o -Wl,--no-dynamic-linker -Wl,-z,max-page-size=4096 -Wl,-z,text -Wl,-z,norelro -Wl,--pack-dyn-relocs=none -Wl,-T,$(BUSYBOX_LINKSCRIPT)")
+BUSYBOX_MAKE_EXTRA := CFLAGS_busybox="-static-pie -nostdlib -L$$genabs/usr/lib $$genabs/usr/lib/crt0.o -Wl,--no-dynamic-linker -Wl,-z,max-page-size=4096 -Wl,-z,text -Wl,-z,norelro -Wl,--pack-dyn-relocs=none -Wl,--gc-sections -Wl,-T,$(BUSYBOX_LINKSCRIPT)"
 ifneq ($(strip $(RUNTIME_TARGET_user)),)
 
 BUSYBOX_MANIFEST  := $(OS01_ROOT)/thirdpart/busybox.manifest

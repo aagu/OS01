@@ -72,9 +72,11 @@ endif
 # libc.a member pulled by sigaction()/signal() (or explicit sa_restorer users).
 CRT0_OBJ := $(TARGET_LIBDIR_LOCAL)/crt0.o
 ifeq ($(USER_ARCH),aarch64)
-LINKER_SCRIPT  := $(OS01_ROOT)/libc/arch/aarch64/user.ld
-override CFLAGS += -fno-pic -fno-pie
-USER_RAW_LDFLAGS := -static -T $(LINKER_SCRIPT) -L$(TARGET_LIBDIR_LOCAL)
+LINKER_SCRIPT  := $(OS01_ROOT)/libc/arch/aarch64/user-pie.ld
+override CFLAGS += -fPIE
+USER_RAW_LDFLAGS := -m aarch64elf -static -pie --no-dynamic-linker \
+                    -z max-page-size=4096 -z text -z norelro --pack-dyn-relocs=none \
+                    -T $(LINKER_SCRIPT) -L$(TARGET_LIBDIR_LOCAL)
 else
 LINKER_SCRIPT  := $(OS01_ROOT)/libc/arch/x86_64/user-pie.ld
 override CFLAGS += -fPIE -mcmodel=small -mno-red-zone

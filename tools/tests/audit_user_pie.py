@@ -44,6 +44,7 @@ DT_GNU_HASH = 0x6FFFFEF5
 DF_1_PIE = 0x08000000
 
 R_X86_64_RELATIVE = 8
+R_AARCH64_RELATIVE = 1027
 
 ALLOWED_DT_TAGS = {
     DT_FLAGS_1, DT_RELA, DT_RELASZ, DT_RELAENT, DT_RELACOUNT,
@@ -229,10 +230,11 @@ def audit_elf_bytes(data: bytes, expect_pie: bool = True, machine: int = EM_X86_
             if rela_off is None:
                 errs.append("DT_RELA not covered by file-backed PT_LOAD")
                 return errs
+            expected_rel = R_AARCH64_RELATIVE if machine == EM_AARCH64 else R_X86_64_RELATIVE
             for r_idx in range(n_rela):
                 r_off, r_info, r_add = struct.unpack_from(RELA_FMT, data, rela_off + r_idx * 24)
-                if (r_info >> 32) != 0 or (r_info & 0xFFFFFFFF) != R_X86_64_RELATIVE:
-                    errs.append(f"RELA[{r_idx}] not sym0 R_X86_64_RELATIVE")
+                if (r_info >> 32) != 0 or (r_info & 0xFFFFFFFF) != expected_rel:
+                    errs.append(f"RELA[{r_idx}] not sym0 R_*_RELATIVE ({expected_rel})")
                 if (r_off & 7) != 0:
                     errs.append(f"RELA[{r_idx}] unaligned r_offset")
                 if r_add < 0 or r_add > max_page_end:

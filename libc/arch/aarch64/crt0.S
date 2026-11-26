@@ -12,8 +12,10 @@ _start:
     mov x29, #0
 
     // Zero-initialize BSS (4-byte stores; both symbols are 16-aligned)
-    ldr x0, =__bss_start
-    ldr x1, =__bss_end
+    adrp x0, __bss_start
+    add x0, x0, :lo12:__bss_start
+    adrp x1, __bss_end
+    add x1, x1, :lo12:__bss_end
     cmp x0, x1
     b.eq 1f
     mov w2, #0
@@ -26,7 +28,8 @@ _start:
     mov x6, sp                // stack_end = entry sp (saved before any push)
     ldr x1, [sp]              // argc  ← from the stack (not kernel registers)
     add x2, sp, #8            // argv
-    ldr x0, =main
+    adrp x0, main
+    add x0, x0, :lo12:main
     mov x3, #0                // init
     mov x4, #0                // fini
     mov x5, #0                // rtld_fini

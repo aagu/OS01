@@ -779,7 +779,7 @@ test-pmm-boot-reservation:
 test-user-pie: $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE) $(USER_ARTIFACT_DIR)/busybox.elf
 	python3 tools/tests/audit_user_pie.py --selftest
 ifeq ($(filter aarch64-none-elf,$(RUNTIME_TARGET_user)),aarch64-none-elf)
-	python3 tools/tests/audit_user_pie.py --expect-exec --machine aarch64 $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE) $(USER_ARTIFACT_DIR)/busybox.elf
+	python3 tools/tests/audit_user_pie.py --machine aarch64 $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE) $(USER_ARTIFACT_DIR)/busybox.elf
 else
 	python3 tools/tests/audit_user_pie.py --machine x86_64 $(USER_ARTIFACTS) $(USER_RUNTIME_PROBE) $(USER_ARTIFACT_DIR)/busybox.elf
 endif

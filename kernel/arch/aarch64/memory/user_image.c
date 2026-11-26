@@ -131,13 +131,21 @@ int aarch64_user_image_load(const void *bytes, size_t size,
     rc = aarch64_aslr_init_stack_base(image->mm);
     if (rc)
         goto fail;
+
+    uint64_t bias = 0;
+    if (view.is_pie) {
+        rc = aarch64_aslr_get_pie_bias(&bias);
+        if (rc)
+            goto fail;
+    }
+
     image->root_pa = (uint64_t)(uintptr_t)image->mm->pgdir;
-    image->entry = view.ehdr.e_entry;
+    image->entry = bias + view.ehdr.e_entry;
 
     /* Install the empty heap VMA before the first ELF leaf exists:
      * the brk window is part of the image contract, and a failure
      * here must take the same full-image rollback as a bad segment. */
-    rc = user_vm_init_heap(image->mm, view.heap_base);
+    rc = user_vm_init_heap(image->mm, bias + view.heap_base);
     if (rc)
         goto fail;
 
@@ -153,6 +161,7 @@ int aarch64_user_image_load(const void *bytes, size_t size,
         if (ph->p_type != PT_LOAD)
             continue;
         bool executable = (ph->p_flags & PF_X) != 0;
+        bool writable = (ph->p_flags & PF_W) != 0;
         uint32_t perm = user_image_perm(ph->p_flags);
 
         for (uint64_t off = 0; off < ph->p_memsz; off += PAGE_4K_SIZE) {
@@ -169,10 +178,29 @@ int aarch64_user_image_load(const void *bytes, size_t size,
                     len = PAGE_4K_SIZE;
                 __builtin_memcpy(page, src + ph->p_offset + off, len);
             }
+            if (view.is_pie && writable && view.rela_count > 0) {
+                uint64_t page_link_va = ph->p_vaddr + off;
+                uint64_t page_link_end = page_link_va + PAGE_4K_SIZE;
+                for (uint32_t ri = 0; ri < view.rela_count; ri++) {
+                    elf64_rela_t rela;
+                    __builtin_memcpy(&rela,
+                                     src + view.rela_off + (size_t)ri * sizeof(elf64_rela_t),
+                                     sizeof(rela));
+                    if (ELF64_R_TYPE(rela.r_info) != R_AARCH64_RELATIVE)
+                        continue;
+                    if (rela.r_offset >= page_link_va &&
+                        rela.r_offset < page_link_end) {
+                        uint64_t val = bias + (uint64_t)rela.r_addend;
+                        __builtin_memcpy(page + (rela.r_offset - page_link_va),
+                                         &val, sizeof(val));
+                    }
+                }
+            }
             if (executable)
                 aarch64_elf_clean_code_page(page);
 
-            int map_rc = user_vm_map_image_page(image->mm, ph->p_vaddr + off,
+            int map_rc = user_vm_map_image_page(image->mm,
+                                                bias + ph->p_vaddr + off,
                                                 pa, perm);
             if (map_rc) {
                 /* The mm rejected ownership: the PA is still ours. */

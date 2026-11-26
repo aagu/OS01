@@ -421,7 +421,7 @@ RUNTIME_TARGET_user := $(TARGET_TRIPLE)
 # FP/SIMD is enabled for EL0 (CPACR_EL1.FPEN = 0b11, saved/restored per
 # user task in arch_task_switch).
 RUNTIME_CFLAGS_user := -ffreestanding -fno-builtin -fno-stack-protector \
-                       -fno-asynchronous-unwind-tables -fno-pic -fno-pie
+                       -fno-asynchronous-unwind-tables -fPIE
 RUNTIME_OBJECT_FORMAT_user := ELF64
 RUNTIME_MACHINE_user := EM_AARCH64
 RUNTIME_ABI_user := aarch64-aapcs

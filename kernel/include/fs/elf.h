@@ -110,7 +110,9 @@ typedef struct {
 #define DF_1_NOW     0x00000001U
 #define DF_BIND_NOW  0x08U
 
-#define R_X86_64_RELATIVE 8U
+#define R_X86_64_RELATIVE  8U
+#define R_AARCH64_NONE     0U
+#define R_AARCH64_RELATIVE 1027U
 #define ELF64_R_SYM(info)  ((uint32_t)((info) >> 32))
 #define ELF64_R_TYPE(info) ((uint32_t)((info) & 0xffffffffU))
 

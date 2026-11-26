@@ -68,6 +68,7 @@ static void test_aarch64_aslr_null_rejected(void)
 {
     assert_eq(-EINVAL, aarch64_aslr_init_mmap_base(NULL));
     assert_eq(-EINVAL, aarch64_aslr_init_stack_base(NULL));
+    assert_eq(-EINVAL, aarch64_aslr_get_pie_bias(NULL));
 }
 
 static void test_aarch64_aslr_fail_closed_without_strong(void)
@@ -76,6 +77,7 @@ static void test_aarch64_aslr_fail_closed_without_strong(void)
     memset(&mm, 0, sizeof(mm));
     mm.mmap_base = 0x40000000ULL;
     mm.start_stack = AARCH64_USER_STACK_BASE;
+    uint64_t pie_bias = 0x12345000ULL;
 
     g_strong_available = false;
     assert_eq(-EAGAIN, aarch64_aslr_init_mmap_base(&mm));
@@ -83,6 +85,9 @@ static void test_aarch64_aslr_fail_closed_without_strong(void)
 
     assert_eq(-EAGAIN, aarch64_aslr_init_stack_base(&mm));
     assert_eq(AARCH64_USER_STACK_BASE, mm.start_stack);
+
+    assert_eq(-EAGAIN, aarch64_aslr_get_pie_bias(&pie_bias));
+    assert_eq(0x12345000ULL, pie_bias);
 }
 
 static void test_aarch64_aslr_strong_randomizes_both(void)
@@ -90,17 +95,21 @@ static void test_aarch64_aslr_strong_randomizes_both(void)
     g_strong_available = true;
     uint64_t mmaps[8];
     uint64_t stacks[8];
+    uint64_t biases[8];
     int unique_mmap = 0;
     int unique_stack = 0;
+    int unique_bias = 0;
 
     for (int i = 0; i < 8; i++) {
         mm_t mm;
         memset(&mm, 0, sizeof(mm));
         mm.mmap_base = 0x40000000ULL;
         mm.start_stack = AARCH64_USER_STACK_BASE;
+        uint64_t bias = 0;
 
         assert_eq(0, aarch64_aslr_init_mmap_base(&mm));
         assert_eq(0, aarch64_aslr_init_stack_base(&mm));
+        assert_eq(0, aarch64_aslr_get_pie_bias(&bias));
 
         assert_eq(0ULL, mm.mmap_base & 0xFFFULL);
         assert_true(mm.mmap_base >= AARCH64_USER_MMAP_RND_BASE);
@@ -110,25 +119,36 @@ static void test_aarch64_aslr_strong_randomizes_both(void)
         assert_true(mm.start_stack >= AARCH64_USER_STACK_RND_BASE);
         assert_true(mm.start_stack < AARCH64_USER_STACK_RND_END);
 
+        assert_eq(0ULL, bias & 0xFFFULL);
+        assert_true(bias >= AARCH64_USER_PIE_BIAS_BASE);
+        assert_true(bias < AARCH64_USER_PIE_BIAS_END);
+
         mmaps[i] = mm.mmap_base;
         stacks[i] = mm.start_stack;
+        biases[i] = bias;
 
         bool seen_m = false;
         bool seen_s = false;
+        bool seen_b = false;
         for (int j = 0; j < i; j++) {
             if (mmaps[j] == mmaps[i])
                 seen_m = true;
             if (stacks[j] == stacks[i])
                 seen_s = true;
+            if (biases[j] == biases[i])
+                seen_b = true;
         }
         if (!seen_m)
             unique_mmap++;
         if (!seen_s)
             unique_stack++;
+        if (!seen_b)
+            unique_bias++;
     }
 
     assert_true(unique_mmap >= 7);
     assert_true(unique_stack >= 7);
+    assert_true(unique_bias >= 7);
 }
 
 TEST_LIST_BEGIN
