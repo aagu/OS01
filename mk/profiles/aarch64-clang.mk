@@ -81,6 +81,7 @@ TARGET_INCLUDEDIR := $(SYSROOT)/usr/include
 TARGET_LIBDIR := $(SYSROOT)/usr/lib
 LIBC_BUILD_DIR := $(BUILD_DIR)/libc
 LIBGFX_BUILD_DIR := $(BUILD_DIR)/libgfx
+LIBGUI_BUILD_DIR := $(BUILD_DIR)/libgui
 
 # Compile-affecting variant — mirror x86_64 profile's KERNEL_VARIANT block
 # so weak-selftest build produces an isolated kernel/weak-selftest/ dir.
@@ -359,7 +360,7 @@ USER_ARTIFACT_DIR := $(BUILD_DIR)/artifacts/user$(if $(USER_VARIANT),/$(USER_VAR
 # Directory apps that link the gfx/gui/lvgl/mbedTLS sysroot libraries are
 # x86-only until those libraries exist on this arch (user/apps.mk filters
 # these out of USER_PROGRAMS).
-USER_EXCLUDED_PROGRAMS := desktop doom doom_testctl test_gui_fault test_gui_input test_lvgl tetris usb_hid_probe test_display_owner test_gfx netmodeltest test_monitor test_monitor_test
+USER_EXCLUDED_PROGRAMS := usb_hid_probe netmodeltest
 UEFI_BUILD_DIR := $(BUILD_DIR)/uefi
 UEFI_RUNTIME_DIR := $(BUILD_DIR)/uefi-runtime
 UEFI_EFI   ?= $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI
@@ -377,7 +378,7 @@ STAGING_DIR := $(BUILD_DIR)/staging
 # libgfx/libgui/mbedTLS on this arch yet. SYSROOT_ARCH selects the libc
 # cross-arch for the staging sub-make.
 SYSROOT_ARCH   := aarch64
-SYSROOT_STAGES := kernel-headers libc libgfx compat-libs
+SYSROOT_STAGES := kernel-headers libc libgfx gui compat-libs
 
 # ── aarch64 compiler / QEMU settings (retained from the legacy Makefile) ──
 # This profile does NOT include mk/toolchains/clang.mk — that is the x86

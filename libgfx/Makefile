@@ -46,7 +46,7 @@ LIBGFX_DIR := $(abspath $(dir $(LOCAL_MAKEFILE)))
 # component stamps complete; using it during component install
 # would create a forward dependency that the publish protocol
 # (single-writer sysroot) is designed to forbid.
-LIBGFX_ARCH_CFLAGS := $(if $(filter aarch64-none-elf,$(RUNTIME_TARGET_user)),-fno-pic -fno-pie $(filter -mgeneral-regs-only,$(RUNTIME_CFLAGS_user)),-fPIE -mcmodel=small -mno-red-zone)
+LIBGFX_ARCH_CFLAGS := $(if $(filter aarch64-none-elf,$(RUNTIME_TARGET_user)),-fPIE $(filter -mgeneral-regs-only,$(RUNTIME_CFLAGS_user)),-fPIE -mcmodel=small -mno-red-zone)
 CFLAGS := --sysroot=$(STAGING_DIR)/kernel-headers \
           -ffreestanding -fno-builtin -Wall -Wextra -O2 \
           $(LIBGFX_ARCH_CFLAGS) \

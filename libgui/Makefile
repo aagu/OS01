@@ -36,7 +36,7 @@ check-version:
 	  echo "ERROR: $(LVGL_SOURCE) revision $$head does not match manifest $(LVGL_REVISION)"; exit 1; \
 	fi
 
-LIBGUI_ARCH_CFLAGS := $(if $(filter aarch64-none-elf,$(RUNTIME_TARGET_user)),-fno-pic -fno-pie,-fPIE -mcmodel=small -mno-red-zone)
+LIBGUI_ARCH_CFLAGS := $(if $(filter aarch64-none-elf,$(RUNTIME_TARGET_user)),-fPIE,-fPIE -mcmodel=small -mno-red-zone)
 CFLAGS := --sysroot=$(STAGING_DIR)/kernel-headers \
           -ffreestanding -fno-builtin -Wall -Wextra -O2 \
           $(LIBGUI_ARCH_CFLAGS) -fstack-protector-strong \
