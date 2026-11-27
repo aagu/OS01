@@ -37,7 +37,7 @@ net_lwip_start                       # 注册 ONLINE 状态，DHCP 启动
 
 | 头 | 接口 | 用途 |
 |----|------|------|
-| `kernel/include/bus/pci/pci.h` | `pci_enumerate`、`pci_bind_all`、`pci_match_id`、`pci_register_driver`、`pci_set_bus_master`、`pci_route_gsi`、`pci_msix_enable` | 驱动注册与 PCI 总线访问 |
+| `kernel/include/bus/pci/pci.h` | `pci_enumerate`、`pci_bind_all`、`pci_match_id`、`pci_register_driver`、`pci_bar_window`、`pci_iomap_range`、`pci_set_bus_master`、`pci_route_gsi`、`pci_msix_enable` | 驱动注册与 PCI 总线访问 |
 | `kernel/include/bus/pci/driver.h` | `PCI_DRIVER_DECLARE(driver)`、`.pci_drivers` 段 | 驱动声明 |
 | `kernel/include/net/device.h` | `net_device_register`、`net_device_poll_all`、`net_service_ready`、`net_default_ipv4` | NIC 与 lwIP 适配器协作 |
 | `kernel/include/net/lwip.h` | `net_lwip_start` | lwIP 适配器（统一多网卡） |
@@ -308,7 +308,7 @@ rtc_write_datetime(&new_dt);
 
 ### AHCI SATA 驱动
 
-位于 `kernel/arch/x86_64/driver/ahci.c`：
+位于 `kernel/driver/ahci.c`（架构中立，x86_64 与 aarch64 共用，经 `pci_iomap_range()` 映射 BAR5）：
 
 * `ahci_init` - PCI 扫描 SATA 控制器，启用总线主控和 MMIO
 * `ahci_port_init` - 初始化端口（命令列表、FIS、命令表），发送 IDENTIFY
@@ -763,7 +763,7 @@ typedef struct hw_int_type {
 * `kernel/driver/serial.c` - 串口驱动
 * `kernel/driver/pit.c` - PIT 定时器驱动
 * `kernel/driver/rtc.c` - RTC 实时时钟驱动
-* `kernel/arch/x86_64/driver/ahci.c` - AHCI SATA 驱动
+* `kernel/driver/ahci.c` - AHCI SATA 驱动（架构中立）
 * `kernel/driver/usb_msc.c` - USB 大容量存储 SCSI 命令集与块设备接入
 * `kernel/driver/usb_msc_bot.c` - USB 大容量存储 BOT 分帧与恢复
 * `kernel/driver/usb_hid_report.c` - USB HID Boot Protocol 报告解码（架构无关）

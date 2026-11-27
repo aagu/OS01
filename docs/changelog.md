@@ -1,9 +1,28 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-26）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-27）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
+
+## 2026-11-27
+
+- feat(aarch64,pcie): **AArch64 PCIe 总线一期、DTB `interrupt-map` INTx 路由、`pci_iomap_range()`、AHCI 跨架构与 GICv2m MSI-X 落地**（提交 `439d83af`..`5e16b590`、`707d298e`、`7f8c2544`、`a95cb332`、`b44e1825`，spec [`docs/superpowers/specs/2026-11-27-aarch64-pcie-bus-design.md`](superpowers/specs/2026-11-27-aarch64-pcie-bus-design.md)）：
+  - **一期 ECAM 枚举与优雅降级**：`kernel/arch/aarch64/platform/dtb_parse_pcie.c` 解析 `pci-host-ecam-generic`、`ranges` 与 `simple-bus` 祖先平移；`kernel/arch/aarch64/bus/pci.c` 在 Stage-3 完成 UEFI RAM / Boot Block B / 1 TiB 上限校验与 2 MiB `Device-nGnRnE` 预映射；开放 `max_config_offset = 4092`、`translate_resource` 与 `bus_range`；`OS01_HAS_PCI` 翻为 `1`，发布 `/dev/pci` 并更新 `user/lspci.c`；无 ECAM 平台（如 RPi5 `brcm,bcm2712-pcie`）优雅返回 `BUS_UNAVAILABLE` 零破坏启动。
+  - **DTB `interrupt-map` INTx 路由**（`707d298e`）：`dtb_parse_pcie.c` 解析 `#interrupt-cells`、`interrupt-map`、`interrupt-map-mask` 并按 `phandle` 解析 `interrupt-controller` 的 `#address-cells`/`#interrupt-cells` 映射至 GIC INTID；`aarch64_pci_route_gsi()` 按 `bus/slot/fn` 与 `Interrupt Pin` 查表返回 GIC INTID（QEMU `virt` `virtio-rng-pci` 实测 `IRQ: 36`、Host Bridge `IRQ: none`）。
+  - **AHCI 跨架构抽离与 QEMU `virt` 跑通**（`7f8c2544`）：`ahci.c` 与 `ahci_lifecycle.c` 从 `kernel/arch/x86_64/driver/` 迁至 `kernel/driver/` 并接入 `aarch64` 构建；`ahci_write32` 在 `__aarch64__` 下补齐 `dsb st` DMA 序保证；`kernel/arch/aarch64/intr/gic.c` 补齐 `unregister_irq()`；QEMU `virt` `-device ich9-ahci` 实测识别 `8086:2922`、`IRQ: 37`、绑定 `ahci`、注册 `/dev/hdb` 并通过 DMA 读回扇区。
+  - **统一 BAR MMIO 映射接口 `pci_iomap_range()`**（`a95cb332`）：`kernel/bus/pci/core.c` 新增 `pci_iomap_range(pdev, index, offset, length, &va)` 统一参数/BAR 类型/溢出校验并经 `backend->map_mmio` 分发；AArch64 在 Stage-3 预映射有界 `MMIO32` 窗口并记录 `mapped` 标志，Stage-6 仅校验原始窗口覆盖而不触碰页表；x86_64 按需映射起止全部 2 MiB 块；`ahci.c` 移除 `pci_bar_window()` 失败后的地址回退。
+  - **GICv2m 发现与 MSI-X 平台钩子**（`b44e1825`）：`dtb_parse_pcie.c` 解析 `arm,gic-v2m-frame` 与 `msi-map`/`msi-parent`；`aarch64_pcie_prepare()` Stage-3 预映射 `v2m` 帧并读取 `MSI_TYPER`（QEMU `virt` 实测 `0x8020000 base_spi=80 num_spis=64`）；实现 `arch_pci_msix_map()`、`arch_pci_msix_unmap()` 与 `arch_pci_msi_address()`（`MSI_SETSPI_NS`）。
+  - **验收**：`test-aarch64-pcie-host`（79/79 + 21/21）、`test-arch9-host CASE=backend`（106/106）、`CASE=ahci`（12/12）、`CASE=pci` / `pci-extended`、`test-header-object-audit`、`test-driver-model-boundary`、`make PROFILE=aarch64-clang test-aarch64-pcie`（`ecam-virt` / `ahci-virt` / `no-ecam`）与 `make PROFILE=x86_64-clang test-qemu SUITE=phase-0` 全绿。
+
+- feat(aarch64): **Radxa Dragon Q8B（Qualcomm SC8280XP）早期内核打通、GICv3 驱动、ACPI 拓扑回退与 Qualcomm GENI UART**（提交 `a644de5c`..`f58adfc4`）：
+  - `AARCH64_PLATFORM=dragon-q8b`（`config/aarch64/uefi-dragon-q8b.txt`）默认 `AARCH64_BOOT_BLOCK_BASE=0xA0000000`，M0 恒等映射上限按配置扩展至 `0xC0000000`。
+  - `boot/uefi/arch/aarch64/acpi_early.c` 扫描 `RSDP`/`XSDT`/`SPCR`/`MADT`/`GTDT` 并打包 handoff，`dtb.c` 在无 DTB 时通过 ACPI 填充 8 核拓扑、UART 与 GICv3 基址。
+  - `pl011.c` 新增 Qualcomm GENI 轮询发送路径；`gic_driver.c` / `gic.c` / `ipi.c` 新增 GICv3（`GICD` + `GICR` + `ICC_*_EL1`）支持；真机打通串口、1280x720 logo、31.3 GiB RAM M0/M1、GICv3（`intids=992`）、Timer 与 CSPRNG，停在 `boot-3` 根文件系统无块设备（`-ENODEV`）。
+
+- feat(aarch64,gui,test): **aarch64 `systest` E2E 接入与 GUI/gfx sysroot 及用户态应用解禁**（提交 `a597ef85`、`98aa43aa`）：
+  - `make PROFILE=aarch64-clang test-aarch64 MODE=systest` 落地（UP 121/122 PASS，1 skipped）。
+  - `libgui` 与 `libgfx` sysroot 及桌面/图形应用在 aarch64 产品镜像下解禁构建。
 
 ## 2026-11-26
 

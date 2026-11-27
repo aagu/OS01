@@ -1,8 +1,8 @@
 # OS01 优化路线图
 
-> **基准**：`9a72f624`（master，2026-11-26）　**日期**：2026-11-27
+> **基准**：`b44e1825`（master，2026-11-27）　**日期**：2026-11-27
 
-本文件**只列未完成 / 进行中**的规划项。已完成工作见 [`changelog.md`](changelog.md)；**最近 7 天的闭环快速索引见文末「近期闭环索引」**；闭环细节见各专题文档：
+本文件**只列未完成 / 进行中**的规划项。已完成工作见 [`changelog.md`](changelog.md)；**最近 2 天的闭环快速索引见文末「近期闭环索引」**；闭环细节见各专题文档：
 [`arch.md`](arch.md) · [`memory/memory.md`](memory/memory.md) · [`memory/cow-mmap.md`](memory/cow-mmap.md) ·
 [`gui/gui.md`](gui/gui.md) · [`driver/driver.md`](driver/driver.md) · [`testing/testing-policy.md`](testing/testing-policy.md) ·
 [`libc/libc.md`](libc/libc.md) · [`signal/signal.md`](signal/signal.md) · [`decisions.md`](decisions.md)。
@@ -13,7 +13,7 @@
 |-------|------|---------|------|
 | **P0** | 工程与测试基础设施 | 0 | flake 账本入库已于 2026-11-21 闭环（见 [`changelog.md`](changelog.md)） |
 | **P1** | 安全加固 | 1 | UBSan/KASan 后续项（v1 已于 2026-11-22 闭环）；ASLR 全覆盖（x86_64 与 aarch64 的 `mmap_base`、栈基址与静态 PIE 均已于 2026-11-26 闭环） |
-| **P2** | aarch64 适配 | 7 | 内存与执行体 0 · 能力齐平 3（图形/GUI 栈 sysroot 与应用解禁已于 2026-11-27 闭环） · 架构统一 0 · 真机阻断 3（硬阻断 1 + 条件阻断 2；GICv3 驱动已于 2026-11-27 在 Dragon Q8B 真机验证通过）· 真机推进待办 1（RPi5 与 Radxa Dragon Q8B 真机均已跑到 boot-3 fs/root，剩根文件系统） |
+| **P2** | aarch64 适配 | 8 | 内存与执行体 0 · 能力齐平 4（PCIe ECAM/INTx/GICv2m/AHCI 与 GUI sysroot 已于 2026-11-27 闭环，剩网络/输入/E2E/PCIe 演进） · 架构统一 0 · 真机阻断 3（硬阻断 1 + 条件阻断 2；GICv3 已于 2026-11-27 在 Dragon Q8B 真机验证通过）· 真机推进待办 1（RPi5 与 Radxa Dragon Q8B 真机均已跑到 boot-3 fs/root，剩根文件系统） |
 | **P2** | 架构治理 / 扩展性 | 0 | 新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填该节 |
 | **P3** | GUI | 7 | GUI-4/5/6 + 优化与验证 4 |
 | **P4** | 硬件适配 | 5 | USB 2 · NVMe · HPET · ACPI S3 |
@@ -23,105 +23,28 @@
 
 ---
 
-## 🧰 P0 工程与测试基础设施
-
-当前无剩余项。本节最近闭环：**flake 账本入库**（2026-11-21，账本文件 `config/flake-ledger.json`
-入库 + CI 夜间调用报告器，见 [`changelog.md`](changelog.md) 与
-[设计 spec](superpowers/specs/2026-11-21-flake-ledger-design.md)）。
-
 ## 🔒 P1 安全加固
-
-前置链（已完成，详见 `docs/changelog.md`）：`getrandom` → 统一用户态启动方式 → 用户栈 canary + `AT_RANDOM` →
-AAGU-5 arch entropy facade（STRONG-only 控制流）→ 用户堆与 ELF 映射隔离 → **ASLR-A：x86_64 `mmap_base` 随机化** → **ASLR-B：x86_64 静态 PIE 与镜像基址随机化** → **x86_64 用户栈基址随机化** → **aarch64 全套 ASLR（`mmap_base` + 用户栈 + 静态 PIE `ET_DYN`/`R_AARCH64_RELATIVE`）**（aarch64 全套于 2026-11-26 闭环，完整用户态 ASLR 已无剩余项，详见 [`cow-mmap.md`](memory/cow-mmap.md) 与 [`changelog.md`](changelog.md)）。
 
 | 项 | 内容 | 依赖 | 借鉴 |
 |----|------|------|------|
-| UBSan + KASan 后续项 | x86_64 内核插桩 **v1 已闭环（2026-11-22）**（`KERNEL_UBSAN=1` / `KERNEL_KASAN=1` 独立 knob、两阶段影子、slab 毒化钩子、UBSan 运行时、探针端到端验证，见 [`build.md`](build/build.md) 与 [`changelog.md`](changelog.md)）。**剩余四项**：① 栈插桩（需 Linux 式早期文件排除清单）；② 全局插桩 / 全局红 zone（需 `.init_array.1` 扫描）；③ aarch64 接入（UBSan 运行时本身架构中立，但两个 knob 当前都门禁在 x86_64 profile，`mk/project.mk:472-473` 的定义与 `:523-525` 的 profile 门禁）；④ 偶发 LAPIC 影子 `0xff` 待诊断（报告已带影子帧 PA） | v1 ✅ | ArvernOS |
+| UBSan + KASan 后续项 | x86_64 内核插桩 v1 已闭环（[`build.md`](build/build.md)）。**剩余四项**：① 栈插桩（需 Linux 式早期文件排除清单）；② 全局插桩 / 全局红 zone（需 `.init_array.1` 扫描）；③ aarch64 接入（UBSan 运行时本身架构中立，但两个 knob 当前都门禁在 x86_64 profile，`mk/project.mk:472-473` 的定义与 `:523-525` 的 profile 门禁）；④ 偶发 LAPIC 影子 `0xff` 待诊断（报告已带影子帧 PA） | v1 ✅ | ArvernOS |
 
 ## 🏗 P2 aarch64 适配
 
-### 内存管理与执行体后续任务
+### 能力齐平：对标 x86_64 的剩余缺口（2026-11-21 扫描，2026-11-27 复核）
 
-当前无剩余项。`inode 级 MAP_SHARED` 的剩余五项（磁盘回写、fd I/O 一致性、truncate 撤页、共享内存 ABI、`x86_64` 用户 VM 接入）已于 2026-11-22 全部闭环，见 [`changelog.md`](changelog.md#2026-11-22) 与 [`memory/cow-mmap.md`](memory/cow-mmap.md#3-跨进程-inode-级-map_shared2026-11-22aarch64)。
-
-### 能力齐平：对标 x86_64 的剩余缺口（2026-11-21 扫描，2026-11-26 复核）
-
-范围：能力门（`kernel/include/arch/features.h`）+ 共享 syscall 表（`kernel/syscall/dispatch.c`）+ 驱动/设备注册面 + userland 应用与 E2E 套件的全量对比。差距呈「外设与生态 > syscall > 执行体细节」梯度：执行体核心（fork/exec/信号/SMP 用户调度）已收口，本节只记**此前未立任务的缺口**。头部事实：`OS01_HAS_NET` / `OS01_HAS_PCI` / `OS01_HAS_USB` 在 aarch64 全为 0；共享 syscall 表 x86_64 服务 **80** 项 entry（其中 `SYS_getpeername` handler 为 0、实际不可达 **79** 项）、aarch64 产品态 **66** 项（15 共享原生 + 33 fs 组 + 6 misc/msync + 4 time 组 + 5 proc 组 + 2 rlimit + `futex` 1），缺 **14** 项 = 网络 13 · `arch_prctl` 1（会话/资源/putchar 8 项与 `futex(2)` 已于 2026-11-26 闭环）。`arch_prctl` 是 2026-11-24 x86_64 静态 TLS 落地时新增的缺口（`SYS_arch_prctl` = 79，compat 表 158→79）；aarch64 用 TPIDR_EL0、不需要 `ARCH_SET_FS`，故优先级最低，仅登记不单独立项。
+范围：能力门（`kernel/include/arch/features.h`）+ 共享 syscall 表（`kernel/syscall/dispatch.c`）+ 驱动/设备注册面 + userland 应用与 E2E 套件的全量对比。差距呈「外设与生态 > syscall > 执行体细节」梯度：执行体核心（fork/exec/信号/SMP 用户调度）已收口，本节只记**此前未立任务的缺口**。头部事实：`OS01_HAS_PCI` 在 aarch64 已为 `1`（QEMU `virt` ECAM + `interrupt-map` INTx + `GICv2m` MSI-X + `pci_iomap_range()` + `ahci` 已于 2026-11-27 闭环），`OS01_HAS_NET` / `OS01_HAS_USB` 在 aarch64 仍为 `0`；共享 syscall 表 x86_64 服务 **80** 项 entry（其中 `SYS_getpeername` handler 为 0、实际不可达 **79** 项）、aarch64 产品态 **66** 项（15 共享原生 + 33 fs 组 + 6 misc/msync + 4 time 组 + 5 proc 组 + 2 rlimit + `futex` 1），缺 **14** 项 = 网络 13 · `arch_prctl` 1（会话/资源/putchar 8 项与 `futex(2)` 已于 2026-11-26 闭环）。`arch_prctl` 是 2026-11-24 x86_64 静态 TLS 落地时新增的缺口（`SYS_arch_prctl` = 79，compat 表 158→79）；aarch64 用 TPIDR_EL0、不需要 `ARCH_SET_FS`，故优先级最低，仅登记不单独立项。
 
 | 任务 | 内容与完成条件 | 前置 |
 |------|----------------|------|
 | 网络栈接入（`OS01_HAS_NET` 0→1） | 三段：① lwIP 纳入 aarch64 profile 构建（现 aarch64 不编译 lwIP，`kernel/arch/aarch64/make.config:46` `ARCH_ENABLE_LWIP = 0`，x86 同文件 `:46` = 1）；② virtio-net 传输层——现驱动是 x86 PCI legacy IO-port 传输（`kernel/driver/virtio-net.c:1-4`，内联 `inl/outl`），aarch64 需参照 virtio-blk-mmio（`kernel/driver/virtio_blk.c` + `kernel/include/arch/virtio_mmio.h`）实现 MMIO transport，或先抽公共 virtio 设备核心再两架构分接；③ 翻门解锁 `kernel/fs/file.c` 的 4 处 FD_SOCKET 块（`#if OS01_HAS_NET`：`:31-43` / `:183` / `:947` / `:1295`）并解除 13 项 socket syscall 隐藏（`kernel/syscall/dispatch.c:129-141`）；`kernel/fs/poll.c:328-350` 的 FD_SOCKET 分支**无编译门**，仅因 socket syscall 隐藏而运行时不可达，无需翻门。验收 = aarch64 上 `SUITE=network` 等价 E2E 跑通 | 独立；E2E 依赖本节「E2E 套件 aarch64 化」 |
-| 输入设备（键盘/鼠标） | aarch64 唯一输入是 PL011 RX → console TTY（`kernel/arch/aarch64/platform/console.c:37-42`），无 i8042/PS2、无 xHCI HID（`OS01_HAS_PCI`/`OS01_HAS_USB`=0）→ 无键盘/鼠标。**消费面分层解耦前置已完成（2026-11-22，`376c00d2`）**：`kernel/driver/input_route.c` 成为物理输入的独占租约与唯一权威（物理键态、Caps 锁存、NORMAL/ACTIVE 双路路由），消费端 `kernel/driver/keyboard.c` 与 `kernel/driver/mouse.c` 只读 route 快照，i8042 demux 与 PS/2 生产者下沉到 `kernel/arch/x86_64/driver/{i8042.c,ps2_kbd.c,ps2_mouse.c}`，x86 多生产者经 `SUBSYS_INITCALL` 仲裁。**仍缺**：QEMU virt 路线需新增 virtio-input MMIO 驱动（全树无 virtio_input 代码）作生产者接入 route 与 /dev/keyboard、/dev/mouse；真机 USB HID 路线远期（aarch64 无 PCI/USB 计划）。P3 GUI「aarch64 GUI 等待显示设备基础就绪」中输入是缺口的一半 | 独立 |
-| E2E 套件 aarch64 化 | `test-qemu` 的 **25 个 x86-only E2E 套件**（systest/network/gfx/terminal-present/gui/usb-boot 等；`mk/generated/test-dispatch.mk:2` 的 `TEST_QEMU_SUITE_IDS` 共 41 项，其余 16 项为 `aarch64-*`）全部 x86-only；aarch64 侧有 `make test-aarch64 MODE=<smp\|no-ack\|gic-spi\|sync-fault\|serror\|exception-trace\|m3-probe\|sched\|sched-ap\|sched-wake\|sched-tick\|user-runtime\|m1-ram\|m1-sparse\|m1-arena-exhaust\|m1-table-exhaust\|m1-ap-bad-root\|boot-contract\|lma-layout\|systest>`（**共 20 种 MODE**）+ `SUITE=aarch64-*` 16 项 + `test-contract`（`PROFILE=aarch64-clang`）。**`systest` 已于 2026-11-27 接入 aarch64**（`make PROFILE=aarch64-clang test-aarch64 MODE=systest`，UP `--cpus 1` 下 `total=122 passed=121 failed=0 skipped=1`；SMP `--cpus 2` 下 `poll` 阻塞唤醒偶发挂起待后续排查）；其余套件（terminal-present 等）随 syscall/驱动组解禁逐套件跟进 | 无硬前置；个别用例依赖上面 syscall 组先行解禁 |
+| 输入设备（键盘/鼠标） | aarch64 唯一输入是 PL011 RX → console TTY（`kernel/arch/aarch64/platform/console.c:37-42`），无 i8042/PS2、无 xHCI HID（`OS01_HAS_USB`=0）→ 无键盘/鼠标。**消费面分层解耦前置已完成（2026-11-22，`376c00d2`）**：`kernel/driver/input_route.c` 成为物理输入的独占租约与唯一权威（物理键态、Caps 锁存、NORMAL/ACTIVE 双路路由），消费端 `kernel/driver/keyboard.c` 与 `kernel/driver/mouse.c` 只读 route 快照，i8042 demux 与 PS/2 生产者下沉到 `kernel/arch/x86_64/driver/{i8042.c,ps2_kbd.c,ps2_mouse.c}`，x86 多生产者经 `SUBSYS_INITCALL` 仲裁。**仍缺**：QEMU virt 路线需新增 virtio-input MMIO 驱动（全树无 virtio_input 代码）作生产者接入 route 与 /dev/keyboard、/dev/mouse；真机/PCI USB HID 需先推进 xHCI 跨架构与 `OS01_HAS_USB=1`。P3 GUI「aarch64 GUI 等待显示设备基础就绪」中输入是缺口的一半 | 独立 |
+| PCIe 总线二期与设备生态 | 一期（QEMU `virt` ECAM + `interrupt-map` INTx + `GICv2m` MSI-X + `pci_iomap_range()` + `ahci`）已于 2026-11-27 闭环。**剩余**：① Type 1 PCIe 桥（`pcie-root-port`）下游设备 INTx swizzle 路由；② RPi5 `brcm,bcm2712-pcie` RC 间接配置访问与 Outbound ATU（接管 RP1）；③ Dragon Q8B ACPI `MCFG` 发现与 ECAM 接入；④ `xhci` / `virtio-pci` 等更多 PCIe 设备驱动跨架构接入与 `DMA`/`dma-ranges` 翻译 | PCIe 一期 ✅ |
+| E2E 套件 aarch64 化 | `test-qemu` 的 **25 个 x86-only E2E 套件**（systest/network/gfx/terminal-present/gui/usb-boot 等；`mk/generated/test-dispatch.mk:2` 的 `TEST_QEMU_SUITE_IDS` 共 41 项，其余 16 项为 `aarch64-*`）全部 x86-only；aarch64 侧有 `make test-aarch64 MODE=<...>`（**共 20 种 MODE**）+ `test-aarch64-pcie`（`ecam-virt` / `ahci-virt` / `no-ecam`）+ `SUITE=aarch64-*` 16 项 + `test-contract`（`PROFILE=aarch64-clang`）。**`systest` 已于 2026-11-27 接入 aarch64**（UP `--cpus 1` 下 `total=122 passed=121 failed=0 skipped=1`；SMP `--cpus 2` 下 `poll` 阻塞唤醒偶发挂起待后续排查）；其余套件（terminal-present 等）随 syscall/驱动组解禁逐套件跟进 | 无硬前置；个别用例依赖上面 syscall 组先行解禁 |
 
-### 架构统一推进链（迈向单一 kernel_main）
+### 真机适配：树莓派 5 & Radxa Dragon Q8B 剩余阻断
 
-剩余待统一项：
-
-当前无剩余项。**GICv2 Phase 2 已于 2026-11-21 完成软件实现与 QEMU 验收**（正式 EL1 VBAR `+0x180`/`+0x380`/`+0x580` SError 入口→`aarch64_serror_fatal` 首错诊断→`aarch64_serror_park`、`AARCH64_USER_TASK_PSTATE=0x240`、GICv2 `SecurityExtn` Non-secure Group 1 交接契约与 PMR 校验、1020 INTID 边界与 1020–1023 跳过、`gic_cpu_target_mask` 折叠与每核原子 claim），闭环记录见 [`changelog.md`](changelog.md) 与 [`arch.md`](arch.md) §AArch64 SError 与 GICv2 Phase 2。**真机取证**（实机 IRQ 覆盖与物理 SError 注入）并入下方「真机适配审计」的 GICv2 交接条件阻断行统一跟踪。
-
-**距离「用户态就绪的统一内核」还差多远（粗估，一个人全职）**：剩余差距集中在 x86_64 signal 帧 FPU 区（见 P5）；aarch64 的 EL0 FP/SIMD 已于 2026-11-21 闭环、跨进程 inode 级 `MAP_SHARED` 已于 2026-11-22 闭环（aarch64 侧）。详见 `docs/arch.md` §aarch64 用户态现状与末段、统一 kernel_main spec/plan。
-
-**永远无法统一的（ISA/HW 差异）**：`head.S`/`entry.S` 指令集差异；MMU 页表格式（PTE bit-position）；
-中断控制器驱动；SoC 外设（UART/timer/GPIO 等）。靠 arch 抽象层封装，统一接口、不统一实现。
-
-#### 真机适配审计：QEMU virt hardcode 清单（2026-11-17 扫描，2026-11-26 复核）
-
-范围：`kernel/arch/aarch64/` + `kernel/include/arch/aarch64/` + `boot/uefi/arch/aarch64/` 全量通读。审计结论是 hardcode
-呈三层固化——① DRAM 基址 / 内核加载地址；② 早期 MMIO 窗口；③ DTB 解析器实为「QEMU virt 形状校验器」（解析出的设备基址先与
-QEMU 常量对账、相等才通过，而不是用起来）。加载地址层、DTB 地址层与早期 MMIO Device 窗口 / 控制台 handoff 运行时化已闭环
-（见 [`arch.md`](arch.md) §aarch64 平台值解绑），下表只保留**仍开放的真机阻断项与推进待办**。
-
-##### 🌲 真机进展（树莓派 5 Model B Rev 1.0，2026-11-25 ~ 2026-11-26）
-
-三层固化已在 RPi5 上全部打通：串口有完整内核启动日志，HDMI 显示 Craton logo，M1 页表 / DTB / GIC-400 / 计时器 /
-CSPRNG 全部通过。**当前唯一阻断是根文件系统**：
-
-```
-PQH K
-UEFI-A64: layout entry=0x40080000 context=0x37f43000
-[cpu] MIDR_EL1 = 0x414fd0b1
-[boot] early device window base=0x107d000000 end=0x1080000000
-UEFI-A64: RAM ranges=5 pages2m=2011
-M1 ZONE/COVERAGE ×5, M1 BSP PASS root=0x41400000 ranges=5
-[logo] boot logo drawn (aarch64, 1920x1080)
-[fb] frame buffer remap succeed
-[dtb] /cpus: 4 CPUs, BSP MPIDR=0x0
-[dtb] pl011=0x1f00030000 spi=0 clk=44236800 gicd=0x107fff9000 gicc=0x107fffa000
-[gic] GICv2 driver: intids=320
-subsys: init clocksource/timer/timekeeping/virtio-blk/thermal ... ok
-CSPRNG: seeded STRONG from UEFI GetRNG
-[boot-3] FATAL stage=fs component=root rc=-19 phase=-1 cpu=-1
-```
-
-（日志取自 2026-11-25 的板测构建；首行 `PQH K` 是当时的交接打点，`AARCH64_FW_CONSOLE_BEACON` 已于 2026-11-26 随 bring-up 开关一并退役，现构建不再输出该前缀，其余行序与终止点不变。）
-
-`rc=-19` = `-ENODEV`：`fs_boot_mounts()` → `mount_disk_by_guid()` 在 `block_device_count() <= 0` 时返回 `-ENODEV`
-（`kernel/fs/boot.c:92`），`kernel/fs/boot.c:311` 的 `fs_boot_mounts()` 据此 `boot_failure_stop("fs","root",rc,-1,-1)`。
-即内核已走到 boot-3 的 fs 阶段，但 **RPi5 上没有任何块设备**，根文件系统挂不上。完整证据与排查过程见
-[`aarch64-rpi5-bringup-handoff-2026-11-25.md`](aarch64-rpi5-bringup-handoff-2026-11-25.md)。
-
-真机专属的三处根因已定位并修复（**已闭环，不再列为阻断项**）：
-
-1. **loader 交接前缺 D-cache clean**——loader 写内核镜像与 `boot_context` 走可缓存的 UEFI 映射，数据脏在 D-cache 而 DRAM
-   是旧值；`eret` 到 EL1（MMU 关）后取指 / 读 handoff 读到垃圾 → 异常进固件 VBAR 挂死。QEMU 不模拟 cache，只在真机出现。
-   修复：`boot/uefi/arch/aarch64/boot.c` 的 `arch_enter_kernel()` 交接前按 VA 对 boot block / trampoline / boot_context /
-   FDT 副本 / 内存图做 `dc civac`（到 PoC）+ `dsb sy; ic iallu; dsb sy; isb`。
-2. **RP1 UART 的 CPU 可见地址是 `0x1f00030000`（41 位）**——固件日志里的 `0x1c00030000`（37 位）是 VideoCore 自己的别名，
-   ARM CPU 写不进去（静默丢弃）；DTB 的 `/axi/pcie@120000/ranges` 才是 CPU 侧真址。排针串口（40-pin GPIO14/15）挂在
-   RP1 上，SoC 的 PL011（DTB `serial@7d001000`）只到 3 针调试座。
-3. **bring-up 构建开关退役**——`AARCH64_FIRMWARE_CONSOLE_PA` / `AARCH64_VIRTIO_MMIO` / `AARCH64_FW_CONSOLE_BEACON` /
-   `AARCH64_SKIP_EBS` 四个临时开关已于 2026-11-26 移除（`59f5ced3`），改由 ESP 上的 `/config.txt` 驱动——`platform rpi5`
-   + `console rp1-header`（`config/aarch64/uefi-rpi5.txt`），平台 / 控制台 / 帧缓冲尺寸都是运行期数据，构建不再分叉。
-
-##### 🐉 真机进展（Radxa Dragon Q8B / Qualcomm SC8280XP，2026-11-27）
-
-与 RPi5 齐平的早期内核路径已在 **Radxa Dragon Q8B**（32 GiB LPDDR4X，Qualcomm UEFI v2.70）真机打通：串口（Qualcomm GENI UART）输出完整启动日志，屏幕显示 `1280x720` Craton logo，M0/M1 页表（9 段 RAM、约 31.3 GiB）、ACPI 8 核拓扑、GICv3（`intids=992`）、Generic Timer 与 CSPRNG（`UEFI GetRNG`）全部通过，最终同样停在 `boot-3` 的根文件系统无块设备（`FATAL stage=fs component=root rc=-19`）。
-
-核心适配项：
-1. **2 GiB 以上启动块与 M0 扩展**：`AARCH64_PLATFORM=dragon-q8b`（`config/aarch64/uefi-dragon-q8b.txt`）默认 `AARCH64_BOOT_BLOCK_BASE=0xA0000000`（SC8280XP 在 `0x80000000` 以下无可用 RAM），`boot_layout.h` / `head.S` / `early_mmu.c` 将 M0 恒等映射上限扩展至 `0xC0000000`（不影响 QEMU/RPi5 默认 `0x80000000`）。
-2. **UEFI ACPI 发现与打包**：`boot/uefi/arch/aarch64/acpi_early.c` 扫描 `RSDP` / `XSDT` / `SPCR` / `APIC`(MADT) / `GTDT` 并打包进 handoff 页，`kernel/arch/aarch64/platform/dtb.c` 在无 DTB 时通过 ACPI 填充 8 核拓扑、UART 与 GICv3 基址。
-3. **Qualcomm GENI UART 与 GICv3 驱动**：`pl011.c` 新增 GENI 轮询发送路径；`gic_driver.c` / `gic.c` / `ipi.c` 新增 GICv3（`GICD` + `GICR` + `ICC_*_EL1` 系统寄存器接口）支持。
+两块真机均已打通早期内核路径（串口、HDMI logo、M0/M1、DTB/ACPI、GICv2/GICv3、Timer、CSPRNG，详见 [`changelog.md`](changelog.md#2026-11-27) 与 [RPi5 handoff](aarch64-rpi5-bringup-handoff-2026-11-25.md)），当前共同停在 `boot-3` `FATAL stage=fs component=root rc=-19`（`-ENODEV`）。
 
 **硬阻断（无法进入根文件系统 / 用户态）**：
 
@@ -145,20 +68,11 @@ CSPRNG: seeded STRONG from UEFI GetRNG
 | 项 | 内容 | 状态 |
 |----|------|------|
 | 4 核 SMP / AP 启动实测 | RPi5 DTB 报 4 CPUs（`[dtb] /cpus: 4 CPUs, BSP MPIDR=0x0`），目前只跑通 BSP；AP 启动需 PSCI 实测（DTB `psci conduit=1`）与 `SUBSYS_INITCALL` 下的 SMP 门禁验证 | ❌ **仍开放** |
-| RPi5 bring-up 测试补齐 | 用户在 handoff 时明确推迟的测试已**全部闭环（2026-11-26）**：`find_fdt` 的 RPi5 firmware 模式与 partial ranges（`hosttests/cases/test_aarch64_fdt_early.c`）、两段高地址 Device 窗口（同 L1 槽去重、控制台块在窗口外、跨 1 GiB 槽）（`hosttests/cases/test_aarch64_device_window.c`）、`/config.txt` 平台 / 控制台矩阵（`hosttests/cases/test_uefi_boot_config.c`）、DTB virtio-mmio slot 映射（`hosttests/cases/test_aarch64_virtio_mmio_map.c`）、UEFI 内存图最终校验（`hosttests/cases/test_aarch64_uefi_boot_memory.c`）、双平台镜像与 build gate（`tools/tests/test_aarch64_uefi_images.py`）与交接前 D-cache clean 断言（`hosttests/cases/test_aarch64_handoff_cache.c`，覆盖 `CTR_EL0.DminLine` 解码、全区域 `dc civac` 覆盖与 `dsb sy -> ic iallu -> dsb sy -> isb` 屏障顺序） | ✅ **已闭环**（2026-11-26） |
 
-**平台能力上限（非阻断，选型需知）**：PA 上限 40-bit/1 TiB（`kernel/arch/aarch64/head.S:252-268` TCR IPS=0b010、`kernel/arch/aarch64/memory/page_table.c:51`；**IPS 仍为编译期硬编码，全树未实现 `ID_AA64MMFR0_EL1.PARange` 动态探测，>40-bit PA 平台不支持**——RPi5 的 `0x107d000000` 设备窗口是 39 位，仍在限内）；早期 identity map 默认为 [0x00000000, 0x80000000)，当 `AARCH64_BOOT_BLOCK_BASE >= 0x80000000`（如 `dragon-q8b` 的 `0xA0000000`）时扩展为 [0x00000000, 0xC0000000)（`kernel/include/arch/aarch64/boot_layout.h`）；**Device 窗口优先取 boot_context handoff 运行时派生值**（`kernel/arch/aarch64/head.S`，含 fail-closed 校验），无 handoff 时才回落 QEMU 常量 [0x08000000,0x0a000000)；窗口跨 2 GiB 时走 `AARCH64_BOOT_HIGH_END`（512 GiB）内的 1 GiB 槽（L1 slot 65 / 124，RPi5 真机已验证），控制台块在窗口之外时单独映射；aarch64 已接 RNDR/RNDRRS（`kernel/arch/aarch64/cpu/random.c:30-60,110-122`，
-经 `ID_AA64ISAR0_EL1.RNDR` 探测，输出 STRONG/WEAK/NONE），STRONG 池可用，无 RNDR 的板只剩 EFI_RNG_PROTOCOL
-（无 RngDxe 的板 random_init fail-closed）；`AARCH64_M1_SPARSE` 假设 0x4fe00000..0x50400000 是 RAM（仅自测宏）。
+**平台能力上限（非阻断，选型需知）**：PA 上限 40-bit/1 TiB（`kernel/arch/aarch64/head.S:252-268` TCR IPS=0b010、`kernel/arch/aarch64/memory/page_table.c:51`，未实现 `ID_AA64MMFR0_EL1.PARange` 动态探测）；早期 identity map 默认 [0x0, 0x80000000)，`AARCH64_BOOT_BLOCK_BASE >= 0x80000000` 时扩展为 [0x0, 0xC0000000)。
 
 **剩余解绑顺序**：**RPi5 / Dragon Q8B** → 根文件系统（RAM 根 / 板载存储 / UEFI Block I/O 三选一）→ 多核 SMP（4 核 / 8 核）→ 存储 / PCIe / 网络 →
 补真机测试；**其他 DTB 平台** → 补 Group-1 / spin-table / DTB `arm,gic-v3` 解析 → 实机启动验证。
-
-### 🧱 P2 架构治理 / 扩展性
-
-#### 剩余架构治理任务
-
-当前无剩余项。新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填本节。
 
 ## 🖥 P3 GUI
 
@@ -249,41 +163,16 @@ CSPRNG: seeded STRONG from UEFI GetRNG
 
 ---
 
-## 近期闭环索引（最近 7 天：2026-11-20 ~ 2026-11-26）
+## 近期闭环索引（最近 2 天：2026-11-26 ~ 2026-11-27）
 
 只列条目名与文档指针；完整「做了什么 / 关键结论 / 验证」见 `docs/changelog.md` 对应日期条目。更早的闭环记录同样在 changelog，不在本索引重复。
 
 | 闭环项 | 日期 | 详情 |
 |--------|------|------|
-| **树莓派 5 真机首次跑通内核到 boot-3 fs/root**（真机专属三处根因修复：① loader 交接前缺 D-cache clean（`dc civac` + 屏障次序），② RP1 UART 的 CPU 可见地址是 `0x1f00030000` 而非固件日志的 `0x1c00030000`，③ `find_fdt` 回退读 VideoCore DTB 窗口 `0x1f0000`；串口完整日志 + HDMI Craton logo，M1 / DTB / GIC-400 / 计时器 / CSPRNG 全过；**唯一阻断 = 根文件系统 `-ENODEV`**） | 2026-11-25 | [changelog](changelog.md#2026-11-25) · [handoff](aarch64-rpi5-bringup-handoff-2026-11-25.md) |
-| **aarch64 双平台 UEFI 启动配置（ESP `/config.txt`）+ bring-up 构建开关退役**（公共 `/config.txt` 解析器 + x86_64 兼容；`AARCH64_PLATFORM=qemu-virt\|rpi5` 双镜像打包，平台名不进编译参数 / 对象目录 / ELF 布局；删除 `AARCH64_FIRMWARE_CONSOLE_PA` / `AARCH64_VIRTIO_MMIO` / `AARCH64_FW_CONSOLE_BEACON` / `AARCH64_SKIP_EBS`；DTB 选择 + 总线翻译 + 最终内存图校验；handoff 前置校验 + M0/M1 窗口归一；DTB virtio-mmio slot 映射前移到 SMP 门禁前） | 2026-11-26 | [changelog](changelog.md#2026-11-26) · [spec](superpowers/specs/2026-11-25-aarch64-uefi-boot-config-design.md) · [plan](superpowers/plans/2026-11-26-aarch64-uefi-boot-config.md) |
-| **x86_64 静态 TLS（`PT_TLS` Variant II）+ 原生 `arch_prctl`**（`PT_TLS` 预校验 + 64 KiB 跨度上限 + 进程私有 RW/NX TLS 实例 + TP 自指针；静态 PIE 不再拒绝 `PT_TLS`；`arch_prctl`(79) 与 Linux 158→79 映射，`IA32_FS_BASE` 随上下文切换保存/恢复，fork 快照 selector + base） | 2026-11-24 | [changelog](changelog.md#2026-11-24) · [spec](superpowers/specs/2026-11-24-ptls-x86_64-design.md) · [plan](superpowers/plans/2026-11-24-ptls-x86_64.md) |
-| **墙钟锚定 RTC**（架构中立 `kernel/time/timekeeping.c`：`timekeeping_init()` 经 `arch_rtc_read` 锚定墙钟、无 RTC 退回单调；`SYS_time` / `gettimeofday` 从恒 0 桩改为真实墙钟，`clock_gettime(CLOCK_REALTIME)` 改用 `timekeeping_real_ns()`；RTC 后端目前只有 x86_64 CMOS RTC） | 2026-11-24 | [changelog](changelog.md#2026-11-24) · [time](time/timer.md) |
-| **aarch64 PL011 DTB `interrupts` 形状校验放宽（与 GICv3 拆分）**（`kernel/arch/aarch64/platform/dtb_parse.c` 对 `arm,pl011` 不再要求恰 12 字节且 `nr != 0` 且 `flags == 4`：识别 3-cell `GIC_SPI(0)`（含 SPI 0、任意触发标志、多条目取首项，`nr < 988`），缺失或非 3-cell/非 SPI 形状时 `pl011_spi` 降级为 0 供 `console.c` 退回只输出模式；`GICv3 驱动缺失` 在 roadmap 单列跟踪；`qemutests/aarch64_dtb_test.py` 41/41 PASS） | 2026-11-23 | [changelog](changelog.md#2026-11-23) |
-| **aarch64 handoff 动态分配（解除 128 KiB 窗口固化）**（`boot/uefi/arch/aarch64/boot.c` 改为在 `[0, AARCH64_BOOT_MAP_END)` 内且避开 boot block 动态 `AllocatePages(AllocateMaxAddress, EfiLoaderData, ...)` 分别分配 `boot_context`、DTB 与 UEFI 内存图；`boot_layout.h` 移除 `AARCH64_HANDOFF_BASE`/`END`，内核上界放宽至 `AARCH64_TRAMPOLINE_BASE`；2 核 QEMU 实测 1 MiB DTB 引导与 selftest 全绿） | 2026-11-23 | [changelog](changelog.md#2026-11-23) |
-| **aarch64 时间 syscall 组解禁**（`kernel/syscall/dispatch.c` 在 `OS01_HAS_USERSPACE=1` 下对 aarch64 开放 `sys_time_dispatch` 四项 `SYS_time`/`gettimeofday`/`nanosleep`/`times`，`kernel/Makefile` 纳入 `syscall/sys_time.c`；2 核 QEMU 实测 `/bin/timeit /bin/busybox sleep 1` 真睡 `real 1.021863`） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [syscall](syscall/syscall.md) |
-| **inode 级 `MAP_SHARED` 剩余五项闭环**（磁盘回写 `msync`/`fsync`/`sync`/拆卸落盘、fd I/O 读写与共享页双向覆盖对齐、`vfs_truncate` 撤页与尾页清零回收、POSIX `shm_open`/`shm_unlink` + `SYS_msync`/`SYS_fsync` ABI、`x86_64` 用户 VM 全链接入共享对象注册表） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [cow-mmap](memory/cow-mmap.md#3-跨进程-inode-级-map_shared2026-11-22aarch64) · [syscall](syscall/syscall.md) |
-| **USB boot M0 固件检查点退役**（`USB_BOOT_CASE=firmware` 子用例删除：过期的 `rc=-19` 预期失败断言、case 表与 make 白名单一并收敛；其正面证明——xHCI 枚举 + MSC 发布 + GUID 选盘 usba 根 + 两个分区标记——并入 `readonly` 的成功证据链，并同步 `mk/components/run.mk` 的帮助文本与三处过期注释） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [build](build/build.md) · [driver](driver/driver.md) |
-| **跨进程 inode 级 `MAP_SHARED`**（架构中立共享对象注册表 `kernel/memory/shared_backing.c`，键 `(挂载实例, inode)`、匿名对象 fork 继承；aarch64 mmap/fork/uaccess/拆卸全链接入；产品 E2E `USER_RUNTIME_CASE=map-shared` 实跑 `/bin/test_map_shared` 覆盖会合/偏移隔离/rename/unlink/权限上限/两种拆卸入口） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [cow-mmap](memory/cow-mmap.md#3-跨进程-inode-级-map_shared2026-11-22aarch64) · [arch.md](arch.md) |
-| **x86_64 静态 PIE 与镜像基址随机化（ASLR-B）**（`x86_elf_pie_prepare()` 校验零链接 `ET_DYN`，逐页重定位跨页 `R_X86_64_RELATIVE`，PIE 偏移 `[0x00400000,0x10400000)` 抽取；PIE 偏移/`mmap_base`/`AT_RANDOM` 三段独立强熵、任一失败 fail-closed `-EAGAIN`；用户态与 BusyBox 全迁 `-fPIE` + `user-pie.ld`，`test-user-pie` 审计 47 产物） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [spec](superpowers/specs/2026-11-22-aslr-b-static-pie-design.md) · [cow-mmap](memory/cow-mmap.md) |
-| **x86_64 用户态 `mmap_base` 随机化（ASLR-A）**（28-bit 4 KiB 页粒度窗口 `[0x0000400000000000,0x0000410000000000)` + 规范用户上界；`spawn_user_task()`/`sys_exec()` 初始化、fork 继承；无回绕 first-fit 间隙搜索封堵 `MAP_FIXED(0)`） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [spec](superpowers/specs/2026-11-21-aslr-a-mmap-base-design.md) · [cow-mmap](memory/cow-mmap.md) |
-| **x86_64 内核 UBSan + KASan 插桩 v1**（`KERNEL_UBSAN=1`/`KERNEL_KASAN=1` 独立 knob + `san-ubsan`/`san-kasan` 变体，普通构建逐字节不变；KASan 两阶段影子 `shadow(VA)=(VA>>3)+0xdffffc0000000000` + slab 毒化钩子；UBSan 运行时 log+kpanic；`KERNEL_SANITIZER_TEST=ubsan\|kasan` 探针端到端验证） | 2026-11-22 | [changelog](changelog.md#2026-11-22) · [plan](superpowers/plans/2026-11-22-ubsan-kasan.md) · [build](build/build.md) |
-| **GICv2 Phase 2 与正式 SError 入口**（EL1 VBAR `+0x180`/`+0x380`/`+0x580` SError 入口 → `aarch64_serror_fatal` 首错诊断 → `aarch64_serror_park`；`SecurityExtn` Non-secure Group 1 交接契约与 PMR 校验；1020 INTID 边界与 1020–1023 跳过；`gic_cpu_target_mask` 折叠与每核原子 claim；真机取证模板已备） | 2026-11-21 | [changelog](changelog.md#2026-11-21) · [arch.md](arch.md#aarch64-serror-与-gicv2-phase-22026-11-21) · [spec](superpowers/specs/2026-11-21-aarch64-gic-phase2-design.md) |
-| **双架构统一异常诊断与单段内核栈回溯**（`kernel/core/trace.c` 统一 `TRACE_FULL`/`TRACE_PC_ONLY` 输出；`trace_symbols.c` 经链接器边界校验 PC 归属的 kallsyms 查找；`arch_unwind_read_frame()` 两字受保护读取 + 缺页修复例程；x86_64 用 TSS `rsp0` 定栈、aarch64 用 `aarch64_unwind_publish_task_stack()`） | 2026-11-21 | [changelog](changelog.md#2026-11-21) · [arch.md](arch.md#双架构统一异常诊断与单段栈回溯2026-11-21) · [spec](superpowers/specs/2026-11-21-multiarch-exception-trace-design.md) |
-| **aarch64 运行期跨核用户任务迁移**（`pull_aarch64_user_task()` 拉取式负载均衡 + 每核 8-tick 空闲平衡；`aarch64_vm_edit_begin()` quiesce 静默校验（可回滚错误恢复原 mm/TLS、`-EBUSY` fail-stop）；地址序双 rq 锁内只做队列事务；`MODE=user-runtime USER_RUNTIME_CASE=migration` 验证 3 次往返） | 2026-11-21 | [changelog](changelog.md#2026-11-21) · [arch.md](arch.md#aarch64-用户态现状m42026-11-11--2026-11-18-闭环) · [plan](superpowers/plans/2026-11-21-aarch64-runtime-task-migration.md) |
-| **CPU 特性探测**（`arch/cpu_features.h`：`arch_cpu_features()` 返回统一位图 `ARCH_CPU_FEAT_{FPU,VIRT,CACHE_COHERENCY}`；x86 CPUID 与 aarch64 `ID_AA64PFR0_EL1` 双实现 + 宿主/内核自测） | 2026-11-21 | [changelog](changelog.md#2026-11-21) · [arch.md](arch.md#facade--override-矩阵) |
-| **libm 基础代数集落地**（`usr/lib/libm.a` 独立发布，导出 16 个符号：`fabs/fabsf`、`copysign/copysignf`、`floor/floorf`、`ceil/ceilf`、`trunc/truncf`、`round/roundf`、`fmod/fmodf`、`sqrt/sqrtf`；来源 musl 1.2.5 vendored，全部整数位运算实现、无浮点算术指令；三层验证 = 宿主对拍 glibc、guest 实跑 `64_libm`、已发布归档反汇编审计） | 2026-11-21 | [changelog](changelog.md#2026-11-21) · [spec](superpowers/specs/2026-11-21-libm-design.md) · [libc](libc/libc.md#4-libm-基础代数集) |
-| **aarch64 产品镜像迁 ext2 根文件系统**（产品变体从整盘 FAT32 superfloppy 迁到与 x86 相同的 mkdisk GPT 双分区布局：ESP→/boot、ext2→/ 承载产品用户态；/bin/sh 改真软链，同日跟进后 /bin 装全部解锁用户程序 29 项（x86 同款过滤器）；内核零改动，`fs_boot_mounts` GUID 路径直挂。整盘 FAT32 回退挂载在 aarch64 失去产品级覆盖，FAT32 读覆盖经 ESP→/boot 保留） | 2026-11-21 | [changelog](changelog.md#2026-11-21) · [plan](superpowers/plans/2026-11-21-aarch64-ext2-product-image.md) |
-| **flake 账本入库**（账本文件 `config/flake-ledger.json` 入库：`runs` 机器写 + `decisions` 人写；报告器支持 `--merge`/`--update-ledger`/`--emit-fragment`；CI 夜间首次调用报告器并发布 `flake-ledger` artifact；契约门禁防回退。推翻 D8「无写回」，保留「不加权限」「不动 job 骨架」） | 2026-11-21 | [changelog](changelog.md#2026-11-21) · [spec](superpowers/specs/2026-11-21-flake-ledger-design.md) · [plan](superpowers/plans/2026-11-21-flake-ledger.md) · [testing-policy](testing/testing-policy.md#86-flake-账本) |
-| **aarch64 运行期跨核任务迁移**（多核 `allowed_cpus`、`pull_aarch64_user_task` 拉取式负载均衡、8-tick 空闲平衡、`aarch64_vm_edit_begin` 静默校验、`USER_RUNTIME_CASE=migration`） | 2026-11-21 | [arch.md](arch.md#aarch64-用户态现状m42026-11-11--2026-11-18-闭环) · [scheduler.md](sched/scheduler.md) · [plan](superpowers/plans/2026-11-21-aarch64-runtime-task-migration.md) |
-| **用户态进入与返回门面**（`arch/context.h`：`arch_task_prepare_user_entry`、共享返回编排 `context_run_return_work`、`arch_context_restore_frame` 同址恢复） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [arch.md](arch.md#facade--override-矩阵) · [spec](superpowers/specs/2026-11-20-user-context-facade-design.md) · [plan](superpowers/plans/2026-11-20-user-context-facade.md) |
-| **aarch64 EL3 分支标注仅 QEMU 支持**（`head.S` EL3→EL1 盲写 `SCR_EL3`/`SPSR_EL3` 边界化：仅 QEMU `-M virt,secure=on` 场景，真机 TF-A/UEFI 从 EL2/EL1 交接走 2a 分支，不受影响） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [arch.md](arch.md#aarch64-平台值解绑2026-11-18--2026-11-19) |
-| **libc 统一 libk.a 内核子集与审计基线**（x86_64 / aarch64 同一份 32 对象 / 77 符号，审计基线架构中立） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [libc.md](libc/libc.md) |
-| **libc aarch64 / x86_64 齐平**（`libc_arch` facade + per-arch override；setjmp 汇编 override、floatscan/strtod/vsscanf 经 float_abi 移植） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [libc.md](libc/libc.md) |
-| **ELF 分段 NX 细化**（W^X 叶策略：`.data`/`.bss` RW+NX、`.rodata` RO+NX、仅 `.text` 可执行） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [cow-mmap.md](memory/cow-mmap.md#elf-分段叶子-nx-细化2026-11-20) |
-| **aarch64 正式 EL0 IRQ 抢占、8-bit ASID 与 SMP 用户调度**（固定每任务单核亲和、`user-runtime` irq/asid/smp/product 1/2/4/8 核） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [arch.md](arch.md#aarch64-用户态现状m42026-11-11--2026-11-18-闭环) · [plan](superpowers/plans/2026-11-20-intr-dispatch-remaining.md) |
-| **aarch64 硬件 FP/SIMD 放行**（CPACR_EL1.FPEN + per-task 保存恢复；当时的剩余项 PSTATE F 位与 signal 帧 FP 区已于 2026-11-21 闭环，见 [changelog](changelog.md#2026-11-21)） | 2026-11-20 | [changelog](changelog.md#2026-11-20) |
-| **损伤区域与批量 present**（`GFX_PRESENT_RECTS` + terminal / LVGL 双消费端） | 2026-11-20 | [changelog](changelog.md#2026-11-20) · [gui.md](gui/gui.md) · [spec](superpowers/specs/2026-11-19-gfx-damage-batch-present-design.md) |
+| **AArch64 PCIe 一期、DTB `interrupt-map` INTx、`pci_iomap_range()`、AHCI 跨架构与 GICv2m MSI-X**（`OS01_HAS_PCI=1`，QEMU `virt` ECAM 枚举、`/dev/pci`、`lspci`、`interrupt-map` INTx 路由、`ich9-ahci` `/dev/hdb` 读写、统一 `pci_iomap_range()` 与 `v2m@8020000` MSI-X 钩子；`test-aarch64-pcie` 与宿主测试全绿） | 2026-11-27 | [changelog](changelog.md#2026-11-27) · [spec](superpowers/specs/2026-11-27-aarch64-pcie-bus-design.md) · [driver](driver/driver.md) |
+| **Radxa Dragon Q8B（SC8280XP）早期内核打通 + GICv3 + ACPI 拓扑回退 + GENI UART**（`dragon-q8b` `0xA0000000` 启动块与 M0 `0xC0000000` 扩展、ACPI `RSDP`/`XSDT`/`SPCR`/`MADT`/`GTDT` handoff、GICv3 `intids=992`、31.3 GiB M0/M1；停在 `boot-3` 根文件系统 `-ENODEV`） | 2026-11-27 | [changelog](changelog.md#2026-11-27) |
+| **aarch64 `systest` E2E 接入与 GUI/gfx sysroot 解禁**（`MODE=systest` UP 121/122 PASS；`libgui`/`libgfx` sysroot 与桌面/图形应用解禁） | 2026-11-27 | [changelog](changelog.md#2026-11-27) |
+| **aarch64 双平台 UEFI 启动配置（ESP `/config.txt`）+ bring-up 构建开关退役**（公共 `/config.txt` 解析器、`AARCH64_PLATFORM=qemu-virt\|rpi5` 双镜像打包、4 个临时编译开关退役、DTB/handoff/virtio-mmio 校验与补齐测试全绿） | 2026-11-26 | [changelog](changelog.md#2026-11-26) · [spec](superpowers/specs/2026-11-25-aarch64-uefi-boot-config-design.md) · [plan](superpowers/plans/2026-11-26-aarch64-uefi-boot-config.md) |
 
 ---
 
