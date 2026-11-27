@@ -5,7 +5,7 @@
  * timing: strict
  * tier: pr
  * link: timekeeping
- * scenarios: []
+ * scenarios: [sched.timekeeping.wall_clock]
  */
 /*
  * test_timekeeping.c — host unit tests for kernel/time/timekeeping.c.
