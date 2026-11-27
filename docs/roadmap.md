@@ -1,6 +1,6 @@
 # OS01 优化路线图
 
-> **基准**：`9a72f624`（master，2026-11-26）　**日期**：2026-11-26
+> **基准**：`9a72f624`（master，2026-11-26）　**日期**：2026-11-27
 
 本文件**只列未完成 / 进行中**的规划项。已完成工作见 [`changelog.md`](changelog.md)；**最近 7 天的闭环快速索引见文末「近期闭环索引」**；闭环细节见各专题文档：
 [`arch.md`](arch.md) · [`memory/memory.md`](memory/memory.md) · [`memory/cow-mmap.md`](memory/cow-mmap.md) ·
@@ -13,7 +13,7 @@
 |-------|------|---------|------|
 | **P0** | 工程与测试基础设施 | 0 | flake 账本入库已于 2026-11-21 闭环（见 [`changelog.md`](changelog.md)） |
 | **P1** | 安全加固 | 1 | UBSan/KASan 后续项（v1 已于 2026-11-22 闭环）；ASLR 全覆盖（x86_64 与 aarch64 的 `mmap_base`、栈基址与静态 PIE 均已于 2026-11-26 闭环） |
-| **P2** | aarch64 适配 | 8 | 内存与执行体 0 · 能力齐平 3（图形/GUI 栈 sysroot 与应用解禁已于 2026-11-27 闭环） · 架构统一 0 · 真机阻断 4（硬阻断 2 + 条件阻断 2）· 真机推进待办 1（RPi5 真机已跑到 boot-3 fs/root，剩根文件系统） |
+| **P2** | aarch64 适配 | 7 | 内存与执行体 0 · 能力齐平 3（图形/GUI 栈 sysroot 与应用解禁已于 2026-11-27 闭环） · 架构统一 0 · 真机阻断 3（硬阻断 1 + 条件阻断 2；GICv3 驱动已于 2026-11-27 在 Dragon Q8B 真机验证通过）· 真机推进待办 1（RPi5 与 Radxa Dragon Q8B 真机均已跑到 boot-3 fs/root，剩根文件系统） |
 | **P2** | 架构治理 / 扩展性 | 0 | 新增治理项沿 AAGU 编号追加，先记入 [`decisions.md`](decisions.md) 与 [`changelog.md`](changelog.md)，再回填该节 |
 | **P3** | GUI | 7 | GUI-4/5/6 + 优化与验证 4 |
 | **P4** | 硬件适配 | 5 | USB 2 · NVMe · HPET · ACPI S3 |
@@ -114,12 +114,22 @@ CSPRNG: seeded STRONG from UEFI GetRNG
    `AARCH64_SKIP_EBS` 四个临时开关已于 2026-11-26 移除（`59f5ced3`），改由 ESP 上的 `/config.txt` 驱动——`platform rpi5`
    + `console rp1-header`（`config/aarch64/uefi-rpi5.txt`），平台 / 控制台 / 帧缓冲尺寸都是运行期数据，构建不再分叉。
 
+##### 🐉 真机进展（Radxa Dragon Q8B / Qualcomm SC8280XP，2026-11-27）
+
+与 RPi5 齐平的早期内核路径已在 **Radxa Dragon Q8B**（32 GiB LPDDR4X，Qualcomm UEFI v2.70）真机打通：串口（Qualcomm GENI UART）输出完整启动日志，屏幕显示 `1280x720` Craton logo，M0/M1 页表（9 段 RAM、约 31.3 GiB）、ACPI 8 核拓扑、GICv3（`intids=992`）、Generic Timer 与 CSPRNG（`UEFI GetRNG`）全部通过，最终同样停在 `boot-3` 的根文件系统无块设备（`FATAL stage=fs component=root rc=-19`）。
+
+核心适配项：
+1. **2 GiB 以上启动块与 M0 扩展**：`AARCH64_PLATFORM=dragon-q8b`（`config/aarch64/uefi-dragon-q8b.txt`）默认 `AARCH64_BOOT_BLOCK_BASE=0xA0000000`（SC8280XP 在 `0x80000000` 以下无可用 RAM），`boot_layout.h` / `head.S` / `early_mmu.c` 将 M0 恒等映射上限扩展至 `0xC0000000`（不影响 QEMU/RPi5 默认 `0x80000000`）。
+2. **UEFI ACPI 发现与打包**：`boot/uefi/arch/aarch64/acpi_early.c` 扫描 `RSDP` / `XSDT` / `SPCR` / `APIC`(MADT) / `GTDT` 并打包进 handoff 页，`kernel/arch/aarch64/platform/dtb.c` 在无 DTB 时通过 ACPI 填充 8 核拓扑、UART 与 GICv3 基址。
+3. **Qualcomm GENI UART 与 GICv3 驱动**：`pl011.c` 新增 GENI 轮询发送路径；`gic_driver.c` / `gic.c` / `ipi.c` 新增 GICv3（`GICD` + `GICR` + `ICC_*_EL1` 系统寄存器接口）支持。
+
 **硬阻断（无法进入根文件系统 / 用户态）**：
 
 | 问题 | 位置 | 真机影响 | 状态 / 剩余解法 |
 |------|------|----------|----------|
-| **根文件系统无块设备**（RPi5 当前唯一阻断） | `kernel/fs/boot.c:92` `mount_disk_by_guid()` 在 `block_device_count() <= 0` 时返回 `-ENODEV`；RPi5 无 virtio-mmio（`kernel/arch/aarch64/driver/virtio_mmio.c` 的 slot 映射在真机上落空），内核也没有 SDHCI / PCIe-RP1 存储驱动 | boot-3 `stage=fs component=root rc=-19`，进不了 rootfs 与用户态 | ❌ **仍开放**：三条候选路线——① loader 阶段把 rootfs / initramfs 搬进 RAM + 内核支持 RAM 根；② RPi5 SDHCI 驱动；③ loader 阶段用 UEFI Block I/O 一次性读入 rootfs。**附带决策**：无块设备时 `fs_boot_mounts()` 是否应降级为「无 rootfs 启动到 shell」而非 FATAL 停机 |
-| GICv3 驱动缺失 | `kernel/arch/aarch64/platform/dtb_parse.c:188-189` 的 GIC compatible 白名单只收 `arm,cortex-a15-gic` / `arm,gic-400`；全树无 `arm,gic-v3` / GICR / `ICC_*_EL1` 驱动 | GICv3 平台无法启动 | ❌ **仍开放**：GICv3 独立驱动任务（RPi5 是 `arm,gic-400`，不阻断本板；同行的 PL011 `interrupts` 形状校验已于 2026-11-23 放宽闭环） |
+| **根文件系统无块设备**（RPi5 / Dragon Q8B 当前唯一阻断） | `kernel/fs/boot.c:92` `mount_disk_by_guid()` 在 `block_device_count() <= 0` 时返回 `-ENODEV`；RPi5 无 virtio-mmio，Dragon Q8B 无 NVMe/USB 块驱动 | boot-3 `stage=fs component=root rc=-19`，进不了 rootfs 与用户态 | ❌ **仍开放**：三条候选路线——① loader 阶段把 rootfs / initramfs 搬进 RAM + 内核支持 RAM 根；② 板载存储驱动（RPi5 SDHCI / Dragon Q8B NVMe）；③ loader 阶段用 UEFI Block I/O 一次性读入 rootfs。**附带决策**：无块设备时 `fs_boot_mounts()` 是否应降级为「无 rootfs 启动到 shell」而非 FATAL 停机 |
+
+（注：`GICv3 驱动缺失` 已于 2026-11-27 通过 ACPI + `gic_driver.c`/`gic.c`/`ipi.c` 落地并在 Dragon Q8B 实机跑通 `intids=992`；DTB 路径的 `arm,gic-v3` 节点解析与 GICv3 多核 SMP IPI 实测待后续补齐。）
 
 **条件阻断（能到早期启动，特定环节卡死/静默失效）**：
 
@@ -137,12 +147,12 @@ CSPRNG: seeded STRONG from UEFI GetRNG
 | 4 核 SMP / AP 启动实测 | RPi5 DTB 报 4 CPUs（`[dtb] /cpus: 4 CPUs, BSP MPIDR=0x0`），目前只跑通 BSP；AP 启动需 PSCI 实测（DTB `psci conduit=1`）与 `SUBSYS_INITCALL` 下的 SMP 门禁验证 | ❌ **仍开放** |
 | RPi5 bring-up 测试补齐 | 用户在 handoff 时明确推迟的测试已**全部闭环（2026-11-26）**：`find_fdt` 的 RPi5 firmware 模式与 partial ranges（`hosttests/cases/test_aarch64_fdt_early.c`）、两段高地址 Device 窗口（同 L1 槽去重、控制台块在窗口外、跨 1 GiB 槽）（`hosttests/cases/test_aarch64_device_window.c`）、`/config.txt` 平台 / 控制台矩阵（`hosttests/cases/test_uefi_boot_config.c`）、DTB virtio-mmio slot 映射（`hosttests/cases/test_aarch64_virtio_mmio_map.c`）、UEFI 内存图最终校验（`hosttests/cases/test_aarch64_uefi_boot_memory.c`）、双平台镜像与 build gate（`tools/tests/test_aarch64_uefi_images.py`）与交接前 D-cache clean 断言（`hosttests/cases/test_aarch64_handoff_cache.c`，覆盖 `CTR_EL0.DminLine` 解码、全区域 `dc civac` 覆盖与 `dsb sy -> ic iallu -> dsb sy -> isb` 屏障顺序） | ✅ **已闭环**（2026-11-26） |
 
-**平台能力上限（非阻断，选型需知）**：PA 上限 40-bit/1 TiB（`kernel/arch/aarch64/head.S:252-268` TCR IPS=0b010、`kernel/arch/aarch64/memory/page_table.c:51`；**IPS 仍为编译期硬编码，全树未实现 `ID_AA64MMFR0_EL1.PARange` 动态探测，>40-bit PA 平台不支持**——RPi5 的 `0x107d000000` 设备窗口是 39 位，仍在限内）；早期 identity map 为 [0x00000000, 0x80000000)（`kernel/arch/aarch64/head.S:168-212`，`aarch64_build_boot_page_tables` 调用在 `:199-212`，范围常量 `AARCH64_BOOT_MAP_END=0x80000000` 见 `kernel/include/arch/aarch64/boot_layout.h:41`）；**Device 窗口优先取 boot_context handoff 运行时派生值**（`kernel/arch/aarch64/head.S:199-211`，含 `:168-197` 的 fail-closed 校验），无 handoff 时才回落 QEMU 常量 [0x08000000,0x0a000000)（`kernel/arch/aarch64/head.S:205-206`）；窗口跨 2 GiB 时走 `AARCH64_BOOT_HIGH_END`（512 GiB）内的 1 GiB 槽（L1 slot 65 / 124，RPi5 真机已验证），控制台块在窗口之外时单独映射；aarch64 已接 RNDR/RNDRRS（`kernel/arch/aarch64/cpu/random.c:30-60,110-122`，
+**平台能力上限（非阻断，选型需知）**：PA 上限 40-bit/1 TiB（`kernel/arch/aarch64/head.S:252-268` TCR IPS=0b010、`kernel/arch/aarch64/memory/page_table.c:51`；**IPS 仍为编译期硬编码，全树未实现 `ID_AA64MMFR0_EL1.PARange` 动态探测，>40-bit PA 平台不支持**——RPi5 的 `0x107d000000` 设备窗口是 39 位，仍在限内）；早期 identity map 默认为 [0x00000000, 0x80000000)，当 `AARCH64_BOOT_BLOCK_BASE >= 0x80000000`（如 `dragon-q8b` 的 `0xA0000000`）时扩展为 [0x00000000, 0xC0000000)（`kernel/include/arch/aarch64/boot_layout.h`）；**Device 窗口优先取 boot_context handoff 运行时派生值**（`kernel/arch/aarch64/head.S`，含 fail-closed 校验），无 handoff 时才回落 QEMU 常量 [0x08000000,0x0a000000)；窗口跨 2 GiB 时走 `AARCH64_BOOT_HIGH_END`（512 GiB）内的 1 GiB 槽（L1 slot 65 / 124，RPi5 真机已验证），控制台块在窗口之外时单独映射；aarch64 已接 RNDR/RNDRRS（`kernel/arch/aarch64/cpu/random.c:30-60,110-122`，
 经 `ID_AA64ISAR0_EL1.RNDR` 探测，输出 STRONG/WEAK/NONE），STRONG 池可用，无 RNDR 的板只剩 EFI_RNG_PROTOCOL
 （无 RngDxe 的板 random_init fail-closed）；`AARCH64_M1_SPARSE` 假设 0x4fe00000..0x50400000 是 RAM（仅自测宏）。
 
-**剩余解绑顺序**：**RPi5** → 根文件系统（RAM 根 / SDHCI / UEFI Block I/O 三选一）→ 4 核 SMP → 存储 / PCIe-RP1 / 网络 →
-补真机测试；**其他平台** → 补 Group-1 / spin-table → 放宽 timer 形状校验 → GICv3 驱动 → 实机启动验证。
+**剩余解绑顺序**：**RPi5 / Dragon Q8B** → 根文件系统（RAM 根 / 板载存储 / UEFI Block I/O 三选一）→ 多核 SMP（4 核 / 8 核）→ 存储 / PCIe / 网络 →
+补真机测试；**其他 DTB 平台** → 补 Group-1 / spin-table / DTB `arm,gic-v3` 解析 → 实机启动验证。
 
 ### 🧱 P2 架构治理 / 扩展性
 
