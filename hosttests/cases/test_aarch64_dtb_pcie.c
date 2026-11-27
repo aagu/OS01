@@ -166,7 +166,19 @@ TEST_FUNC(test_qemu_virt_ecam_dtb)
     fb_prop_u32(&f, "phandle", 0x8002U);
     fb_prop_raw(&f, "interrupt-controller", NULL, 0);
     fb_prop_u32(&f, "#address-cells", 2);
+    fb_prop_u32(&f, "#size-cells", 2);
     fb_prop_u32(&f, "#interrupt-cells", 3);
+    fb_prop_raw(&f, "ranges", NULL, 0);
+
+    fb_begin_node(&f, "v2m@8020000");
+    fb_prop_str(&f, "compatible", "arm,gic-v2m-frame");
+    fb_prop_raw(&f, "msi-controller", NULL, 0);
+    fb_prop_u32(&f, "phandle", 0x8003U);
+    {
+        uint32_t v2m_reg[] = { 0x0U, 0x08020000U, 0x0U, 0x1000U };
+        fb_prop_cells(&f, "reg", v2m_reg, 4);
+    }
+    fb_end_node(&f);
     fb_end_node(&f);
 
     fb_begin_node(&f, "pcie@10000000");
@@ -176,6 +188,10 @@ TEST_FUNC(test_qemu_virt_ecam_dtb)
     fb_prop_u32(&f, "#size-cells", 2);
     fb_prop_u32(&f, "#interrupt-cells", 1);
     fb_prop_u32(&f, "linux,pci-domain", 0);
+    {
+        uint32_t msi_map[] = { 0x0U, 0x8003U, 0x0U, 0x10000U };
+        fb_prop_cells(&f, "msi-map", msi_map, 4);
+    }
     {
         uint32_t mask[] = { 0x1800U, 0x0U, 0x0U, 0x7U };
         fb_prop_cells(&f, "interrupt-map-mask", mask, 4);
@@ -261,6 +277,12 @@ TEST_FUNC(test_qemu_virt_ecam_dtb)
     assert_eq(0x0800U, r->int_map[3].addr_hi);
     assert_eq(2U, r->int_map[3].int_pin);
     assert_eq(37U, r->int_map[3].gic_intid);
+    assert_eq(0x8003U, r->msi_phandle);
+
+    assert_true(topo.v2m.valid);
+    assert_eq(0x8003U, topo.v2m.phandle);
+    assert_eq(0x08020000ULL, topo.v2m.reg_cpu_base);
+    assert_eq(0x1000ULL, topo.v2m.reg_size);
 }
 
 TEST_FUNC(test_interrupt_map_parent_zero_ac_and_bad_phandle)

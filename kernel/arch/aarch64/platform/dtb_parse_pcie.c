@@ -31,6 +31,11 @@ struct pcie_fdt_node {
     struct pcie_prop ranges;
     struct pcie_prop interrupt_map;
     struct pcie_prop interrupt_map_mask;
+    struct pcie_prop phandle;
+    struct pcie_prop msi_map;
+    struct pcie_prop msi_parent;
+    struct pcie_prop arm_msi_base_spi;
+    struct pcie_prop arm_msi_num_spis;
 };
 
 struct pcie_fdt_view {
@@ -194,6 +199,18 @@ static int pcie_prop_record(const uint8_t *b, struct pcie_fdt_node *n,
         dst = &n->interrupt_map;
     } else if (pcie_streq(name, "interrupt-map-mask")) {
         dst = &n->interrupt_map_mask;
+    } else if (pcie_streq(name, "phandle") || pcie_streq(name, "linux,phandle")) {
+        if (!n->phandle.off) {
+            dst = &n->phandle;
+        }
+    } else if (pcie_streq(name, "msi-map")) {
+        dst = &n->msi_map;
+    } else if (pcie_streq(name, "msi-parent")) {
+        dst = &n->msi_parent;
+    } else if (pcie_streq(name, "arm,msi-base-spi")) {
+        dst = &n->arm_msi_base_spi;
+    } else if (pcie_streq(name, "arm,msi-num-spis")) {
+        dst = &n->arm_msi_num_spis;
     } else if (pcie_streq(name, "compatible")) {
         dst = &n->compatible;
         is_str = true;
@@ -436,12 +453,58 @@ static void pcie_decode_interrupt_map(const struct pcie_fdt_view *fdt,
     }
 }
 
+static void finish_v2m_node(const struct pcie_fdt_view *fdt,
+                            const struct pcie_fdt_node *n,
+                            uint32_t depth, const struct pcie_bus_frame *stack,
+                            struct aarch64_pcie_topology *out)
+{
+    const uint8_t *b = fdt->b;
+    if (out->v2m.valid || !pcie_node_enabled(b, n)) {
+        return;
+    }
+    uint32_t pac = n->parent_address_cells;
+    uint32_t psc = n->parent_size_cells;
+    if ((pac != 1U && pac != 2U) || (psc != 1U && psc != 2U)) {
+        return;
+    }
+    uint32_t reg_stride = (pac + psc) * 4U;
+    if (!n->reg.off || n->reg.len < reg_stride || (n->reg.len % reg_stride) != 0U) {
+        log_warn("pcie-dtb: v2m missing or malformed reg\n");
+        return;
+    }
+    const uint8_t *rp = b + n->reg.off;
+    uint64_t base = aarch64_fdt_decode_cells(rp, pac);
+    uint64_t rsize = aarch64_fdt_decode_cells(rp + pac * 4U, psc);
+    if (rsize < 0x1000ULL || base > UINT64_MAX - rsize) {
+        log_warn("pcie-dtb: v2m invalid reg size=%lx\n", (unsigned long)rsize);
+        return;
+    }
+    if (!pcie_to_cpu_pa(b, stack, depth, rsize, &base) || (base & 0xFFFULL) != 0ULL) {
+        log_warn("pcie-dtb: v2m failed to translate reg\n");
+        return;
+    }
+    out->v2m.valid = true;
+    out->v2m.reg_cpu_base = base;
+    out->v2m.reg_size = rsize;
+    out->v2m.phandle = (n->phandle.off && n->phandle.len == 4U) ? pcie_be32(b + n->phandle.off) : 0U;
+    out->v2m.msi_base_spi = (n->arm_msi_base_spi.off && n->arm_msi_base_spi.len == 4U)
+                                ? pcie_be32(b + n->arm_msi_base_spi.off)
+                                : 0U;
+    out->v2m.msi_num_spis = (n->arm_msi_num_spis.off && n->arm_msi_num_spis.len == 4U)
+                                ? pcie_be32(b + n->arm_msi_num_spis.off)
+                                : 0U;
+}
+
 static void finish_pcie_node(const struct pcie_fdt_view *fdt,
                              const struct pcie_fdt_node *n,
                              uint32_t depth, const struct pcie_bus_frame *stack,
                              struct aarch64_pcie_topology *out)
 {
     const uint8_t *b = fdt->b;
+    if (pcie_prop_contains(b, n->compatible, "arm,gic-v2m-frame")) {
+        finish_v2m_node(fdt, n, depth, stack, out);
+        return;
+    }
     if (!pcie_prop_contains(b, n->compatible, "pci-host-ecam-generic")) {
         return;
     }
@@ -556,6 +619,11 @@ static void finish_pcie_node(const struct pcie_fdt_view *fdt,
     desc->bus_end = bus_end;
     desc->reg_cpu_base = reg_cpu_base;
     desc->reg_size = reg_size;
+    if (n->msi_map.off && n->msi_map.len >= 16U && (n->msi_map.len % 16U) == 0U) {
+        desc->msi_phandle = pcie_be32(b + n->msi_map.off + 4U);
+    } else if (n->msi_parent.off && n->msi_parent.len >= 4U) {
+        desc->msi_phandle = pcie_be32(b + n->msi_parent.off);
+    }
 
     /* Decode 3-cell PCI ranges if present */
     if (n->ranges.off != 0U) {

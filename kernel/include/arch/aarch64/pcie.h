@@ -32,12 +32,22 @@ struct aarch64_pcie_intmap_entry {
     uint32_t gic_intid;
 };
 
+struct aarch64_pcie_v2m_desc {
+    bool valid;
+    uint32_t phandle;
+    uint64_t reg_cpu_base;
+    uint64_t reg_size;
+    uint32_t msi_base_spi;
+    uint32_t msi_num_spis;
+};
+
 struct aarch64_pcie_root_desc {
     bool valid;
     enum aarch64_pcie_ctrl_kind kind;
     uint16_t domain;
     uint8_t bus_start;
     uint8_t bus_end;
+    uint32_t msi_phandle;
     uint64_t reg_cpu_base;
     uint64_t reg_size;
     uint8_t range_count;
@@ -51,6 +61,7 @@ struct aarch64_pcie_root_desc {
 struct aarch64_pcie_topology {
     uint32_t root_count;
     struct aarch64_pcie_root_desc roots[AARCH64_PCIE_MAX_ROOTS];
+    struct aarch64_pcie_v2m_desc v2m;
 };
 
 int aarch64_dtb_parse_pcie(const void *blob, uint32_t size,

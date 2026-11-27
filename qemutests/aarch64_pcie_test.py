@@ -128,6 +128,8 @@ def check_ecam_virt(text: str) -> list[str]:
     failures = _has_fatal_or_panic(text)
     if not re.search(r"subsys:\s+init\s+device-boot[^\n]*ok", text):
         failures.append("missing 'subsys: init  device-boot ... ok' boot marker")
+    if "pcie: GICv2m @" not in text:
+        failures.append("missing 'pcie: GICv2m @' boot marker")
 
     if "0000:00:00.0" not in text:
         failures.append("missing '0000:00:00.0' in /dev/pci listing")
@@ -175,6 +177,8 @@ def check_ahci_virt(text: str) -> list[str]:
     failures = _has_fatal_or_panic(text)
     if not re.search(r"subsys:\s+init\s+device-boot[^\n]*ok", text):
         failures.append("missing 'subsys: init  device-boot ... ok' boot marker")
+    if "pcie: GICv2m @" not in text:
+        failures.append("missing 'pcie: GICv2m @' boot marker")
     for tag in ("__HDB_RC=0__", "__AHCI_LSPCI_RC=0__"):
         if not re.search(rf"(?m)^{re.escape(tag)}$", text):
             failures.append(f"missing standalone marker {tag!r}")
@@ -345,6 +349,7 @@ def self_test() -> None:
         pass
 
     good_pos_log = "\n\r".join([
+        "pcie: GICv2m @ 0x8020000 base_spi=80 num_spis=64",
         "subsys: init  device-boot ... ok",
         "0000:00:00.0",
         "0000:00:01.0",

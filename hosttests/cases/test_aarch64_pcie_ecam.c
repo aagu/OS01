@@ -504,6 +504,65 @@ static void case_ecam_mmio_window_bounds_and_isolation(void)
     assert_eq(-ENODEV, be->map_mmio(9, 0x12000000ULL, 0x1000ULL, &va));
 }
 
+static void case_ecam_gicv2m_msix(void)
+{
+    struct boot_context ctx;
+    struct test_efi_desc descs[1] = {
+        { .type = AARCH64_UEFI_MEM_CONVENTIONAL, .phys_start = 0x40000000u, .num_pages = 0x1000u }
+    };
+    setup_fixture(&ctx, descs, 1u);
+
+    /* Map fake GICv2m frame at ARCH_PAGE_OFFSET + 0x08020000 (inside 0x08000000 2 MiB block) */
+    const uint64_t v2m_blk_pa = 0x08000000ULL;
+    uint8_t *v2m_arena = mmap((void *)(uintptr_t)(ARCH_PAGE_OFFSET + v2m_blk_pa),
+                              0x200000ULL, PROT_READ | PROT_WRITE,
+                              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    assert_true(v2m_arena != MAP_FAILED);
+
+    /* MSI_TYPER @ 0x08020008: base_spi=80 (0x50 << 16), num_spis=64 (0x40) */
+    *(volatile uint32_t *)(v2m_arena + 0x20008ULL) = (80U << 16) | 64U;
+
+    mock_topo.root_count = 1;
+    mock_topo.roots[0].valid = true;
+    mock_topo.roots[0].kind = AARCH64_PCIE_CTRL_ECAM_GENERIC;
+    mock_topo.roots[0].domain = 0;
+    mock_topo.roots[0].bus_start = 0;
+    mock_topo.roots[0].bus_end = 1;
+    mock_topo.roots[0].msi_phandle = 0x8003U;
+    mock_topo.roots[0].reg_cpu_base = 0x10000000ULL;
+    mock_topo.roots[0].reg_size = 0x200000ULL;
+    mock_topo.roots[0].range_count = 1;
+    mock_topo.roots[0].ranges[0] = (struct aarch64_pcie_range){
+        .space = PCI_SPACE_MMIO32, .pci_base = 0x12000000ULL, .cpu_base = 0x12000000ULL, .size = 0x00100000ULL
+    };
+    mock_topo.v2m.valid = true;
+    mock_topo.v2m.phandle = 0x8003U;
+    mock_topo.v2m.reg_cpu_base = 0x08020000ULL;
+    mock_topo.v2m.reg_size = 0x1000ULL;
+
+    assert_eq(0, aarch64_pcie_prepare(&ctx));
+
+    struct pci_device dev;
+    memset(&dev, 0, sizeof(dev));
+    dev.domain = 0;
+
+    assert_eq(0x08020040U, arch_pci_msi_address(&dev));
+
+    void *tbl = NULL;
+    assert_eq(0, arch_pci_msix_map(&dev, 0x12041000ULL, &tbl));
+    assert_eq((uintptr_t)(ARCH_PAGE_OFFSET + 0x12041000ULL), (uintptr_t)tbl);
+    arch_pci_msix_unmap(&dev, tbl);
+
+    /* Unmapped MMIO range rejected */
+    assert_eq(-ENOENT, arch_pci_msix_map(&dev, 0x13000000ULL, &tbl));
+    assert_null(tbl);
+
+    /* Unknown domain rejected */
+    dev.domain = 1;
+    assert_eq(0U, arch_pci_msi_address(&dev));
+    assert_eq(-ENOTSUP, arch_pci_msix_map(&dev, 0x12041000ULL, &tbl));
+}
+
 int main(void)
 {
     TEST_SUITE("aarch64_pcie_ecam");
@@ -513,6 +572,7 @@ int main(void)
     run_isolated(case_ecam_access_ranges_and_errors);
     run_isolated(case_ecam_interrupt_map_routing);
     run_isolated(case_ecam_mmio_window_bounds_and_isolation);
+    run_isolated(case_ecam_gicv2m_msix);
     TEST_RESULTS();
     return __test_stats.failed ? 1 : 0;
 }

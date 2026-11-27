@@ -21,6 +21,15 @@ static struct aarch64_pcie_root_desc s_ready_roots[AARCH64_PCIE_MAX_ROOTS];
 static struct pci_root s_pci_roots[AARCH64_PCIE_MAX_ROOTS];
 static uint32_t s_ready_root_count = 0U;
 
+#define GICV2M_MSI_TYPER     0x008ULL
+#define GICV2M_MSI_SETSPI_NS 0x040ULL
+
+static bool s_v2m_ready = false;
+static uint64_t s_v2m_base = 0ULL;
+static uint32_t s_v2m_phandle = 0U;
+static uint32_t s_v2m_base_spi = 0U;
+static uint32_t s_v2m_num_spis = 0U;
+
 #if defined(__aarch64__) && !defined(AARCH64_PCIE_HOST_TEST)
 static inline uint32_t aarch64_pcie_mmio_read32(uintptr_t va)
 {
@@ -320,6 +329,11 @@ int aarch64_pcie_prepare(const struct boot_context *ctx)
 {
     s_ready_root_count = 0U;
     s_aarch64_pci_backend.root_count = 0U;
+    s_v2m_ready = false;
+    s_v2m_base = 0ULL;
+    s_v2m_phandle = 0U;
+    s_v2m_base_spi = 0U;
+    s_v2m_num_spis = 0U;
     for (uint32_t i = 0U; i < AARCH64_PCIE_MAX_ROOTS; i++) {
         s_ready_roots[i] = (struct aarch64_pcie_root_desc){0};
         s_pci_roots[i] = (struct pci_root){0};
@@ -422,8 +436,74 @@ int aarch64_pcie_prepare(const struct boot_context *ctx)
         aarch64_pcie_dsb_sy_isb();
         s_aarch64_pci_backend.root_count = s_ready_root_count;
         log_info("pcie: ready %u ECAM root(s)\n", (unsigned int)s_ready_root_count);
+
+        if (topo->v2m.valid && topo->v2m.reg_cpu_base <= 0xFFFFFFFFULL - GICV2M_MSI_SETSPI_NS) {
+            if (pcie_map_device_window_2m(0U, "GICv2m", topo->v2m.reg_cpu_base,
+                                           topo->v2m.reg_size, mmap_ptr, stride,
+                                           desc_count, ttbr1_root)) {
+                aarch64_pcie_dsb_sy_isb();
+                uint32_t typer = aarch64_pcie_mmio_read32(
+                    (uintptr_t)(ARCH_PAGE_OFFSET + topo->v2m.reg_cpu_base + GICV2M_MSI_TYPER));
+                uint32_t base_spi = topo->v2m.msi_base_spi ? topo->v2m.msi_base_spi
+                                                           : ((typer >> 16) & 0x3FFU);
+                uint32_t num_spis = topo->v2m.msi_num_spis ? topo->v2m.msi_num_spis
+                                                           : (typer & 0x3FFU);
+                if (num_spis > 0U && base_spi >= 32U && base_spi + num_spis <= 1020U) {
+                    s_v2m_ready = true;
+                    s_v2m_base = topo->v2m.reg_cpu_base;
+                    s_v2m_phandle = topo->v2m.phandle;
+                    s_v2m_base_spi = base_spi;
+                    s_v2m_num_spis = num_spis;
+                    log_info("pcie: GICv2m @ %lx base_spi=%u num_spis=%u\n",
+                             (unsigned long)s_v2m_base,
+                             (unsigned int)s_v2m_base_spi,
+                             (unsigned int)s_v2m_num_spis);
+                }
+            }
+        }
     }
     return 0;
+}
+
+static bool aarch64_v2m_matches_dev(const struct pci_device *pdev)
+{
+    if (!s_v2m_ready || !pdev) {
+        return false;
+    }
+    const struct aarch64_pcie_root_desc *r = find_ready_root(pdev->domain);
+    if (!r) {
+        return false;
+    }
+    if (r->msi_phandle != 0U && s_v2m_phandle != 0U && r->msi_phandle != s_v2m_phandle) {
+        return false;
+    }
+    return true;
+}
+
+int arch_pci_msix_map(const struct pci_device *pdev, uint64_t table_phys, void **out_virt)
+{
+    if (!pdev || !out_virt) {
+        return -EINVAL;
+    }
+    *out_virt = NULL;
+    if (!aarch64_v2m_matches_dev(pdev)) {
+        return -ENOTSUP;
+    }
+    return aarch64_pci_map_mmio(pdev->domain, table_phys, 16ULL, out_virt);
+}
+
+void arch_pci_msix_unmap(const struct pci_device *pdev, void *virt)
+{
+    (void)pdev;
+    (void)virt;
+}
+
+uint32_t arch_pci_msi_address(const struct pci_device *pdev)
+{
+    if (!aarch64_v2m_matches_dev(pdev)) {
+        return 0U;
+    }
+    return (uint32_t)(s_v2m_base + GICV2M_MSI_SETSPI_NS);
 }
 
 const struct pci_backend *arch_pci_backend(void)
