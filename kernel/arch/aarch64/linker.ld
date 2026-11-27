@@ -144,6 +144,14 @@ SECTIONS
         KEEP(*(.subsys_init))
         PROVIDE(__subsys_init_end = .);
     } :data
+
+    .pci_drivers : AT(ADDR(.pci_drivers) - _kernel_page_offset)
+    {
+        . = ALIGN(8);
+        PROVIDE(__pci_drivers_start = .);
+        KEEP(*(.pci_drivers))
+        PROVIDE(__pci_drivers_end = .);
+    } :data
     _data_end = .;
 
     . = ALIGN(0x1000);

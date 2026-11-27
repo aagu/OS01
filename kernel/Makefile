@@ -201,7 +201,10 @@ KERNEL_C_SOURCES += fs/boot.c fs/vfs.c fs/devfs.c fs/dcache.c \
                    sched/boot_stdio.c \
                    syscall/sys_fs.c syscall/sys_time.c \
                    syscall/sys_proc.c syscall/sys_resource.c \
-                   arch/thermal.c
+                   arch/thermal.c \
+                   device/core.c device/boot.c \
+                   bus/pci/core.c bus/pci/match.c \
+                   bus/pci/platform.c bus/pci/pci_devfs.c
 # Userspace gate (2026-11-19): kernel_start_userspace (boot-5
 # orchestration) links into the aarch64 product kernel now that the
 # userland build chain and the VFS-backed spawn exist.  console_init
@@ -309,7 +312,7 @@ endif
 # that compiles for BOTH architectures.
 # aarch64 collects its own driver/ (virtio_mmio platform facade); x86's driver/ dir
 # owns the x86-only MMIO/display device drivers (see mm-arch-boundaries).
-ARCH_SOURCE_DIRS := boot intr memory smp cpu platform runtime driver sched sync syscall
+ARCH_SOURCE_DIRS := boot intr memory smp cpu platform runtime driver sched sync syscall bus
 ifeq ($(ARCH),x86_64)
 ARCH_SOURCE_DIRS := intr memory smp cpu platform bus runtime sched fs sync syscall driver
 endif

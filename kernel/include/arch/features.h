@@ -65,7 +65,7 @@
 #if defined(__x86_64__)
 #define OS01_HAS_PCI        1
 #elif defined(__aarch64__)
-#define OS01_HAS_PCI        0
+#define OS01_HAS_PCI        1
 #else
 #error "Unsupported architecture for OS01_HAS_PCI default"
 #endif

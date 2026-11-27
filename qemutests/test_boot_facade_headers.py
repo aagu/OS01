@@ -109,7 +109,7 @@ class BootFacadeHeadersTests(unittest.TestCase):
         _Static_assert(OS01_HAS_VFS == 1, "aarch64 must have OS01_HAS_VFS == 1");
         _Static_assert(OS01_HAS_USERSPACE == 1, "aarch64 must have OS01_HAS_USERSPACE == 1");
         _Static_assert(OS01_HAS_NET == 0, "aarch64 must have OS01_HAS_NET == 0");
-        _Static_assert(OS01_HAS_PCI == 0, "aarch64 must have OS01_HAS_PCI == 0");
+        _Static_assert(OS01_HAS_PCI == 1, "aarch64 must have OS01_HAS_PCI == 1");
         _Static_assert(OS01_HAS_USB == 0, "aarch64 must have OS01_HAS_USB == 0");
         _Static_assert(ARCH_SELFTEST_EXPECTED_LATE == 10, "aarch64 default expected late count must be 10");
         """

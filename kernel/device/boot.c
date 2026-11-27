@@ -1,12 +1,15 @@
 /* kernel/device/boot.c — Phase 6 device coordinator and root check */
+#include <arch/features.h>
 #include <device/boot.h>
 #include <device/device.h>
 #include <device/test_fault.h>
 #include <block/blockdev.h>
 #include <bus/pci/pci.h>
 #include <bus/pci/driver.h>
+#if OS01_HAS_NET
 #include <net/net.h>
 #include <net/device.h>
+#endif
 #include <core/debug.h>
 #include <core/panic.h>
 #include <errno.h>
@@ -98,7 +101,9 @@ int device_boot_init(void)
      * the legacy net_hw_init() PCI scan / single-instance initcall path
      * that the coordinator used to call after binding (see git history:
      * that path is gone — drivers self-register via .pci_drivers). */
+#if OS01_HAS_NET
     net_device_init();
+#endif
 
     /* 4. Enumerate PCI devices */
     ret = pci_enumerate();
