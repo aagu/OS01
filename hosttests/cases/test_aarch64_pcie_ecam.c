@@ -1,0 +1,366 @@
+/* @os01-test
+ * id: test_aarch64_pcie_ecam
+ * layer: host
+ * subsystem: memory
+ * timing: strict
+ * tier: pr
+ * link: aarch64-pcie-ecam
+ * scenarios: [memory.aarch64.pcie_ecam]
+ */
+#include "test_framework.h"
+#include <arch/pci.h>
+#include <arch/aarch64/pcie.h>
+#include <arch/aarch64/page_table.h>
+#include <arch/aarch64/boot_direct_map.h>
+#include <arch/aarch64/handoff_layout.h>
+#include <arch/aarch64/boot_layout.h>
+#include <arch/aarch64/uefi_memory_map.h>
+#include <arch/aarch64/vmm_gate.h>
+#include <arch/mmu.h>
+#include <bus/pci/pci.h>
+#include <core/bootinfo.h>
+#include <log/log.h>
+#include <errno.h>
+#include <stdarg.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+static uint8_t *pt_arena;
+static size_t pt_arena_used;
+static const size_t pt_arena_size = 2u * 1024u * 1024u;
+
+static uint8_t *mmap_low;
+static uint8_t *ecam_arena;
+static uint64_t mock_root_pa;
+static uint64_t *mock_root;
+static unsigned ttbr1_read_count;
+
+static struct aarch64_pcie_topology mock_topo;
+
+int g_log_level = LOG_INFO;
+void _log_info_impl(const char *fmt, ...) { (void)fmt; }
+void _log_warn_impl(const char *fmt, ...) { (void)fmt; }
+
+struct test_efi_desc {
+    uint32_t type;
+    uint32_t pad;
+    uint64_t phys_start;
+    uint64_t virt_start;
+    uint64_t num_pages;
+    uint64_t attribute;
+};
+
+uint64_t alloc_4k_page(void)
+{
+    if (!pt_arena || pt_arena_used + 0x1000u > pt_arena_size) {
+        return 0;
+    }
+    uint64_t pa = pt_arena_used + 0x100000u;
+    memset(pt_arena + pt_arena_used, 0, 0x1000u);
+    pt_arena_used += 0x1000u;
+    return pa;
+}
+
+void free_4k_page(uint64_t pa) { (void)pa; }
+
+uint64_t aarch64_read_ttbr1(void)
+{
+    ttbr1_read_count++;
+    return mock_root_pa;
+}
+
+void tlb_invalidate_local(uint64_t va) { (void)va; }
+void tlb_shootdown_all(uint64_t va) { (void)va; }
+
+const struct aarch64_pcie_topology *aarch64_pcie_topology_get(void)
+{
+    return &mock_topo;
+}
+
+static void setup_fixture(struct boot_context *ctx,
+                          const struct test_efi_desc *descs,
+                          uint32_t desc_count)
+{
+    pt_arena = mmap((void *)(uintptr_t)(ARCH_PAGE_OFFSET + 0x100000u),
+                    pt_arena_size, PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    assert_true(pt_arena != MAP_FAILED);
+    pt_arena_used = 0;
+
+    mmap_low = mmap((void *)(uintptr_t)0x20000000u, 0x10000u,
+                    PROT_READ | PROT_WRITE,
+                    MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    assert_true(mmap_low != MAP_FAILED);
+    if (descs && desc_count > 0) {
+        memcpy(mmap_low, descs, (size_t)desc_count * sizeof(*descs));
+    }
+
+    aarch64_pt_init_locks();
+    mock_root_pa = alloc_4k_page();
+    mock_root = (uint64_t *)(uintptr_t)(mock_root_pa + ARCH_PAGE_OFFSET);
+    ttbr1_read_count = 0;
+    memset(&mock_topo, 0, sizeof(mock_topo));
+
+    boot_context_init(ctx);
+    ctx->flags = BOOT_CONTEXT_HAS_MEMORY_MAP;
+    ctx->memory.entries = (uint64_t)(uintptr_t)mmap_low;
+    ctx->memory.entry_size = sizeof(*descs);
+    ctx->memory.entry_count = desc_count;
+    ctx->memory.format = BOOT_MEMORY_FORMAT_UEFI_RAW;
+    ctx->memory.descriptor_version = 1;
+}
+
+static void run_isolated(void (*fn)(void))
+{
+    pid_t pid = fork();
+    assert_true(pid >= 0);
+    if (pid == 0) {
+        fn();
+        _exit(__test_stats.failed ? 1 : 0);
+    }
+    int status = 0;
+    assert_eq(pid, waitpid(pid, &status, 0));
+    assert_true(WIFEXITED(status) && WEXITSTATUS(status) == 0);
+}
+
+static void case_zero_roots_graceful_fallback(void)
+{
+    struct boot_context ctx;
+    struct test_efi_desc descs[1] = {
+        { .type = AARCH64_UEFI_MEM_CONVENTIONAL, .phys_start = 0x40000000u, .num_pages = 0x1000u }
+    };
+    setup_fixture(&ctx, descs, 1u);
+    assert_eq(0, aarch64_pcie_prepare(&ctx));
+    assert_eq(0u, ttbr1_read_count);
+    assert_null(arch_pci_backend());
+}
+
+static void case_m0_memory_map_bounds(void)
+{
+    struct boot_context ctx;
+    struct test_efi_desc descs[1] = {
+        { .type = AARCH64_UEFI_MEM_CONVENTIONAL, .phys_start = 0x40000000u, .num_pages = 0x1000u }
+    };
+    setup_fixture(&ctx, descs, 1u);
+    mock_topo.root_count = 1;
+    mock_topo.roots[0].valid = true;
+    mock_topo.roots[0].kind = AARCH64_PCIE_CTRL_ECAM_GENERIC;
+    mock_topo.roots[0].domain = 0;
+    mock_topo.roots[0].bus_start = 0;
+    mock_topo.roots[0].bus_end = 1;
+    mock_topo.roots[0].reg_cpu_base = 0x10000000ULL;
+    mock_topo.roots[0].reg_size = 0x200000ULL;
+
+    /* 1. entries == 0 */
+    ctx.memory.entries = 0;
+    assert_eq(0, aarch64_pcie_prepare(&ctx));
+    assert_null(arch_pci_backend());
+
+    /* 2. entry_size < AARCH64_UEFI_MEM_DESC_MIN_SIZE */
+    ctx.memory.entries = (uint64_t)(uintptr_t)mmap_low;
+    ctx.memory.entry_size = AARCH64_UEFI_MEM_DESC_MIN_SIZE - 4u;
+    assert_eq(0, aarch64_pcie_prepare(&ctx));
+    assert_null(arch_pci_backend());
+
+    /* 3. count * stride overflow */
+    ctx.memory.entry_size = sizeof(*descs);
+    ctx.memory.entry_count = UINT32_MAX;
+    ctx.memory.entry_size = 0x10000000u;
+    assert_eq(0, aarch64_pcie_prepare(&ctx));
+    assert_null(arch_pci_backend());
+
+    /* 4. entries + map_bytes overflow */
+    ctx.memory.entries = UINT64_MAX - 16ULL;
+    ctx.memory.entry_size = sizeof(*descs);
+    ctx.memory.entry_count = 1u;
+    assert_eq(0, aarch64_pcie_prepare(&ctx));
+    assert_null(arch_pci_backend());
+
+    /* 5. map_end > AARCH64_BOOT_MAP_END */
+    ctx.memory.entries = (uint64_t)AARCH64_BOOT_MAP_END - 8ULL;
+    ctx.memory.entry_size = sizeof(*descs);
+    ctx.memory.entry_count = 1u;
+    assert_eq(0, aarch64_pcie_prepare(&ctx));
+    assert_null(arch_pci_backend());
+
+    /* 6. Overlap with Boot Block B */
+    ctx.memory.entries = (uint64_t)AARCH64_BOOT_BLOCK_BASE;
+    ctx.memory.entry_size = sizeof(*descs);
+    ctx.memory.entry_count = 1u;
+    assert_eq(0, aarch64_pcie_prepare(&ctx));
+    assert_null(arch_pci_backend());
+}
+
+static void case_ram_pa_limit_and_partial_conflict(void)
+{
+    struct boot_context ctx;
+    struct test_efi_desc descs[2] = {
+        { .type = AARCH64_UEFI_MEM_CONVENTIONAL, .phys_start = 0x40000000u, .num_pages = 0x1000u },
+        { .type = AARCH64_UEFI_MEM_CONVENTIONAL, .phys_start = 0x12000000u, .num_pages = 1u },
+    };
+    setup_fixture(&ctx, descs, 2u);
+
+    /* Root 0: overlaps RAM at 0x12000000 */
+    mock_topo.roots[0].valid = true;
+    mock_topo.roots[0].kind = AARCH64_PCIE_CTRL_ECAM_GENERIC;
+    mock_topo.roots[0].domain = 0;
+    mock_topo.roots[0].bus_start = 0;
+    mock_topo.roots[0].bus_end = 0;
+    mock_topo.roots[0].reg_cpu_base = 0x12000000ULL;
+    mock_topo.roots[0].reg_size = 0x100000ULL;
+
+    /* Root 1: >= AARCH64_PT_PA_LIMIT (1 TiB) */
+    mock_topo.roots[1].valid = true;
+    mock_topo.roots[1].kind = AARCH64_PCIE_CTRL_ECAM_GENERIC;
+    mock_topo.roots[1].domain = 1;
+    mock_topo.roots[1].bus_start = 0;
+    mock_topo.roots[1].bus_end = 0;
+    mock_topo.roots[1].reg_cpu_base = AARCH64_PT_PA_LIMIT;
+    mock_topo.roots[1].reg_size = 0x100000ULL;
+
+    /* Root 2: 4 MiB spanning 2 blocks (0x24000000 and 0x24200000), 2nd block conflicts with Normal RAM block */
+    assert_eq(0, aarch64_pt_map_2m_block(mock_root, ARCH_PAGE_OFFSET + 0x24200000ULL,
+                                         0x24200000ULL, AARCH64_PT_KERNEL_RW));
+    mock_topo.roots[2].valid = true;
+    mock_topo.roots[2].kind = AARCH64_PCIE_CTRL_ECAM_GENERIC;
+    mock_topo.roots[2].domain = 2;
+    mock_topo.roots[2].bus_start = 0;
+    mock_topo.roots[2].bus_end = 3;
+    mock_topo.roots[2].reg_cpu_base = 0x24000000ULL;
+    mock_topo.roots[2].reg_size = 0x400000ULL;
+
+    /* Root 3: clean 2 MiB root at 0x28000000 -> remains enabled */
+    mock_topo.roots[3].valid = true;
+    mock_topo.roots[3].kind = AARCH64_PCIE_CTRL_ECAM_GENERIC;
+    mock_topo.roots[3].domain = 3;
+    mock_topo.roots[3].bus_start = 0;
+    mock_topo.roots[3].bus_end = 1;
+    mock_topo.roots[3].reg_cpu_base = 0x28000000ULL;
+    mock_topo.roots[3].reg_size = 0x200000ULL;
+    mock_topo.root_count = 4;
+
+    assert_eq(0, aarch64_pcie_prepare(&ctx));
+
+    const struct pci_backend *be = arch_pci_backend();
+    assert_not_null(be);
+    assert_eq(1u, be->root_count);
+    assert_eq(3u, be->roots[0].domain);
+
+    /* Root 2 first block mapped safely, second block untouched Normal RAM */
+    uint64_t desc = 0;
+    assert_eq(0, aarch64_pt_read_l2_desc(mock_root, ARCH_PAGE_OFFSET + 0x24000000ULL, &desc));
+    assert_eq(aarch64_pt_encode_block_desc(0x24000000ULL, AARCH64_PT_KERNEL_RW | AARCH64_PT_DEVICE, 0), desc);
+    assert_eq(0, aarch64_pt_read_l2_desc(mock_root, ARCH_PAGE_OFFSET + 0x24200000ULL, &desc));
+    assert_eq(aarch64_pt_encode_block_desc(0x24200000ULL, AARCH64_PT_KERNEL_RW, 0), desc);
+}
+
+static void case_ecam_access_ranges_and_errors(void)
+{
+    struct boot_context ctx;
+    struct test_efi_desc descs[1] = {
+        { .type = AARCH64_UEFI_MEM_CONVENTIONAL, .phys_start = 0x40000000u, .num_pages = 0x1000u }
+    };
+    setup_fixture(&ctx, descs, 1u);
+
+    /* Map fake ECAM backing at ARCH_PAGE_OFFSET + 0x10000000 (2 MiB, buses 2..3) */
+    const uint64_t ecam_pa = 0x10000000ULL;
+    ecam_arena = mmap((void *)(uintptr_t)(ARCH_PAGE_OFFSET + ecam_pa),
+                      0x200000ULL, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    assert_true(ecam_arena != MAP_FAILED);
+
+    mock_topo.root_count = 1;
+    mock_topo.roots[0].valid = true;
+    mock_topo.roots[0].kind = AARCH64_PCIE_CTRL_ECAM_GENERIC;
+    mock_topo.roots[0].domain = 0;
+    mock_topo.roots[0].bus_start = 2;
+    mock_topo.roots[0].bus_end = 3;
+    mock_topo.roots[0].reg_cpu_base = ecam_pa;
+    mock_topo.roots[0].reg_size = 0x200000ULL;
+    mock_topo.roots[0].range_count = 3;
+    mock_topo.roots[0].ranges[0] = (struct aarch64_pcie_range){
+        .space = PCI_SPACE_IO, .prefetchable = false,
+        .pci_base = 0x0ULL, .cpu_base = 0x3eff0000ULL, .size = 0x10000ULL
+    };
+    mock_topo.roots[0].ranges[1] = (struct aarch64_pcie_range){
+        .space = PCI_SPACE_MMIO32, .prefetchable = false,
+        .pci_base = 0x10000000ULL, .cpu_base = 0x10000000ULL, .size = 0x2eff0000ULL
+    };
+    mock_topo.roots[0].ranges[2] = (struct aarch64_pcie_range){
+        .space = PCI_SPACE_MMIO64, .prefetchable = true,
+        .pci_base = 0x8000000000ULL, .cpu_base = 0x8000000000ULL, .size = 0x8000000000ULL
+    };
+
+    assert_eq(0, aarch64_pcie_prepare(&ctx));
+
+    /* Verify Device 2 MiB descriptor installed before SMP */
+    uint64_t desc = 0;
+    assert_eq(0, aarch64_pt_read_l2_desc(mock_root, ARCH_PAGE_OFFSET + ecam_pa, &desc));
+    assert_eq(aarch64_pt_encode_block_desc(ecam_pa, AARCH64_PT_KERNEL_RW | AARCH64_PT_DEVICE, 0), desc);
+
+    const struct pci_backend *be = arch_pci_backend();
+    assert_not_null(be);
+    assert_eq(4092u, be->max_config_offset);
+
+    /* Verify ECAM offset encoding for bus=3 (bus - bus_start = 1), slot=4, fn=2, offset=0xFFC */
+    uint64_t expected_off = (1ULL << 20) | (4ULL << 15) | (2ULL << 12) | 0xFFCU;
+    *(volatile uint32_t *)(ecam_arena + expected_off) = 0x12345678U;
+
+    enum pci_error_scope scope = PCI_ERROR_ROOT;
+    uint32_t val = 0;
+    assert_eq(0, be->read32(0, 3, 4, 2, 0xFFC, &val, &scope));
+    assert_eq(0x12345678U, val);
+    assert_eq(PCI_ERROR_FUNCTION, scope);
+
+    assert_eq(0, be->write32(0, 3, 4, 2, 0x100, 0xCAFEBABEU, &scope));
+    uint64_t off100 = (1ULL << 20) | (4ULL << 15) | (2ULL << 12) | 0x100ULL;
+    assert_eq(0xCAFEBABEU, *(volatile uint32_t *)(ecam_arena + off100));
+
+    /* Error scopes */
+    assert_eq(-ENODEV, be->read32(1, 3, 4, 2, 0, &val, &scope));
+    assert_eq(PCI_ERROR_ROOT, scope);
+    assert_eq(-EINVAL, be->read32(0, 1, 0, 0, 0, &val, &scope)); /* bus < bus_start */
+    assert_eq(PCI_ERROR_FUNCTION, scope);
+    assert_eq(-EINVAL, be->read32(0, 4, 0, 0, 0, &val, &scope)); /* bus > bus_end */
+    assert_eq(-EINVAL, be->read32(0, 2, 32, 0, 0, &val, &scope));
+    assert_eq(-EINVAL, be->read32(0, 2, 0, 8, 0, &val, &scope));
+    assert_eq(-EINVAL, be->read32(0, 2, 0, 0, 4096, &val, &scope));
+    assert_eq(-EINVAL, be->read32(0, 2, 0, 0, 0x102, &val, &scope));
+
+    /* route_gsi == -ENOTSUP */
+    struct pci_device dummy_dev;
+    memset(&dummy_dev, 0, sizeof(dummy_dev));
+    assert_eq(-ENOTSUP, be->route_gsi(&dummy_dev, &val));
+
+    /* bus_range */
+    uint8_t bs = 0, be_num = 0;
+    assert_eq(0, be->bus_range(0, &bs, &be_num));
+    assert_eq(2, bs);
+    assert_eq(3, be_num);
+    assert_eq(-ENODEV, be->bus_range(1, &bs, &be_num));
+
+    /* translate_resource for IO / MMIO32 / MMIO64 */
+    uint64_t cpu_pa = 0;
+    assert_eq(0, be->translate_resource(0, PCI_SPACE_IO, 0x1000ULL, 0, &cpu_pa));
+    assert_eq(0x3eff1000ULL, cpu_pa);
+    assert_eq(0, be->translate_resource(0, PCI_SPACE_MMIO32, 0x10004000ULL, 0x1000ULL, &cpu_pa));
+    assert_eq(0x10004000ULL, cpu_pa);
+    assert_eq(0, be->translate_resource(0, PCI_SPACE_MMIO64, 0x8000001000ULL, 0, &cpu_pa));
+    assert_eq(0x8000001000ULL, cpu_pa);
+    assert_eq(-ENOENT, be->translate_resource(0, PCI_SPACE_MMIO32, 0x70000000ULL, 0, &cpu_pa));
+    assert_eq(-EOVERFLOW, be->translate_resource(0, PCI_SPACE_MMIO64, UINT64_MAX - 4ULL, 16ULL, &cpu_pa));
+}
+
+int main(void)
+{
+    TEST_SUITE("aarch64_pcie_ecam");
+    run_isolated(case_zero_roots_graceful_fallback);
+    run_isolated(case_m0_memory_map_bounds);
+    run_isolated(case_ram_pa_limit_and_partial_conflict);
+    run_isolated(case_ecam_access_ranges_and_errors);
+    TEST_RESULTS();
+    return __test_stats.failed ? 1 : 0;
+}

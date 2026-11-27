@@ -1189,3 +1189,35 @@ LINK_GROUP_aarch64-dtb-pcie := \
 .PHONY: test-aarch64-dtb-pcie
 test-aarch64-dtb-pcie: $(TEST_BLD)/test_aarch64_dtb_pcie.elf
 	$<
+
+# AArch64 PCIe ECAM MMIO pre-mapping & backend (Phase-1)
+$(TEST_BLD)/aarch64_pcie_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/bus/pci.c \
+		$(TESTS_DIR)/kernel/include/arch/pci.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/pcie.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/page_table.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/boot_direct_map.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/uefi_memory_map.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/handoff_layout.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/boot_layout.h \
+		$(TESTS_DIR)/kernel/include/core/bootinfo.h \
+		$(TESTS_DIR)/kernel/include/memory/pmm.h \
+		$(TESTS_DIR)/kernel/include/log/log.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) -DAARCH64_PCIE_HOST_TEST=1 -c $< -o $@
+
+LINK_CFLAGS_aarch64-pcie-ecam = $(HOST_CFLAGS) -DOS01_SELFTEST=1 \
+	-I$(TEST_MOCK)/page_table_aarch64_include \
+	$(KERNEL_INC) -idirafter $(TESTS_DIR)/libc/include \
+	-DAARCH64_PCIE_HOST_TEST=1 $(FRAMEWORK_INC)
+LINK_GROUP_aarch64-pcie-ecam := \
+	$(TEST_BLD)/aarch64_pcie_production.o \
+	$(TEST_BLD)/aarch64_pt_production.o \
+	$(TEST_BLD)/vmm_gate_production.o \
+	$(TEST_BLD)/vmm_gate_test_stubs.o \
+	$(TEST_BLD)/serial_sink_stub.o \
+	$(LIBC_OBJS)
+
+.PHONY: test-aarch64-pcie-ecam
+test-aarch64-pcie-ecam: $(TEST_BLD)/test_aarch64_pcie_ecam.elf
+	$<

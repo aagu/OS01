@@ -42,6 +42,12 @@ $(TEST_BLD)/test_aarch64_handoff_cache.o: $(TEST_CASES)/test_aarch64_handoff_cac
 $(TEST_BLD)/test_aarch64_handoff_cache.elf: $(TEST_BLD)/test_aarch64_handoff_cache.o $(LINK_GROUP_aarch64-uefi-boot-memory)
 	$(HOST_CC) $(LINK_LDFLAGS_aarch64-uefi-boot-memory) -o $@ $^
 
+$(TEST_BLD)/test_aarch64_pcie_ecam.o: $(TEST_CASES)/test_aarch64_pcie_ecam.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_aarch64-pcie-ecam)),$(LINK_CFLAGS_aarch64-pcie-ecam),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_aarch64_pcie_ecam.elf: $(TEST_BLD)/test_aarch64_pcie_ecam.o $(LINK_GROUP_aarch64-pcie-ecam)
+	$(HOST_CC) $(LINK_LDFLAGS_aarch64-pcie-ecam) -o $@ $^
+
 $(TEST_BLD)/test_aarch64_uefi_boot_memory.o: $(TEST_CASES)/test_aarch64_uefi_boot_memory.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_aarch64-uefi-boot-memory)),$(LINK_CFLAGS_aarch64-uefi-boot-memory),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@

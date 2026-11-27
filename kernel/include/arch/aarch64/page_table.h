@@ -41,6 +41,11 @@
  * Used by kernel/arch/aarch64/runtime/printk_fb.c::frame_buffer_init. */
 #define AARCH64_FB_VIRT_BASE UINT64_C(0xffff900000000000)
 
+/* 40-bit IPS physical address ceiling (1 TiB). */
+#ifndef AARCH64_PT_PA_LIMIT
+#define AARCH64_PT_PA_LIMIT UINT64_C(0x10000000000)
+#endif
+
 /* TTBR0_EL1 layout. The base address field is bits [47:12]; the
  * permitted non-base bits are the ASID (bits [63:48]) and the CnP bit
  * (bit 0). All other bits must read as zero on the live TTBR. Exposed

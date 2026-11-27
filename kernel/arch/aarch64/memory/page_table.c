@@ -48,7 +48,9 @@
  * address field for any level uses bits [47:12]; with IPS=40 bits
  * [47:40] are RES0 so the effective output PA is bits [39:12]. */
 #define AARCH64_PT_PA_MASK     UINT64_C(0xffffffffff000)   /* bits [39:12] = PA */
+#ifndef AARCH64_PT_PA_LIMIT
 #define AARCH64_PT_PA_LIMIT    UINT64_C(0x10000000000)     /* 1 TiB */
+#endif
 #define AARCH64_PT_VA_LIMIT_LO UINT64_C(0x0001000000000000) /* 2^48 */
 #define AARCH64_PT_VA_HI_BASE  UINT64_C(0xffff000000000000)
 

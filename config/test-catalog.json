@@ -1256,6 +1256,19 @@
       }
     },
     {
+      "id": "test_aarch64_pcie_ecam",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [
+        "memory.aarch64.pcie_ecam"
+      ],
+      "link": "aarch64-pcie-ecam",
+      "source": "hosttests/cases/test_aarch64_pcie_ecam.c"
+    },
+    {
       "kind": "host_test",
       "id": "test_aarch64_pt_2m_block",
       "layer": "host",
