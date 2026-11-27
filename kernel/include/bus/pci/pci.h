@@ -41,6 +41,8 @@ struct pci_bar {
     uint64_t address;
     bool valid;
     uint8_t index;
+    uint64_t bus_address;
+    bool translated;
 };
 
 struct pci_device_id {

@@ -15,6 +15,9 @@
 #ifndef _KERNEL_DEBUG_H
 #define _KERNEL_DEBUG_H
 #endif
+#ifndef _KERNEL_LOG_H
+#define _KERNEL_LOG_H
+#endif
 
 #ifndef debug_pci
 #define debug_pci(...) do {} while (0)

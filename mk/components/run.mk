@@ -937,7 +937,7 @@ test-aarch64-sched-tick-host:
 $(eval $(call host_case_group,test-m1-host,m1-layout m1-reservation m1-arena m1-tree m1-contract-x86 m1-install m1-publish,rootfs,CASE,,m1-layout:test-m1-layout m1-reservation:test-m1-reservation m1-arena:test-m1-arena m1-tree:test-m1-tree m1-contract-x86:test-m1-contract-x86 m1-install:test-m1-install m1-publish:test-m1-publish))
 
 # ARCH-9 driver model host tests.
-$(eval $(call host_case_group,test-arch9-host,block pci backend ahci device-boot net lwip e1000 virtio socket,rootfs,CASE,,block:test-block pci:test-pci backend:test-backend ahci:test-ahci device-boot:test-device-boot net:test-net lwip:test-lwip e1000:test-e1000 virtio:test-virtio socket:test-socket))
+$(eval $(call host_case_group,test-arch9-host,block pci pci-extended backend ahci device-boot net lwip e1000 virtio socket,rootfs,CASE,,block:test-block pci:test-pci pci-extended:test-pci-extended-config backend:test-backend ahci:test-ahci device-boot:test-device-boot net:test-net lwip:test-lwip e1000:test-e1000 virtio:test-virtio socket:test-socket))
 
 # ── Resolution Switcher host tests ───────────────────────────
 # RES_CASE accepts uapi, state, writers, bga, ioctl, pty, terminal,

@@ -2,6 +2,7 @@
 #include <bus/pci/pci.h>
 #include <bus/pci/driver.h>
 #include <arch/pci.h>
+#include <log/log.h>
 #include <memory/slab.h>
 #include <stdio.h>
 #include <string.h>
@@ -230,26 +231,28 @@ static int pci_scan_function(const struct pci_backend *backend, uint16_t domain,
                 pdev->bars[bar_idx].kind = PCI_BAR_NONE;
                 pdev->bars[bar_idx].valid = false;
                 pdev->bars[bar_idx].address = 0;
+                pdev->bars[bar_idx].bus_address = 0;
+                pdev->bars[bar_idx].translated = false;
                 pdev->bars[bar_idx].index = bar_idx;
                 continue;
             }
+
+            enum pci_bar_kind kind = PCI_BAR_NONE;
+            uint8_t space = 0;
+            uint64_t pci_addr = 0;
+            bool is_64 = false;
+
             if (bar_val & 0x01) {
-                /* I/O BAR */
-                pdev->bars[bar_idx].kind = PCI_BAR_IO;
-                pdev->bars[bar_idx].address = bar_val & ~0x03ULL;
-                pdev->bars[bar_idx].valid = true;
-                pdev->bars[bar_idx].index = bar_idx;
+                kind = PCI_BAR_IO;
+                space = PCI_SPACE_IO;
+                pci_addr = bar_val & ~0x03ULL;
             } else {
-                /* Memory BAR */
                 uint8_t mem_type = (bar_val >> 1) & 0x03;
                 if (mem_type == 0x00) {
-                    /* 32-bit MMIO */
-                    pdev->bars[bar_idx].kind = PCI_BAR_MMIO32;
-                    pdev->bars[bar_idx].address = bar_val & ~0x0FULL;
-                    pdev->bars[bar_idx].valid = true;
-                    pdev->bars[bar_idx].index = bar_idx;
+                    kind = PCI_BAR_MMIO32;
+                    space = PCI_SPACE_MMIO32;
+                    pci_addr = bar_val & ~0x0FULL;
                 } else if (mem_type == 0x02) {
-                    /* 64-bit MMIO */
                     if (bar_idx >= 5) {
                         /* 64-bit BAR at BAR5 is invalid: no upper slot */
                         bad_bar = true;
@@ -260,24 +263,87 @@ static int pci_scan_function(const struct pci_backend *backend, uint16_t domain,
                         bad_bar = true;
                         break;
                     }
-                    uint64_t full_addr = ((uint64_t)upper_val << 32) | (bar_val & ~0x0FULL);
-                    pdev->bars[bar_idx].kind = PCI_BAR_MMIO64;
-                    pdev->bars[bar_idx].address = full_addr;
-                    pdev->bars[bar_idx].valid = true;
-                    pdev->bars[bar_idx].index = bar_idx;
-
-                    /* Upper slot is not independently usable */
-                    pdev->bars[bar_idx + 1].kind = PCI_BAR_UPPER;
-                    pdev->bars[bar_idx + 1].address = full_addr;
-                    pdev->bars[bar_idx + 1].valid = false;
-                    pdev->bars[bar_idx + 1].index = bar_idx + 1;
-
-                    bar_idx++;
+                    kind = PCI_BAR_MMIO64;
+                    space = PCI_SPACE_MMIO64;
+                    pci_addr = ((uint64_t)upper_val << 32) | (bar_val & ~0x0FULL);
+                    is_64 = true;
                 } else {
                     /* Reserved type (0x01 or 0x03) */
                     bad_bar = true;
                     break;
                 }
+            }
+
+            uint64_t cpu_addr = pci_addr;
+            bool translated = false;
+            if (backend->translate_resource) {
+                int trc = backend->translate_resource(domain, space, pci_addr, 0, &cpu_addr);
+                if (trc != 0 && kind == PCI_BAR_MMIO64 && pci_addr < 0x100000000ULL) {
+                    trc = backend->translate_resource(domain, PCI_SPACE_MMIO32, pci_addr, 0, &cpu_addr);
+                }
+                if (trc != 0) {
+                    pdev->bars[bar_idx].kind = PCI_BAR_NONE;
+                    pdev->bars[bar_idx].valid = false;
+                    pdev->bars[bar_idx].address = 0;
+                    pdev->bars[bar_idx].bus_address = 0;
+                    pdev->bars[bar_idx].translated = false;
+                    pdev->bars[bar_idx].index = bar_idx;
+                    if (is_64) {
+                        pdev->bars[bar_idx + 1].kind = PCI_BAR_NONE;
+                        pdev->bars[bar_idx + 1].valid = false;
+                        pdev->bars[bar_idx + 1].address = 0;
+                        pdev->bars[bar_idx + 1].bus_address = 0;
+                        pdev->bars[bar_idx + 1].translated = false;
+                        pdev->bars[bar_idx + 1].index = bar_idx + 1;
+                        bar_idx++;
+                    }
+                    if (pci_addr == 0) {
+                        /* Unprogrammed MMIO/IO BAR (e.g. 0x4/0x8/0xC with upper=0) */
+                        continue;
+                    }
+                    log_warn("pci: %lu:%lu:%lu.%lu BAR%u translate failed (addr=%lx rc=%d)\n",
+                             (unsigned long)domain, (unsigned long)bus,
+                             (unsigned long)slot, (unsigned long)fn,
+                             (unsigned int)bar_idx, (unsigned long)pci_addr, trc);
+                    bad_bar = true;
+                    break;
+                }
+                translated = true;
+            } else if (pci_addr == 0) {
+                pdev->bars[bar_idx].kind = PCI_BAR_NONE;
+                pdev->bars[bar_idx].valid = false;
+                pdev->bars[bar_idx].address = 0;
+                pdev->bars[bar_idx].bus_address = 0;
+                pdev->bars[bar_idx].translated = false;
+                pdev->bars[bar_idx].index = bar_idx;
+                if (is_64) {
+                    pdev->bars[bar_idx + 1].kind = PCI_BAR_NONE;
+                    pdev->bars[bar_idx + 1].valid = false;
+                    pdev->bars[bar_idx + 1].address = 0;
+                    pdev->bars[bar_idx + 1].bus_address = 0;
+                    pdev->bars[bar_idx + 1].translated = false;
+                    pdev->bars[bar_idx + 1].index = bar_idx + 1;
+                    bar_idx++;
+                }
+                continue;
+            }
+
+            pdev->bars[bar_idx].kind = kind;
+            pdev->bars[bar_idx].address = cpu_addr;
+            pdev->bars[bar_idx].bus_address = pci_addr;
+            pdev->bars[bar_idx].translated = translated;
+            pdev->bars[bar_idx].valid = true;
+            pdev->bars[bar_idx].index = bar_idx;
+
+            if (is_64) {
+                /* Upper slot is not independently usable */
+                pdev->bars[bar_idx + 1].kind = PCI_BAR_UPPER;
+                pdev->bars[bar_idx + 1].address = cpu_addr;
+                pdev->bars[bar_idx + 1].bus_address = pci_addr;
+                pdev->bars[bar_idx + 1].translated = translated;
+                pdev->bars[bar_idx + 1].valid = false;
+                pdev->bars[bar_idx + 1].index = bar_idx + 1;
+                bar_idx++;
             }
         }
 
@@ -296,8 +362,21 @@ static int pci_scan_function(const struct pci_backend *backend, uint16_t domain,
         } else {
             uint8_t secondary = (bus_reg >> 8) & 0xFF;
             uint8_t subordinate = (bus_reg >> 16) & 0xFF;
-            if (secondary == 0 || secondary == bus || secondary > subordinate) {
+            bool bad_bridge = (secondary == 0 || secondary <= bus || secondary > subordinate);
+            if (!bad_bridge && backend->bus_range) {
+                uint8_t dom_start = 0;
+                uint8_t dom_end = 255;
+                if (backend->bus_range(domain, &dom_start, &dom_end) != 0 ||
+                    secondary < dom_start || subordinate > dom_end) {
+                    bad_bridge = true;
+                }
+            }
+            if (bad_bridge) {
                 /* Invalid bridge, isolate branch */
+                log_warn("pci: %lu:%lu:%lu.%lu invalid bridge bus range sec=%u sub=%u\n",
+                         (unsigned long)domain, (unsigned long)bus,
+                         (unsigned long)slot, (unsigned long)fn,
+                         (unsigned int)secondary, (unsigned int)subordinate);
                 pdev->enum_error = true;
             } else {
                 int ins_rc = insert_device_sorted(pdev);
@@ -561,7 +640,11 @@ int pci_bar_window(const struct pci_device *pdev, unsigned int index, enum pci_b
     }
 
     if (required == PCI_BAR_MMIO32) {
-        if (bar->address + offset + length > 0x100000000ULL) {
+        const uint64_t check_base = bar->translated ? bar->bus_address : bar->address;
+        if (check_base + offset + length < check_base) {
+            return -EINVAL;
+        }
+        if (check_base + offset + length > 0x100000000ULL) {
             return -EOVERFLOW;
         }
     }
@@ -570,14 +653,25 @@ int pci_bar_window(const struct pci_device *pdev, unsigned int index, enum pci_b
     return 0;
 }
 
+static inline uint16_t pci_config_limit(const struct pci_backend *backend)
+{
+    return (backend && backend->max_config_offset > 252U &&
+            backend->max_config_offset <= 4092U)
+               ? backend->max_config_offset
+               : 252U;
+}
+
 int pci_config_read32(struct pci_device *pdev, uint16_t offset, uint32_t *out)
 {
-    if (!pdev || !out || (offset & 3) != 0 || offset > 252) {
+    if (!pdev || !out || (offset & 3U) != 0) {
         return -EINVAL;
     }
     const struct pci_backend *backend = arch_pci_backend();
     if (!backend || !backend->read32) {
         return BUS_UNAVAILABLE;
+    }
+    if (offset > pci_config_limit(backend)) {
+        return -EINVAL;
     }
     enum pci_error_scope scope = PCI_ERROR_FUNCTION;
     return backend->read32(pdev->domain, pdev->bus, pdev->slot, pdev->fn, offset, out, &scope);
@@ -585,12 +679,15 @@ int pci_config_read32(struct pci_device *pdev, uint16_t offset, uint32_t *out)
 
 int pci_config_write32(struct pci_device *pdev, uint16_t offset, uint32_t value)
 {
-    if (!pdev || (offset & 3) != 0 || offset > 252) {
+    if (!pdev || (offset & 3U) != 0) {
         return -EINVAL;
     }
     const struct pci_backend *backend = arch_pci_backend();
     if (!backend || !backend->write32) {
         return BUS_UNAVAILABLE;
+    }
+    if (offset > pci_config_limit(backend)) {
+        return -EINVAL;
     }
     enum pci_error_scope scope = PCI_ERROR_FUNCTION;
     return backend->write32(pdev->domain, pdev->bus, pdev->slot, pdev->fn, offset, value, &scope);

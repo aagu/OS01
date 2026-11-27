@@ -238,6 +238,19 @@ $(TEST_BLD)/test_pci_driver_model.elf: $(TEST_BLD)/test_pci_driver_model.o \
 test-pci: $(TEST_BLD)/test_pci_driver_model.elf
 	$<
 
+# AArch64 Phase-1: 4 KiB ECAM config space, BAR & ranges translation
+LINK_CFLAGS_pci-extended-config = $(PCI_HOST_CFLAGS)
+LINK_GROUP_pci-extended-config := \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(LIBC_OBJS)
+
+.PHONY: test-pci-extended-config
+test-pci-extended-config: $(TEST_BLD)/test_pci_extended_config.elf
+	$<
+
 # ARCH-9 Phase B: x86 backend, resource access and IRQ preservation
 BACKEND_HOST_CFLAGS := $(HOST_CFLAGS) -D_GNU_SOURCE -I$(TEST_MOCK) $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC) \
     -include $(TEST_MOCK)/arch9/backend_runtime.h -DOS01_HOST_TEST

@@ -90,6 +90,12 @@ $(TEST_BLD)/test_libc_math.o: $(TEST_CASES)/test_libc_math.c
 $(TEST_BLD)/test_libc_math.elf: $(TEST_BLD)/test_libc_math.o $(LINK_GROUP_libc-math)
 	$(HOST_CC) $(LINK_LDFLAGS_libc-math) -o $@ $^
 
+$(TEST_BLD)/test_pci_extended_config.o: $(TEST_CASES)/test_pci_extended_config.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_pci-extended-config)),$(LINK_CFLAGS_pci-extended-config),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_pci_extended_config.elf: $(TEST_BLD)/test_pci_extended_config.o $(LINK_GROUP_pci-extended-config)
+	$(HOST_CC) $(LINK_LDFLAGS_pci-extended-config) -o $@ $^
+
 $(TEST_BLD)/test_sched_aarch64_migration.o: $(TEST_CASES)/test_sched_aarch64_migration.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_sched-aarch64-migration)),$(LINK_CFLAGS_sched-aarch64-migration),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@

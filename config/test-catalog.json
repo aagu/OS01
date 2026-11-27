@@ -4287,6 +4287,19 @@
       }
     },
     {
+      "id": "test_pci_extended_config",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [
+        "drivers.pci.extended_config"
+      ],
+      "link": "pci-extended-config",
+      "source": "hosttests/cases/test_pci_extended_config.c"
+    },
+    {
       "kind": "host_test",
       "id": "test_percpu_layout",
       "layer": "host",
