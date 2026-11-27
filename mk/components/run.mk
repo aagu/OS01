@@ -939,6 +939,9 @@ $(eval $(call host_case_group,test-m1-host,m1-layout m1-reservation m1-arena m1-
 # ARCH-9 driver model host tests.
 $(eval $(call host_case_group,test-arch9-host,block pci pci-extended backend ahci device-boot net lwip e1000 virtio socket,rootfs,CASE,,block:test-block pci:test-pci pci-extended:test-pci-extended-config backend:test-backend ahci:test-ahci device-boot:test-device-boot net:test-net lwip:test-lwip e1000:test-e1000 virtio:test-virtio socket:test-socket))
 
+# AArch64 PCIe Phase-1 host tests (DTB parser & ECAM MMIO).
+$(eval $(call host_case_group,test-aarch64-pcie-host,dtb-pcie,rootfs,CASE,,dtb-pcie:test-aarch64-dtb-pcie))
+
 # ── Resolution Switcher host tests ───────────────────────────
 # RES_CASE accepts uapi, state, writers, bga, ioctl, pty, terminal,
 # clients, hooks, or all (default).  Unregistered/unknown cases abort

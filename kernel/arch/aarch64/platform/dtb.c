@@ -1,5 +1,6 @@
 /* UEFI-only DTB handoff wrapper. Pure parsing lives in dtb_parse.c. */
 #include <arch/aarch64/dtb.h>
+#include <arch/aarch64/pcie.h>
 #include <arch/aarch64/device_window.h>
 #include <arch/aarch64/handoff_layout.h>
 #include <arch/cpu.h>
@@ -13,6 +14,12 @@ void kputx(uint64_t v);
 _Static_assert(AARCH64_BOOT_MAX_CPUS == NR_CPUS, "DTB/CPU capacity mismatch");
 
 static struct aarch64_platform_info platform;
+static struct aarch64_pcie_topology s_pcie_topology;
+
+const struct aarch64_pcie_topology *aarch64_pcie_topology_get(void)
+{
+    return &s_pcie_topology;
+}
 
 const struct aarch64_topology *dtb_topology(void) { return &platform.topology; }
 uint32_t dtb_cpu_count(void) { return platform.topology.cpu_count; }
@@ -91,6 +98,11 @@ void dtb_init(const struct boot_context *handoff)
     if (rc) dtb_fatal("unsupported or missing platform devices");
     for (uint32_t i = 0; i < sizeof(platform); ++i)
         ((volatile uint8_t *)&platform)[i] = ((uint8_t *)&parsed)[i];
+    if (aarch64_dtb_parse_pcie(b, size, &s_pcie_topology) < 0) {
+        for (uint32_t i = 0; i < sizeof(s_pcie_topology); ++i)
+            ((volatile uint8_t *)&s_pcie_topology)[i] = 0;
+        kputs("[dtb] warn: PCIe DTB parse failed; disabling PCIe\n");
+    }
     kputs("[dtb] /cpus: ");
     kputu(platform.topology.cpu_count);
     kputs(" CPUs, BSP MPIDR=0x");

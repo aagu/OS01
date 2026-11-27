@@ -24,6 +24,12 @@ $(TEST_BLD)/test_aarch64_device_window.o: $(TEST_CASES)/test_aarch64_device_wind
 $(TEST_BLD)/test_aarch64_device_window.elf: $(TEST_BLD)/test_aarch64_device_window.o $(LINK_GROUP_aarch64-device-window)
 	$(HOST_CC) $(LINK_LDFLAGS_aarch64-device-window) -o $@ $^
 
+$(TEST_BLD)/test_aarch64_dtb_pcie.o: $(TEST_CASES)/test_aarch64_dtb_pcie.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_aarch64-dtb-pcie)),$(LINK_CFLAGS_aarch64-dtb-pcie),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_aarch64_dtb_pcie.elf: $(TEST_BLD)/test_aarch64_dtb_pcie.o $(LINK_GROUP_aarch64-dtb-pcie)
+	$(HOST_CC) $(LINK_LDFLAGS_aarch64-dtb-pcie) -o $@ $^
+
 $(TEST_BLD)/test_aarch64_fdt_early.o: $(TEST_CASES)/test_aarch64_fdt_early.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_aarch64-fdt-early)),$(LINK_CFLAGS_aarch64-fdt-early),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@

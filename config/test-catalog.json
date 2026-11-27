@@ -1162,6 +1162,19 @@
       "source": "hosttests/cases/test_aarch64_device_window.c"
     },
     {
+      "id": "test_aarch64_dtb_pcie",
+      "layer": "host",
+      "subsystem": "memory",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [
+        "memory.aarch64.dtb_pcie"
+      ],
+      "link": "aarch64-dtb-pcie",
+      "source": "hosttests/cases/test_aarch64_dtb_pcie.c"
+    },
+    {
       "id": "test_aarch64_fdt_early",
       "layer": "host",
       "subsystem": "boot",

@@ -1169,3 +1169,23 @@ $(TEST_BLD)/test_x86_aslr_mmap.elf: $(TEST_BLD)/test_x86_aslr_mmap.o \
 		$(TEST_BLD)/mm_production.o \
 		$(TEST_BLD)/lifecycle_stubs.o
 	$(HOST_CC) -o $@ $^
+
+# AArch64 PCIe DTB topology parser (Phase-1)
+$(TEST_BLD)/aarch64_dtb_pcie_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/platform/dtb_parse_pcie.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/pcie.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/fdt_address.h \
+		$(TESTS_DIR)/kernel/include/arch/pci.h \
+		$(TESTS_DIR)/kernel/include/log/log.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(KERNEL_INC) -DOS01_HOST_TEST -c $< -o $@
+
+LINK_CFLAGS_aarch64-dtb-pcie = $(HOST_CFLAGS) $(KERNEL_INC) $(FRAMEWORK_INC) -DOS01_HOST_TEST
+LINK_GROUP_aarch64-dtb-pcie := \
+	$(TEST_BLD)/aarch64_dtb_pcie_production.o \
+	$(TEST_BLD)/serial_sink_stub.o \
+	$(LIBC_OBJS)
+
+.PHONY: test-aarch64-dtb-pcie
+test-aarch64-dtb-pcie: $(TEST_BLD)/test_aarch64_dtb_pcie.elf
+	$<
