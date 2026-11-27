@@ -499,6 +499,8 @@ static const test_case_t tests[] = {
     // ── PT_TLS: raw arch_prctl + FS base lifecycle ──
     {"arch_prctl_fs",             "arch_prctl FS base",        test_arch_prctl_fs,             1, 0},
     {"pt_tls_exec",               "PT_TLS load/spawn/exec",    test_pt_tls_exec,               1, 0},
+    // ── PT_INTERP: kernel-loaded interpreter handoff (T1) ──
+    {"exec_interp",               "PT_INTERP exec handoff",    test_exec_interp,               1, 0},
 #endif
 };
 

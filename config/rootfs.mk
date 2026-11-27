@@ -10,7 +10,9 @@ ifeq ($(filter 1,$(OS01_SYSTEST))$(filter x86_64-unknown-none,$(RUNTIME_TARGET_u
 ROOTFS_FILES += /bin/aslr_b_exec=$(USER_ARTIFACT_DIR)/aslr_b_exec.elf:0755 \
                 /bin/ptls_exec=$(USER_ARTIFACT_DIR)/ptls_exec.elf:0755 \
                 /bin/ptls_pie=$(USER_ARTIFACT_DIR)/ptls_pie.elf:0755 \
-                /bin/ptls_plain=$(USER_ARTIFACT_DIR)/ptls_plain.elf:0755
+                /bin/ptls_plain=$(USER_ARTIFACT_DIR)/ptls_plain.elf:0755 \
+                /lib/ld.so=$(USER_ARTIFACT_DIR)/ldso.elf:0755 \
+                /bin/dyn_exec=$(USER_ARTIFACT_DIR)/dyn_exec.elf:0755
 endif
 ROOTFS_SYMLINKS := /bin/wget=busybox /bin/login=busybox /bin/sh=busybox /bin/[=busybox /bin/[[=busybox /bin/cat=busybox /bin/head=busybox /bin/tail=busybox /bin/cp=busybox /bin/mv=busybox /bin/rm=busybox /bin/mkdir=busybox /bin/rmdir=busybox /bin/echo=busybox /bin/printf=busybox /bin/sort=busybox /bin/ps=busybox /bin/kill=busybox /bin/mount=busybox /bin/grep=busybox /bin/sed=busybox /bin/awk=busybox /bin/find=busybox /bin/ln=busybox /bin/xargs=busybox /bin/tar=busybox /bin/gzip=busybox /bin/gunzip=busybox /bin/ping=busybox /bin/ifconfig=busybox /bin/clear=busybox /bin/dmesg=busybox
 # A discovered native program takes precedence over an applet symlink.

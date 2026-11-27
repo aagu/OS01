@@ -222,12 +222,65 @@ $(PTLS_CHECK_STAMP): $(PTLS_FIXTURES) $(OS01_ROOT)/tools/tests/check_ptls_fixtur
 		--readelf "$(LLVM_READELF)" --objdump "$(LLVM_OBJDUMP)" \
 		--exec $(PTLS_EXEC_ELF) --pie $(PTLS_PIE_ELF) --plain $(PTLS_PLAIN_ELF)
 	@touch $@
+
+# ── PT_INTERP acceptance fixtures (x86_64 systest only) ───────
+# interp_probe in two freestanding flavours.  ldso is the /lib/ld.so
+# skeleton the kernel loads as the interpreter (a static-PIE image the
+# existing PIE path accepts); dyn_exec is the ET_DYN main that carries
+# PT_INTERP and reaches its entry only through the ld.so handoff.
+INTERP_DIR        := systest/fixtures
+INTERP_ENTRY_OBJ  := $(OBJ_DIR)/systest/fixtures/interp_entry.o
+INTERP_LDSO_OBJ   := $(OBJ_DIR)/systest/fixtures/interp_probe_ldso.o
+INTERP_MAIN_OBJ   := $(OBJ_DIR)/systest/fixtures/interp_probe_main.o
+INTERP_LDSO_ELF   := $(BUILD_DIR)/ldso.elf
+INTERP_MAIN_ELF   := $(BUILD_DIR)/dyn_exec.elf
+INTERP_FIXTURES   := $(INTERP_LDSO_ELF) $(INTERP_MAIN_ELF)
+
+INTERP_BASE_CFLAGS := --target=x86_64-unknown-none -ffreestanding \
+                      -fno-stack-protector -fno-asynchronous-unwind-tables \
+                      -O2 -Wall -Wextra
+
+$(INTERP_ENTRY_OBJ): $(INTERP_DIR)/interp_entry.S $(USER_COMPILE_KEY)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) --target=x86_64-unknown-none -ffreestanding \
+		-fno-pic -fno-pie -c $< -o $@
+
+$(INTERP_LDSO_OBJ): $(INTERP_DIR)/interp_probe.c $(USER_COMPILE_KEY)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(INTERP_BASE_CFLAGS) -fPIE -DINTERP_LDSO -c $< -o $@
+
+$(INTERP_MAIN_OBJ): $(INTERP_DIR)/interp_probe.c $(USER_COMPILE_KEY)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(INTERP_BASE_CFLAGS) -fPIE -DINTERP_MAIN -c $< -o $@
+
+$(INTERP_LDSO_ELF): $(INTERP_ENTRY_OBJ) $(INTERP_LDSO_OBJ) $(USER_LINK_KEY)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) -m elf_x86_64 -static -pie --no-dynamic-linker \
+		-z max-page-size=4096 -z text -z norelro --pack-dyn-relocs=none \
+		-o $@ $(INTERP_ENTRY_OBJ) $(INTERP_LDSO_OBJ)
+	$(OBJ_CPY) --strip-debug $@
+
+$(INTERP_MAIN_ELF): $(INTERP_ENTRY_OBJ) $(INTERP_MAIN_OBJ) $(USER_LINK_KEY)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) -m elf_x86_64 -static -pie --dynamic-linker /lib/ld.so \
+		-z max-page-size=4096 -z text -z norelro --pack-dyn-relocs=none \
+		-o $@ $(INTERP_ENTRY_OBJ) $(INTERP_MAIN_OBJ)
+	$(OBJ_CPY) --strip-debug $@
+
+# Structural gate: the ELF shapes the interpreter contract relies on.
+INTERP_CHECK_STAMP := $(BUILD_DIR)/.interp-fixtures.checked
+$(INTERP_CHECK_STAMP): $(INTERP_FIXTURES) $(OS01_ROOT)/tools/tests/check_interp_fixture.py
+	python3 $(OS01_ROOT)/tools/tests/check_interp_fixture.py \
+		--readelf "$(LLVM_READELF)" \
+		--ldso $(INTERP_LDSO_ELF) --dyn $(INTERP_MAIN_ELF)
+	@touch $@
 endif
 endif
 
 .PHONY: all clean
 all: $(PROGRAMS) $(RUNTIME_PROBE_ELF) $(ASLR_B_EXEC_ELF) $(PTLS_FIXTURES) \
-     $(PTLS_CHECK_STAMP) $(DOOM_ARCHIVE)
+     $(PTLS_CHECK_STAMP) $(INTERP_FIXTURES) $(INTERP_CHECK_STAMP) \
+     $(DOOM_ARCHIVE)
 
 $(OBJ_DIR)/%.o: %.c $(USER_COMPILE_KEY)
 	@mkdir -p $(dir $@)
