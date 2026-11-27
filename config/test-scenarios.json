@@ -9328,6 +9328,175 @@
     "action": "retain",
     "reason": "FakeProcessSession unit tests verify echo-rejection parser logic while QEMU gfx suite exercises real BusyBox static PIE execution"
    }
+  },
+  {
+   "id": "memory.aarch64.aslr.default",
+   "owner": "host",
+   "component": "memory",
+   "behavior": "aarch64",
+   "trigger": "host runner invokes test_aarch64_aslr.elf",
+   "assertions": [
+    "the mmap_base and start_stack derivation returns 4 KiB-aligned bounds inside the configured randomization window",
+    "a NULL mm_t or a NULL PIE-bias pointer is rejected with -EINVAL",
+    "without strong entropy the fail-closed path returns -EAGAIN and keeps the existing mmap_base, start_stack and PIE bias",
+    "strong entropy randomizes mmap_base, start_stack and the PIE bias independently across repeated derivations"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_aarch64_aslr: the ASLR derivation accepts a NULL argument, falls back to weak entropy, or publishes a base outside the randomization window"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_aarch64_aslr.c",
+    "selector": "test_aarch64_aslr",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying the aarch64 mmap_base / start_stack derivation bounds and the strong-entropy fail-closed contract"
+   }
+  },
+  {
+   "id": "boot.uefi.aarch64_handoff_cache",
+   "owner": "host",
+   "component": "boot",
+   "behavior": "uefi",
+   "trigger": "host runner invokes test_aarch64_handoff_cache.elf",
+   "assertions": [
+    "the CTR_EL0 DminLine field decodes to the documented 4 / 32 / 64 / 128-byte cache line sizes",
+    "an unaligned clean-invalidate range rounds outward to the enclosing cache lines",
+    "every handoff region (boot block, trampoline, context page, FDT pages, memory map pages) is cleaned line by line",
+    "the post-clean barrier sequence is exactly dsb sy -> ic iallu -> dsb sy -> isb",
+    "absent optional regions are skipped instead of cleaned at address zero"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_aarch64_handoff_cache: the cache handoff misses a handoff region or misorders the clean/invalidate barrier sequence"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_aarch64_handoff_cache.c",
+    "selector": "test_aarch64_handoff_cache",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying the aarch64 UEFI cache handoff clean-invalidate coverage and the post-clean barrier ordering"
+   }
+  },
+  {
+   "id": "boot.uefi.aarch64_memory",
+   "owner": "host",
+   "component": "boot",
+   "behavior": "uefi",
+   "trigger": "host runner invokes test_aarch64_uefi_boot_memory.elf",
+   "assertions": [
+    "a firmware DTB in a reserved descriptor is readable over the whole requested range",
+    "a DTB split across two descriptors is accepted, while a hole between the descriptors is rejected",
+    "a DTB in an MMIO descriptor or in a runtime-programmable (RP) descriptor is rejected",
+    "the early MMIO window is accepted only while it overlaps no conventional RAM",
+    "a firmware console whose 0x48-byte window crosses the end of its 2 MiB block is rejected"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_aarch64_uefi_boot_memory: the firmware DTB or the early MMIO window is accepted although it overlaps conventional RAM or is not fully backed by readable memory"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_aarch64_uefi_boot_memory.c",
+    "selector": "test_aarch64_uefi_boot_memory",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying the aarch64 UEFI firmware DTB readability rules and the early MMIO / conventional-RAM overlap rejection"
+   }
+  },
+  {
+   "id": "memory.aarch64.virtio_mmio_map",
+   "owner": "host",
+   "component": "memory",
+   "behavior": "aarch64",
+   "trigger": "host runner invokes test_aarch64_virtio_mmio_map.elf",
+   "assertions": [
+    "a DTB without virtio-mmio slots maps nothing and leaves the early device mapping untouched",
+    "the virtio-mmio device windows are merged into the early device mapping and survive the SMP gate",
+    "a device window that crosses a 2 MiB block boundary is mapped as one merged range",
+    "an already-mapped device block is left unchanged by a repeated preparation",
+    "a page-table conflict (wrong PA, L3 table, or a non-empty software descriptor) is reported and leaves the descriptor untouched",
+    "a virtio-mmio window smaller than 2 MiB that overlaps RAM is rejected"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_aarch64_virtio_mmio_map: the virtio-mmio device window is mapped over RAM or over an existing page-table descriptor"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_aarch64_virtio_mmio_map.c",
+    "selector": "test_aarch64_virtio_mmio_map",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying the aarch64 DTB virtio-mmio early device mapping and its page-table conflict rules"
+   }
+  },
+  {
+   "id": "boot.uefi.config",
+   "owner": "host",
+   "component": "boot",
+   "behavior": "uefi",
+   "trigger": "host runner invokes test_uefi_boot_config.elf",
+   "assertions": [
+    "a missing or empty config file yields the platform-auto / console-DTB defaults and the 1440x900 resolution",
+    "comments, CRLF line endings, tabs and a missing trailing newline are accepted",
+    "the rp1-header console is accepted only together with an explicit rpi5 platform selection",
+    "a duplicate console or platform key fails the parse and reports the offending line",
+    "a bare CR, an embedded NUL and an oversize buffer are rejected, while exactly the maximum size is accepted",
+    "unknown keys are ignored and the resolution rules apply only on the x86_64 profile"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_uefi_boot_config: the UEFI config parser accepts a malformed line, a duplicate selection or an rp1-header console without an explicit rpi5 platform"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_uefi_boot_config.c",
+    "selector": "test_uefi_boot_config",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying the common UEFI /config.txt parser and its per-platform console and platform selection rules"
+   }
+  },
+  {
+   "id": "sched.timekeeping.wall_clock",
+   "owner": "host",
+   "component": "sched",
+   "behavior": "timekeeping",
+   "trigger": "host runner invokes test_timekeeping.elf",
+   "assertions": [
+    "timekeeping_datetime_to_epoch() converts known UTC timestamps to the expected epoch seconds, including the epoch itself and a leap day",
+    "a century=0 year is inferred as 19xx/20xx from the year value",
+    "an invalid date (a 29 February in a non-leap year, month 13, hour 24) and a pre-epoch timestamp are rejected",
+    "without an RTC the wall clock falls back to the monotonic clocksource",
+    "with an RTC present the wall clock is anchored to the RTC epoch and then advances with the monotonic clock"
+   ],
+   "failure_modes": [
+    "assertion failure or exit-code mismatch in test_timekeeping: the wall clock reports a wrong epoch, accepts an invalid calendar date, or loses its RTC anchor"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_timekeeping.c",
+    "selector": "test_timekeeping",
+    "evidence": "ALL_TESTS_PASSED_OR_EXIT_0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying the RTC-anchored wall clock and the calendar-to-epoch conversion"
+   }
   }
  ]
 }

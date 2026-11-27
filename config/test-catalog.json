@@ -5026,7 +5026,9 @@
       "timing": "strict",
       "tier": "pr",
       "isolation": "none",
-      "scenarios": [],
+      "scenarios": [
+        "sched.timekeeping.wall_clock"
+      ],
       "link": "timekeeping",
       "source": "hosttests/cases/test_timekeeping.c"
     },
