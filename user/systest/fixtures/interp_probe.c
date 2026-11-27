@@ -52,9 +52,10 @@ typedef struct {
 static long sysc3(long n, long a, long b, long c)
 {
     long r;
+    /* OS01 native int $0x80 ABI: rax=nr, rdi/rsi/rdx=args. */
     __asm__ __volatile__("int $0x80"
                          : "=a"(r)
-                         : "a"(n), "b"(a), "c"(b), "d"(c)
+                         : "a"(n), "D"(a), "S"(b), "d"(c)
                          : "memory");
     return r;
 }
@@ -91,6 +92,7 @@ static uint64_t auxv_get(const uint64_t *sp, uint64_t tag, uint64_t fallback)
 
 #ifdef INTERP_LDSO
 static const char ldso_marker[] = "OS01_LDSO\n";
+static const char ldso_enter[] = "[LDSO-ENTER]\n";
 
 /* C entry: rdi = the kernel-built initial rsp (from interp_entry.S).
  * Both image flavours export the same entry symbol; only one is
@@ -98,6 +100,7 @@ static const char ldso_marker[] = "OS01_LDSO\n";
 void interp_probe_main(uint64_t orig_rsp)
 {
     const uint64_t *sp = (const uint64_t *)orig_rsp;
+    put_line(ldso_enter, sizeof(ldso_enter) - 1);
     uint64_t base  = auxv_get(sp, AT_BASE, 0);
     uint64_t entry = auxv_get(sp, AT_ENTRY, 0);
 
@@ -123,10 +126,12 @@ void interp_probe_main(uint64_t orig_rsp)
 
 #ifdef INTERP_MAIN
 static const char main_marker[] = "OS01_DYNMAIN\n";
+static const char dyn_enter[] = "[DYN-ENTER]\n";
 
 void interp_probe_main(uint64_t orig_rsp)
 {
     const uint64_t *sp = (const uint64_t *)orig_rsp;
+    put_line(dyn_enter, sizeof(dyn_enter) - 1);
     uint64_t base   = auxv_get(sp, AT_BASE, 0);
     uint64_t phdr   = auxv_get(sp, AT_PHDR, 0);
     uint64_t phent  = auxv_get(sp, AT_PHENT, 0);

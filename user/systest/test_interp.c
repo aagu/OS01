@@ -25,6 +25,7 @@ static int run_user_image(const char *path)
     int st = -1;
     if (waitpid(pid, &st, 0) != pid)
         return -1;
+    printf("[interp-diag] %s pid=%d raw st=0x%x\n", path, (int)pid, st);
     if ((st & 0x7f) != 0)
         return -2;                       /* killed by a signal */
     return (st >> 8) & 0xff;
