@@ -563,6 +563,65 @@ static void case_ecam_gicv2m_msix(void)
     assert_eq(-ENOTSUP, arch_pci_msix_map(&dev, 0x12041000ULL, &tbl));
 }
 
+/* 2026-11-27 regression guard: the PCIe Stage-3 pre-map installs Device
+ * blocks over the WHOLE PCIe MMIO32 bus window ([0x10000000, 0x40000000) on
+ * QEMU virt) at 2 MiB granularity.  The M3.5 shootdown probe maps its two
+ * scratch pages at a kernel VA whose 2 MiB block must stay UNMAPPED — when
+ * the pre-map claimed that block the probe failed with "scratch-non-empty"
+ * and halted the kernel before the SMP scheduler selftest ever ran.  This
+ * case pins the invariant: the probe's scratch PA stays outside every
+ * device window the pre-map installs. */
+static void case_scratch_probe_va_outside_pcie_device_windows(void)
+{
+    struct boot_context ctx;
+    struct test_efi_desc descs[1] = {
+        { .type = AARCH64_UEFI_MEM_CONVENTIONAL, .phys_start = 0x40000000u, .num_pages = 0x1000u }
+    };
+    setup_fixture(&ctx, descs, 1u);
+
+    /* QEMU virt DTB PCIe ranges (the same fixture the live DTB produces). */
+    mock_topo.root_count = 1;
+    mock_topo.roots[0].valid = true;
+    mock_topo.roots[0].kind = AARCH64_PCIE_CTRL_ECAM_GENERIC;
+    mock_topo.roots[0].domain = 0;
+    mock_topo.roots[0].bus_start = 0;
+    mock_topo.roots[0].bus_end = 255;
+    mock_topo.roots[0].reg_cpu_base = 0x4010000000ULL;
+    mock_topo.roots[0].reg_size = 0x10000000ULL;
+    mock_topo.roots[0].range_count = 3;
+    mock_topo.roots[0].ranges[0] = (struct aarch64_pcie_range){
+        .space = PCI_SPACE_IO, .prefetchable = false,
+        .pci_base = 0x0ULL, .cpu_base = 0x3eff0000ULL, .size = 0x10000ULL
+    };
+    mock_topo.roots[0].ranges[1] = (struct aarch64_pcie_range){
+        .space = PCI_SPACE_MMIO32, .prefetchable = false,
+        .pci_base = 0x10000000ULL, .cpu_base = 0x10000000ULL, .size = 0x2eff0000ULL
+    };
+    mock_topo.roots[0].ranges[2] = (struct aarch64_pcie_range){
+        .space = PCI_SPACE_MMIO64, .prefetchable = true,
+        .pci_base = 0x8000000000ULL, .cpu_base = 0x8000000000ULL, .size = 0x8000000000ULL
+    };
+
+    assert_eq(0, aarch64_pcie_prepare(&ctx));
+
+    /* The scratch PA must be 2 MiB-aligned: map_4k_new cannot split an
+     * occupied 2 MiB block, so the probe needs a whole free block. */
+    assert_eq(0, AARCH64_SHOOTDOWN_PROBE_SCRATCH_PA & 0x1FFFFFu);
+
+    /* Sanity: the PCIe MMIO32 window IS pre-mapped — proves this fixture
+     * exercises the real pre-map path instead of a no-op. */
+    uint64_t desc = 0;
+    assert_eq(0, aarch64_pt_read_l2_desc(mock_root, ARCH_PAGE_OFFSET + 0x10000000ULL, &desc));
+    assert_true(desc != 0);
+
+    /* The invariant: the probe's scratch block stays unmapped. */
+    desc = 0;
+    int rc = aarch64_pt_read_l2_desc(mock_root,
+                                      ARCH_PAGE_OFFSET + AARCH64_SHOOTDOWN_PROBE_SCRATCH_PA,
+                                      &desc);
+    assert_true(rc != AARCH64_PT_OK || desc == 0);
+}
+
 int main(void)
 {
     TEST_SUITE("aarch64_pcie_ecam");
@@ -573,6 +632,7 @@ int main(void)
     run_isolated(case_ecam_interrupt_map_routing);
     run_isolated(case_ecam_mmio_window_bounds_and_isolation);
     run_isolated(case_ecam_gicv2m_msix);
+    run_isolated(case_scratch_probe_va_outside_pcie_device_windows);
     TEST_RESULTS();
     return __test_stats.failed ? 1 : 0;
 }

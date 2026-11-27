@@ -38,6 +38,18 @@
 #define AARCH64_BOOT_BLOCK_SIZE   0x200000
 #define AARCH64_BOOT_DEVICE_BASE  0x08000000
 #define AARCH64_BOOT_DEVICE_END   0x0a000000
+
+/* The M3.5 shootdown probe's scratch PA (spec §7.3).  QEMU virt device-gap
+ * layout, same platform D above describes:
+ *   [0x08000000, 0x0a000000)  boot device window (D)
+ *   [0x0a000000, 0x0a200000)  virtio-mmio window (one 2 MiB block)
+ *   [0x10000000, 0x40000000)  PCIe MMIO32 bus window (2 MiB pre-map)
+ *   [0x4010000000, 0x4020000000) PCIe ECAM window
+ * The 2 MiB block right above the virtio-mmio window is the only free run
+ * inside the device gap; the probe maps its two scratch pages there and
+ * REQUIRES that block to stay unmapped (map_4k_new cannot split an
+ * occupied 2 MiB block).  Keep it 2 MiB-aligned. */
+#define AARCH64_SHOOTDOWN_PROBE_SCRATCH_PA 0x0a200000
 #ifndef AARCH64_BOOT_MAP_END
 #if AARCH64_BOOT_BLOCK_BASE >= 0x80000000
 #define AARCH64_BOOT_MAP_END      0xC0000000
