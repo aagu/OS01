@@ -120,6 +120,19 @@ static void prod_halt(void)
         arch_cpu_halt();
 }
 
+static uint64_t s_scratch_pa = AARCH64_SHOOTDOWN_PROBE_SCRATCH_PA;
+
+void aarch64_shootdown_probe_set_scratch_pa(uint64_t pa)
+{
+    if (pa != 0ULL && (pa & UINT64_C(0x1FFFFF)) == 0ULL)
+        s_scratch_pa = pa;
+}
+
+static uint64_t prod_scratch_va_get(void)
+{
+    return ARCH_PAGE_OFFSET + s_scratch_pa;
+}
+
 /* The single, static, read-only production ops instance. */
 static const struct aarch64_shootdown_probe_ops g_real_ops = {
     .dtb_cpu_count       = dtb_cpu_count,
@@ -144,6 +157,7 @@ static const struct aarch64_shootdown_probe_ops g_real_ops = {
     .kputs               = kputs,
     .kputu               = kputu,
     .halt                = prod_halt,
+    .scratch_va_get      = prod_scratch_va_get,
 };
 
 const struct aarch64_shootdown_probe_ops *aarch64_shootdown_probe_default_ops(void)

@@ -688,6 +688,11 @@ void arch_boot_controllers(const struct boot_context *bootctx)
     }
     (void)aarch64_pcie_prepare(bootctx);
     (void)aarch64_rp1_xhci_prepare(bootctx);
+    if ((bootctx->flags & BOOT_CONTEXT_HAS_EARLY_MMIO) != 0u &&
+        bootctx->early_mmio.reserved != 0u) {
+        aarch64_shootdown_probe_set_scratch_pa(
+            (uint64_t)bootctx->early_mmio.reserved << 21);
+    }
     __asm__ __volatile__("msr daifclr, #4\n\tisb" ::: "memory");
 #if AARCH64_SERROR_TEST
     {

@@ -152,7 +152,12 @@ struct aarch64_shootdown_probe_ops {
     void (*kputs)(const char *s);  /* may be NULL — body skips logging */
     void (*kputu)(uint64_t v);     /* may be NULL — body skips digits */
     void (*halt)(void);            /* MUST NOT return on production */
+    /* Optional override for platform-specific unmapped scratch VA
+     * (NULL falls back to AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA). */
+    uint64_t (*scratch_va_get)(void);
 };
+
+void aarch64_shootdown_probe_set_scratch_pa(uint64_t pa);
 
 /* ── Internal helpers (used by both production body and hosttest) ── */
 
@@ -293,10 +298,13 @@ aarch64_shootdown_probe_body(const struct aarch64_shootdown_probe_ops *ops)
      * mapping at the scratch PA, this assertion fires before the
      * probe would silently overwrite a live entry. */
     void *pgdir = ops->pgdir_get();
+    uint64_t scratch_va = ops->scratch_va_get
+        ? ops->scratch_va_get()
+        : AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA;
     {
         uint64_t phys_q = 0;
         uint32_t vm_q = 0;
-        int rc = ops->query_4k(pgdir, AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA,
+        int rc = ops->query_4k(pgdir, scratch_va,
                                &phys_q, &vm_q);
         if (rc != -ENOENT)
             AARCH64_SHOOTDOWN_PROBE_FAIL(ops, "scratch-non-empty");
@@ -316,10 +324,10 @@ aarch64_shootdown_probe_body(const struct aarch64_shootdown_probe_ops *ops)
     /* Step 5: map P1 → SCRATCH_VA and broadcast WORK_READ64 to
      * every ipi_ready AP. Each AP dereferences SCRATCH_VA through
      * its own translation tables + TLB; the read must yield A. */
-    if (ops->map_4k_new(pgdir, p1, AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA,
+    if (ops->map_4k_new(pgdir, p1, scratch_va,
                         VM_KERNEL_RW) != 0)
         AARCH64_SHOOTDOWN_PROBE_FAIL(ops, "map");
-    aarch64_shootdown_probe_broadcast_read(ops, AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA,
+    aarch64_shootdown_probe_broadcast_read(ops, scratch_va,
                                     AARCH64_SHOOTDOWN_PROBE_PATTERN_A, /*seq=*/1,
                                     "ap-read-A");
 
@@ -328,25 +336,25 @@ aarch64_shootdown_probe_body(const struct aarch64_shootdown_probe_ops *ops)
      * SCRATCH_VA is gone, so the next WORK_READ64 walks the page
      * table and observes P2 = pattern B. A stale TLB would have
      * returned A instead. */
-    if (ops->update_4k(pgdir, p2, AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA,
+    if (ops->update_4k(pgdir, p2, scratch_va,
                        VM_KERNEL_RW) != 0)
         AARCH64_SHOOTDOWN_PROBE_FAIL(ops, "update");
     ops->tlb_shootdown();
-    aarch64_shootdown_probe_broadcast_read(ops, AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA,
+    aarch64_shootdown_probe_broadcast_read(ops, scratch_va,
                                     AARCH64_SHOOTDOWN_PROBE_PATTERN_B, /*seq=*/100,
                                     "ap-read-B");
 
     /* Step 7: clean up. Unmap SCRATCH_VA, free both data pages, and
      * assert the L2 slot is empty again. Intermediate table pages
      * are intentionally not reclaimed (F1 follow-up scope). */
-    if (ops->unmap_4k(pgdir, AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA) != 0)
+    if (ops->unmap_4k(pgdir, scratch_va) != 0)
         AARCH64_SHOOTDOWN_PROBE_FAIL(ops, "unmap");
     ops->free_4k_page(p1);
     ops->free_4k_page(p2);
     {
         uint64_t phys_q = 0;
         uint32_t vm_q = 0;
-        int rc = ops->query_4k(pgdir, AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA,
+        int rc = ops->query_4k(pgdir, scratch_va,
                                &phys_q, &vm_q);
         if (rc != -ENOENT)
             AARCH64_SHOOTDOWN_PROBE_FAIL(ops, "scratch-still-mapped");

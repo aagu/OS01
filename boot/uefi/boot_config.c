@@ -189,15 +189,13 @@ int uefi_boot_config_parse(const char *data, size_t size, bool aarch64,
                     return -1;
                 }
             }
-        } else {
-            if (span_eq(data + s, key_end - s, "resolution")) {
-                uint32_t w = 0;
-                uint32_t h = 0;
+        } else if (span_eq(data + s, key_end - s, "resolution")) {
+            uint32_t w = 0;
+            uint32_t h = 0;
 
-                if (parse_resolution(data + val_start, e - val_start, &w, &h)) {
-                    out->width = w;
-                    out->height = h;
-                }
+            if (parse_resolution(data + val_start, e - val_start, &w, &h)) {
+                out->width = w;
+                out->height = h;
             }
         }
     }

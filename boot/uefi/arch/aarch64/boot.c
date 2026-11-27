@@ -607,7 +607,38 @@ efi_status_t arch_load_kernel(const void *image, uint64_t image_size,
 efi_status_t arch_setup_graphics(struct boot_context *ctx,
                                  const struct uefi_boot_config *config)
 {
-    (void)config;
+    efi_guid_t gop_guid = EFI_GRAPHICS_OUTPUT_PROTOCOL_GUID;
+    efi_gop_t *gop = NULL;
+    efi_gop_mode_info_t *info = NULL;
+    uintn_t isiz = sizeof(efi_gop_mode_info_t);
+    uint32_t want_w = config ? config->width : UEFI_BOOT_CONFIG_DEFAULT_WIDTH;
+    uint32_t want_h = config ? config->height : UEFI_BOOT_CONFIG_DEFAULT_HEIGHT;
+    uint32_t best_w = 0, best_h = 0;
+    int best_mode = -1;
+
+    if (!EFI_ERROR(BS->LocateProtocol(&gop_guid, NULL, (void **)&gop)) &&
+        gop && gop->Mode) {
+        for (uintn_t i = 0; i < gop->Mode->MaxMode; i++) {
+            isiz = sizeof(efi_gop_mode_info_t);
+            if (EFI_ERROR(gop->QueryMode(gop, i, &isiz, &info)) ||
+                !info || info->PixelFormat > PixelBitMask) {
+                continue;
+            }
+            if (info->HorizontalResolution <= want_w &&
+                info->VerticalResolution <= want_h &&
+                (info->HorizontalResolution > best_w ||
+                 (info->HorizontalResolution == best_w &&
+                  info->VerticalResolution > best_h))) {
+                best_w = info->HorizontalResolution;
+                best_h = info->VerticalResolution;
+                best_mode = (int)i;
+            }
+        }
+        if (best_mode >= 0 && (uint32_t)best_mode != gop->Mode->Mode) {
+            (void)gop->SetMode(gop, (uintn_t)best_mode);
+        }
+    }
+
     /* Best-effort: a missing GOP must not abort the boot. */
     (void)capture_graphics(ctx);
     return EFI_SUCCESS;
@@ -747,7 +778,10 @@ efi_status_t arch_fill_firmware(struct boot_context *ctx,
     ctx->early_mmio.console_base = early_mmio.console_base;
     ctx->early_mmio.device_base = early_mmio.device_base;
     ctx->early_mmio.device_blocks = early_mmio.device_blocks;
-    ctx->early_mmio.reserved = 0u;
+    ctx->early_mmio.reserved =
+        (config && config->platform == UEFI_BOOT_PLATFORM_RPI5)
+            ? (uint32_t)(UINT64_C(0x2000000000) >> 21)
+            : 0u;
     ctx->flags |= BOOT_CONTEXT_HAS_EARLY_MMIO;
     if (fw_console_pa != 0u)
         ctx->flags |= BOOT_CONTEXT_CONSOLE_FIRMWARE_CONFIGURED;
