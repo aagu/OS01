@@ -311,9 +311,19 @@ static bool pcie_map_device_window_2m(uint16_t domain, const char *label,
     return true;
 }
 
+#ifdef AARCH64_PCIE_HOST_TEST
+#include <sys/mman.h>
+#endif
+
 static void pcie_prepare_xhci_bar0(const struct aarch64_pcie_root_desc *ready,
                                    const struct aarch64_boot_mmio_ctx *mmio_ctx)
 {
+#ifdef AARCH64_PCIE_HOST_TEST
+    if (msync((void *)(uintptr_t)(ARCH_PAGE_OFFSET + ready->reg_cpu_base),
+              4096U, MS_ASYNC) != 0) {
+        return;
+    }
+#endif
     uint8_t bus = ready->bus_start;
     for (uint8_t slot = 0U; slot < 32U; slot++) {
         for (uint8_t fn = 0U; fn < 8U; fn++) {
