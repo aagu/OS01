@@ -62,6 +62,7 @@ void stubs_reset(void)
     for (int i = 0; i < ELF_LOAD_PAGE_POOL_SIZE; i++)
         elf_load_page_pool[i].in_use = 0;
     stubs_rng_reset();
+    stubs_lookup_node = NULL;
 }
 
 static uint32_t hash_va(uint64_t va)
@@ -225,6 +226,23 @@ int vfs_read(vfs_node_t *node, uint64_t offset,
 uint64_t vfs_node_live_size(vfs_node_t *node)
 {
     return node ? node->size : 0;
+}
+
+/* ── Interp resolution stubs (PT_INTERP contract) ──
+ * vfs_lookup returns the test-installed node (or NULL); vfs_node_put
+ * only counts, so tests can assert the loader releases its reference. */
+vfs_node_t *stubs_lookup_node = NULL;
+
+vfs_node_t *vfs_lookup(const char *path)
+{
+    (void)path;
+    return stubs_lookup_node;
+}
+
+void vfs_node_put(vfs_node_t *node)
+{
+    (void)node;
+    elf_load_state.total_node_puts++;
 }
 
 /* ── PTE table walk / map / unmap ── */

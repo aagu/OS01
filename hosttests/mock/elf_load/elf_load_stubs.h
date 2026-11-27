@@ -38,6 +38,7 @@ typedef struct {
     int total_frees;
     int total_reads;
     int total_rng_calls;
+    int total_node_puts;
 
     /* Failure injection controls (0 disables). */
     int inject_alloc_fail_at;
@@ -70,6 +71,13 @@ void *stubs_page_backing(uint64_t vaddr);
  * the matching allocation that fails; 0 disables. */
 extern int host_mock_kmalloc_fail_size;
 extern int host_mock_kmalloc_fail_count;
+
+/* Interp resolution: the node vfs_lookup() hands back for any path
+ * (NULL = not found).  Tests set it before loading a PT_INTERP image;
+ * stubs_reset() clears it. */
+struct vfs_node;
+extern struct vfs_node *stubs_lookup_node;
+void vfs_node_put(struct vfs_node *node);
 
 #include <fs/vfs.h>
 

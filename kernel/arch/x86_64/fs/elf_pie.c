@@ -1,4 +1,5 @@
 #include <arch/x86_64/elf_pie.h>
+#include <arch/x86_64/elf_image.h>
 #include <arch/x86_64/user_layout.h>
 #include <fs/vfs.h>
 #include <memory/slab.h>
@@ -74,6 +75,7 @@ int x86_elf_pie_prepare(vfs_node_t *node,
                         const elf64_ehdr_t *ehdr,
                         const elf64_phdr_t *phdrs,
                         uint64_t file_size,
+                        bool allow_interp,
                         x86_elf_pie_t *out_pie)
 {
     if (!node || !ehdr || !phdrs || !out_pie)
@@ -109,6 +111,7 @@ int x86_elf_pie_prepare(vfs_node_t *node,
 
     const elf64_phdr_t *dyn_ph = NULL;
     const elf64_phdr_t *pt_phdr = NULL;
+    const elf64_phdr_t *interp_ph = NULL;
     bool has_base_zero_load = false;
     bool entry_in_exec = false;
     uint64_t max_page_end = 0;
@@ -117,6 +120,27 @@ int x86_elf_pie_prepare(vfs_node_t *node,
         const elf64_phdr_t *ph = &phdrs[i];
         switch (ph->p_type) {
         case PT_INTERP:
+            /* The exec-time interpreter contract (T1): at most one
+             * PT_INTERP, a short NUL-terminated absolute path fully
+             * inside the file.  The caller reads and resolves the
+             * string; this check only pins its shape. */
+            if (!allow_interp)
+                return -ENOEXEC;
+            if (interp_ph)
+                return -ENOEXEC;
+            if (ph->p_filesz < 2 ||
+                ph->p_filesz > X86_ELF_INTERP_PATH_MAX ||
+                ph->p_filesz != ph->p_memsz)
+                return -ENOEXEC;
+            {
+                uint64_t interp_fend = 0;
+                if (add_overflows_u64(ph->p_offset, ph->p_filesz,
+                                      &interp_fend) ||
+                    interp_fend > file_size)
+                    return -ENOEXEC;
+            }
+            interp_ph = ph;
+            break;
         case PT_GNU_RELRO:
             return -ENOEXEC;
         /* PT_TLS is validated and instantiated by the x86-private TLS
@@ -460,5 +484,10 @@ int x86_elf_pie_prepare(vfs_node_t *node,
 
     out_pie->link_phdr_vaddr = ehdr->e_phoff;
     out_pie->image_page_end = max_page_end;
+    out_pie->has_interp = (interp_ph != NULL);
+    if (interp_ph) {
+        out_pie->interp_offset = interp_ph->p_offset;
+        out_pie->interp_filesz = interp_ph->p_filesz;
+    }
     return 0;
 }

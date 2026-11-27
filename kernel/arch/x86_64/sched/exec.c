@@ -264,7 +264,9 @@ static int setup_user_stack(uint8_t *kstack, uint64_t stack_base,
         *(uint64_t *)KSTACK(rsp + 8)  = 4096ULL;
         rsp -= 16;
         *(uint64_t *)KSTACK(rsp)      = AT_BASE;
-        *(uint64_t *)KSTACK(rsp + 8)  = 0ULL;
+        /* Interpreter load bias (0 for a static PIE — the auxv bytes
+         * of pre-T1 images are unchanged). */
+        *(uint64_t *)KSTACK(rsp + 8)  = image->interp_base;
         rsp -= 16;
         *(uint64_t *)KSTACK(rsp)      = AT_ENTRY;
         *(uint64_t *)KSTACK(rsp + 8)  = image->entry;
@@ -534,7 +536,11 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
         vfs_node_put(node);
         return load_rc;
     }
-    uint64_t entry_point = elf_img.entry;
+    /* PT_INTERP contract: the interpreter owns the first user RIP;
+     * AT_ENTRY/AT_PHDR on the initial stack still describe the main
+     * image so ld.so can find its way back. */
+    uint64_t entry_point = elf_img.has_interp ? elf_img.interp_entry
+                                              : elf_img.entry;
     tsk->flags = (tsk->flags & ~PF_LINUX_ABI) | elf_detect_abi(node);
     vfs_node_put(node);
 
@@ -758,7 +764,8 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
         vfs_node_put(node);
         return load_rc;
     }
-    uint64_t entry_point = elf_img.entry;
+    uint64_t entry_point = elf_img.has_interp ? elf_img.interp_entry
+                                              : elf_img.entry;
     uint32_t abi_flag = elf_detect_abi(node);
     vfs_node_put(node);
 

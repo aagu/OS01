@@ -17,6 +17,11 @@
  *     free every leaf in the list and return without disturbing
  *     the caller's mm.  After a successful return the caller
  *     owns the mm entirely.
+ *   * An ET_DYN main image with PT_INTERP additionally loads the
+ *     named interpreter as a second image into the same mm (own
+ *     ASLR-B bias, collision-resampled) and publishes interp_base /
+ *     interp_entry; the initial RIP then belongs to the interpreter.
+ *     ET_EXEC with PT_INTERP is rejected outright.
  *
  * This file replaces the pre-Task-2 huge-page loader (which mapped
  * each 2 MiB-aligned 2 MiB block once, regardless of where PT_LOADs
@@ -424,7 +429,26 @@ undo:
     return rc;
 }
 
-int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
+/* Core single-image loader.  Loads one ELF (ET_EXEC, static-PIE
+ * ET_DYN, or — with a PT_INTERP — records the interpreter path; the
+ * interpreter itself is loaded through a separate call) into mm.
+ *
+ *   forced_bias      non-NULL: place an ET_DYN image exactly at this
+ *                    bias (interpreter placement; collisions surface
+ *                    as -EEXIST so the caller can resample).
+ *                    NULL: sample the ASLR-B bias.
+ *   publish_mm_bounds publish mm->start_code/end_code from the image
+ *                    (the main image owns them; an interpreter load
+ *                    must not disturb them — heap placement reads
+ *                    end_code after elf_load returns).
+ *
+ * Returns 0 on success, -ENOEXEC/-ENOENT/-ENOMEM/-EAGAIN on failure
+ * (format/placement/resource), or -EEXIST when a PIE page collided
+ * with an occupied leaf (forced-bias callers resample; the public
+ * elf_load maps any residual to -ENOEXEC).  *out_image is only
+ * written on success. */
+static int elf_load_at(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image,
+                       const uint64_t *forced_bias, bool publish_mm_bounds)
 {
     if (!out_image)
         return -EINVAL;
@@ -485,21 +509,59 @@ int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
     uint64_t bias = 0;
     x86_elf_pie_t pie;
     memset(&pie, 0, sizeof(pie));
+    char interp_path[X86_ELF_INTERP_PATH_MAX];
+    bool has_interp = false;
 
     if (ehdr.e_type == ET_DYN) {
-        int prc = x86_elf_pie_prepare(node, &ehdr, phdrs, file_size, &pie);
+        /* ET_DYN mains may carry PT_INTERP (T1 exec contract); the
+         * interpreter image itself must not (it is loaded by this
+         * same path with allow_interp == false). */
+        int prc = x86_elf_pie_prepare(node, &ehdr, phdrs, file_size,
+                                      true, &pie);
         if (prc != 0) {
             kfree(phdrs);
             return prc;
         }
         is_pie = true;
     } else {
+        /* ET_EXEC with PT_INTERP is explicitly unsupported: silently
+         * running the main entry would skip the interpreter the
+         * image was linked for. */
+        for (uint16_t i = 0; i < phnum; i++) {
+            if (phdrs[i].p_type == PT_INTERP) {
+                debug_fs("elf_load: ET_EXEC with PT_INTERP rejected\n");
+                kfree(phdrs);
+                return -ENOEXEC;
+            }
+        }
         elf_layout_t layout;
         ret = elf_layout_validate(&ehdr, phdrs, file_size, &layout);
         if (ret != 0) {
             kfree(phdrs);
             return -ENOEXEC;
         }
+    }
+
+    /* ── 3.5 PT_INTERP path string (before anything is mapped) ── */
+    if (is_pie && pie.has_interp) {
+        int prd = vfs_read(node, pie.interp_offset, pie.interp_filesz,
+                           interp_path);
+        if (prd < 0 || (uint64_t)prd != pie.interp_filesz) {
+            debug_fs("elf_load: PT_INTERP read failed (ret=%d)\n", prd);
+            x86_elf_pie_dispose(&pie);
+            kfree(phdrs);
+            return -ENOEXEC;
+        }
+        /* Exactly one NUL, at the end; absolute path. */
+        if (interp_path[pie.interp_filesz - 1] != '\0' ||
+            memchr(interp_path, '\0', pie.interp_filesz - 1) != NULL ||
+            interp_path[0] != '/') {
+            debug_fs("elf_load: PT_INTERP path malformed\n");
+            x86_elf_pie_dispose(&pie);
+            kfree(phdrs);
+            return -ENOEXEC;
+        }
+        has_interp = true;
     }
 
     /* TLS validation runs after the image check and before the PIE
@@ -517,11 +579,15 @@ int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
     }
 
     if (is_pie) {
-        int brc = x86_aslr_get_pie_bias(&bias);
-        if (brc != 0) {
-            x86_elf_pie_dispose(&pie);
-            kfree(phdrs);
-            return brc;
+        if (forced_bias) {
+            bias = *forced_bias;
+        } else {
+            int brc = x86_aslr_get_pie_bias(&bias);
+            if (brc != 0) {
+                x86_elf_pie_dispose(&pie);
+                kfree(phdrs);
+                return brc;
+            }
         }
     }
 
@@ -569,7 +635,11 @@ int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
 
             if (pte && (*pte & PAGE_FLAGS_VALID_BIT)) {
                 if (is_pie) {
-                    rc = -ENOEXEC;
+                    /* A PIE image maps into an empty address window:
+                     * an occupied leaf means the placement (bias)
+                     * collides with an existing image (the interpreter
+                     * resample loop uses this signal). */
+                    rc = -EEXIST;
                     goto rollback;
                 }
                 page_phys = x86_pte_4k_pa(*pte);
@@ -678,13 +748,20 @@ int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
 
     /* ── 8. Success: publish code bounds + image descriptor. ─── */
     if (start_code == UINT64_MAX) start_code = 0;
-    mm->start_code = start_code;
-    mm->end_code   = end_code;
+    if (publish_mm_bounds) {
+        mm->start_code = start_code;
+        mm->end_code   = end_code;
+    }
     out_image->entry   = bias + ehdr.e_entry;
+    out_image->base    = is_pie ? bias : 0;
     out_image->phdr    = is_pie ? (bias + pie.link_phdr_vaddr) : 0;
     out_image->phnum   = phnum;
     out_image->is_pie  = is_pie;
     out_image->fs_base = tls.fs_base;
+    out_image->has_interp = has_interp;
+    if (has_interp) {
+        memcpy(out_image->interp_path, interp_path, pie.interp_filesz);
+    }
 
     if (is_pie)
         x86_elf_pie_dispose(&pie);
@@ -705,6 +782,81 @@ rollback:
     kfree(rollback_phys);
     kfree(phdrs);
     return rc;
+}
+
+/* ── PT_INTERP handoff (x86_64 T1) ────────────────────────────────
+ * The main image named an interpreter; open it and load it as a
+ * second ET_DYN image into the same address space at its own bias.
+ *
+ * Placement: the PIE window is shared with the main image, so each
+ * attempt samples a fresh ASLR-B bias; a collision (-EEXIST) resamples
+ * (bounded by X86_ELF_INTERP_RETRIES — the window is ~256 MiB and the
+ * images are a few pages, so exhaustion means the address space is
+ * pathologically full and is reported as -ENOMEM).  TLS/stack live
+ * above the PIE window, and the heap VMA does not exist yet, so the
+ * main image is the only collision source.
+ *
+ * Relocation ownership (T1): the kernel still applies the main
+ * image's R_X86_64_RELATIVE fixups itself; the interpreter skeleton
+ * relocates nothing — symbol relocation against shared objects is
+ * T2.  On success the caller routes the initial RIP to
+ * out_image->interp_entry; AT_ENTRY/AT_PHDR keep describing the main
+ * image and AT_BASE carries interp_base. */
+#define X86_ELF_INTERP_RETRIES 16
+
+static int elf_load_interp(mm_t *mm, x86_elf_image_t *out_image)
+{
+    vfs_node_t *interp_node = vfs_lookup(out_image->interp_path);
+    if (!interp_node) {
+        debug_fs("elf_load: interpreter '%s' not found\n",
+                 out_image->interp_path);
+        return -ENOENT;
+    }
+    if (interp_node->type != VFS_FILE) {
+        debug_fs("elf_load: interpreter '%s' is not a file\n",
+                 out_image->interp_path);
+        vfs_node_put(interp_node);
+        return -ENOEXEC;
+    }
+
+    x86_elf_image_t interp_img;
+    memset(&interp_img, 0, sizeof(interp_img));
+    int rc = -ENOMEM;
+    for (unsigned attempt = 0; attempt < X86_ELF_INTERP_RETRIES; attempt++) {
+        uint64_t bias = 0;
+        rc = x86_aslr_get_pie_bias(&bias);
+        if (rc != 0)
+            break;
+        rc = elf_load_at(interp_node, mm, &interp_img, &bias, false);
+        if (rc != -EEXIST)
+            break;
+    }
+    vfs_node_put(interp_node);
+
+    if (rc == -EEXIST) {
+        debug_fs("elf_load: interpreter placement exhausted after %u tries\n",
+                 X86_ELF_INTERP_RETRIES);
+        rc = -ENOMEM;
+    }
+    if (rc != 0)
+        return rc;
+
+    out_image->interp_base  = interp_img.base;
+    out_image->interp_entry = interp_img.entry;
+    debug_fs("elf_load: interpreter '%s' base=%lx entry=%lx\n",
+             out_image->interp_path, out_image->interp_base,
+             out_image->interp_entry);
+    return 0;
+}
+
+int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
+{
+    int rc = elf_load_at(node, mm, out_image, NULL, true);
+    if (rc == -EEXIST)
+        rc = -ENOEXEC;      /* a sampled main bias can never collide */
+    if (rc != 0 || !out_image->has_interp)
+        return rc;
+    return elf_load_interp(mm, out_image);
 }
 
 uint32_t elf_detect_abi(vfs_node_t *node)

@@ -1570,6 +1570,279 @@ TEST_FUNC(test_pie_phdr_snapshot)
 }
 
 /* ══════════════════════════════════════════════════════════════
+ * PT_INTERP — kernel-loaded interpreter (T1 exec contract)
+ * ══════════════════════════════════════════════════════════════
+ *
+ * The loader must: admit exactly one PT_INTERP in an ET_DYN main,
+ * read a NUL-terminated absolute path from it, resolve it through
+ * vfs_lookup, load the interpreter as a second ET_DYN image at its
+ * own resampled bias (collisions → -EEXIST → resample), publish
+ * interp_base/interp_entry, and leave mm code bounds and the main
+ * image's auxv anchors untouched. */
+
+#define INTERP_MAIN_ENTRY 0x80ULL
+
+static uint8_t   interp_buf[ELF_MAX_BYTES];
+static vfs_node_t interp_fixture_node;
+
+/* Build an ET_DYN main that carries PT_INTERP in addition to the
+ * static-PIE minimum (RX load covering ehdr+phdrs, RW load, RW/NX
+ * PT_DYNAMIC, DF_1_PIE).  The path string lands right after the
+ * phdr table, inside the first PT_LOAD's file range.  `path_bytes`
+ * is written verbatim — callers control NUL-termination to drive
+ * the malformed-path rejections.  Returns the file size. */
+static size_t build_pie_interp_image(const void *path_bytes, size_t path_len)
+{
+    memset(elf_buf, 0, ELF_MAX_BYTES);
+
+    const uint16_t phnum = 4;
+    const uint64_t ph_off = sizeof(elf64_ehdr_t);
+    const uint64_t text_end_off = ph_off + (uint64_t)phnum * sizeof(elf64_phdr_t)
+                                + path_len;
+
+    const uint64_t rw_off = 0x1000;
+    const uint64_t dyn_off = rw_off + 0x100;
+    const uint64_t rw_filesz = (dyn_off - rw_off) + sizeof(elf64_dyn_t) * 2;
+
+    elf64_ehdr_t *e = (elf64_ehdr_t *)elf_buf;
+    e->e_ident[EI_MAG0] = ELFMAG0;
+    e->e_ident[EI_MAG1] = ELFMAG1;
+    e->e_ident[EI_MAG2] = ELFMAG2;
+    e->e_ident[EI_MAG3] = ELFMAG3;
+    e->e_ident[EI_CLASS] = ELFCLASS64;
+    e->e_ident[EI_DATA] = ELFDATA2LSB;
+    e->e_ident[EI_VERSION] = 1;
+    e->e_type = ET_DYN;
+    e->e_machine = EM_X86_64;
+    e->e_version = 1;
+    e->e_entry = INTERP_MAIN_ENTRY;
+    e->e_phoff = ph_off;
+    e->e_ehsize = sizeof(elf64_ehdr_t);
+    e->e_phentsize = sizeof(elf64_phdr_t);
+    e->e_phnum = phnum;
+
+    elf64_phdr_t *ph = (elf64_phdr_t *)(elf_buf + ph_off);
+    /* 0: RX PT_LOAD at vaddr 0 covering ehdr + phdrs + interp string */
+    ph[0].p_type = PT_LOAD;
+    ph[0].p_flags = PF_R | PF_X;
+    ph[0].p_offset = 0;
+    ph[0].p_vaddr = 0;
+    ph[0].p_filesz = text_end_off;
+    ph[0].p_memsz = 0x1000;
+    ph[0].p_align = 0x1000;
+    /* 1: RW PT_LOAD */
+    ph[1].p_type = PT_LOAD;
+    ph[1].p_flags = PF_R | PF_W;
+    ph[1].p_offset = rw_off;
+    ph[1].p_vaddr = 0x1000;
+    ph[1].p_filesz = rw_filesz;
+    ph[1].p_memsz = 0x1000;
+    ph[1].p_align = 0x1000;
+    /* 2: PT_DYNAMIC (RW/NX, DF_1_PIE) */
+    ph[2].p_type = PT_DYNAMIC;
+    ph[2].p_flags = PF_R | PF_W;
+    ph[2].p_offset = dyn_off;
+    ph[2].p_vaddr = 0x1000 + (dyn_off - rw_off);
+    ph[2].p_filesz = 2 * sizeof(elf64_dyn_t);
+    ph[2].p_memsz = 2 * sizeof(elf64_dyn_t);
+    ph[2].p_align = 8;
+    elf64_dyn_t *dyn = (elf64_dyn_t *)(elf_buf + dyn_off);
+    dyn[0].d_tag = DT_FLAGS_1;
+    dyn[0].d_val = DF_1_PIE;
+    dyn[1].d_tag = DT_NULL;
+    dyn[1].d_val = 0;
+    /* 3: PT_INTERP */
+    ph[3].p_type = PT_INTERP;
+    ph[3].p_flags = PF_R;
+    ph[3].p_offset = ph_off + 4ULL * sizeof(elf64_phdr_t);
+    ph[3].p_vaddr = ph[3].p_offset;
+    ph[3].p_filesz = path_len;
+    ph[3].p_memsz = path_len;
+    ph[3].p_align = 1;
+    memcpy(elf_buf + ph[3].p_offset, path_bytes, path_len);
+
+    return (size_t)(rw_off + rw_filesz);
+}
+
+/* Install a second fixture node backed by interp_buf as the vfs_lookup
+ * result: an ldso-shaped static PIE the existing PIE path accepts.
+ * NOTE: building it clobbers the shared elf_buf, so callers must run
+ * this BEFORE build_pie_interp_image() re-arms the main fixture. */
+static void install_interp_node(void)
+{
+    elf64_dyn_t dyns[] = { { DT_FLAGS_1, DF_1_PIE }, { DT_NULL, 0 } };
+    size_t isz = build_pie_image(0x40, 0x100, 0x1000, 0x100, 0x1000,
+                                 dyns, 2, NULL, 0, NULL, NULL);
+    memcpy(interp_buf, elf_buf, isz);
+
+    memset(&interp_fixture_node, 0, sizeof(interp_fixture_node));
+    interp_fixture_node.name = (char *)interp_buf;
+    interp_fixture_node.size = isz;
+    interp_fixture_node.type = VFS_FILE;
+}
+
+TEST_FUNC(test_pie_interp_accepted_and_published)
+{
+    install_interp_node();
+    size_t sz = build_pie_interp_image("/lib/ld.so", 11);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_lookup_node = &interp_fixture_node;   /* after stubs_reset() */
+
+    /* Main bias raw=0 → 0x400000; interp raw=0xffff → 0x103ff000
+     * (raw 0 would collide with the main image). */
+    stubs_rng_push(true, 0ULL);
+    stubs_rng_push(true, 0xffffULL);
+
+    x86_elf_image_t img;
+    memset(&img, 0, sizeof(img));
+    assert_eq(0, elf_load(&fixture_node, &fixture_mm, &img));
+
+    assert_true(img.has_interp);
+    assert_eq(0, strcmp(img.interp_path, "/lib/ld.so"));
+    assert_eq(0x400000ULL, img.base);
+    assert_eq(0x400000ULL + INTERP_MAIN_ENTRY, img.entry);
+    assert_eq(0x103ff000ULL, img.interp_base);
+    assert_eq(0x103ff000ULL + 0x40ULL, img.interp_entry);
+    /* AT_PHDR anchors stay on the main image. */
+    assert_eq(0x400000ULL + sizeof(elf64_ehdr_t), img.phdr);
+    /* mm code bounds still describe the MAIN image — the heap is
+     * placed from end_code after elf_load returns. */
+    assert_eq(0x402000ULL, fixture_mm.end_code);
+    assert_eq(0x400000ULL, fixture_mm.start_code);
+    /* Both images are resident, at disjoint bases. */
+    assert_not_null(stubs_find_mapping(0x400000ULL));
+    assert_not_null(stubs_find_mapping(0x103ff000ULL));
+    assert_not_null(stubs_find_mapping(0x103ff000ULL + 0x1000ULL));
+    /* The loader released the interpreter node. */
+    assert_true(elf_load_state.total_node_puts >= 1);
+    teardown_fixture();
+}
+
+TEST_FUNC(test_pie_interp_collision_resamples)
+{
+    install_interp_node();
+    size_t sz = build_pie_interp_image("/lib/ld.so", 11);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_lookup_node = &interp_fixture_node;   /* after stubs_reset() */
+
+    /* Attempt 1 samples the main image's own bias → occupied leaves
+     * (-EEXIST); attempt 2 lands free. */
+    stubs_rng_push(true, 0ULL);
+    stubs_rng_push(true, 0ULL);
+    stubs_rng_push(true, 0xffffULL);
+
+    x86_elf_image_t img;
+    memset(&img, 0, sizeof(img));
+    assert_eq(0, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0x103ff000ULL, img.interp_base);
+    assert_eq(3, elf_load_state.total_rng_calls);
+    teardown_fixture();
+}
+
+TEST_FUNC(test_pie_interp_collision_exhausted)
+{
+    install_interp_node();
+    size_t sz = build_pie_interp_image("/lib/ld.so", 11);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_lookup_node = &interp_fixture_node;   /* after stubs_reset() */
+
+    /* Main + 16 colliding interp samples: placement is reported as
+     * -ENOMEM and the main image survives intact. */
+    stubs_rng_push(true, 0ULL);
+    for (int i = 0; i < 16; i++)
+        stubs_rng_push(true, 0ULL);
+
+    x86_elf_image_t img;
+    memset(&img, 0xAA, sizeof(img));
+    assert_eq(-ENOMEM, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(17, elf_load_state.total_rng_calls);
+    assert_eq(0xAAAAAAAAAAAAAAAAULL, img.interp_base);
+    assert_not_null(stubs_find_mapping(0x400000ULL));
+    teardown_fixture();
+}
+
+TEST_FUNC(test_pie_interp_missing_file_enoent)
+{
+    size_t sz = build_pie_interp_image("/lib/ld.so", 11);
+    setup_fixture(sz, 0x100000ULL);
+    /* No stubs_lookup_node: the path does not resolve. */
+
+    stubs_rng_push(true, 0ULL);
+    x86_elf_image_t img;
+    memset(&img, 0xAA, sizeof(img));
+    assert_eq(-ENOENT, elf_load(&fixture_node, &fixture_mm, &img));
+    /* The main image itself is loaded and its descriptor published
+     * (callers drop the whole mm on any nonzero return); the
+     * interpreter half stays unpopulated. */
+    assert_eq(0x400000ULL, img.base);
+    assert_eq(0xAAAAAAAAAAAAAAAAULL, img.interp_base);
+    assert_eq(0xAAAAAAAAAAAAAAAAULL, img.interp_entry);
+    assert_not_null(stubs_find_mapping(0x400000ULL));
+    teardown_fixture();
+}
+
+TEST_FUNC(test_pie_interp_bad_path_rejected)
+{
+    /* Relative path: rejected before any mapping or RNG draw. */
+    size_t sz = build_pie_interp_image("lib/ld.so", 10);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_rng_push(true, 0ULL);
+    x86_elf_image_t img;
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0, elf_load_state.total_rng_calls);
+    assert_eq(0, elf_load_state.total_allocs);
+    teardown_fixture();
+
+    /* Unterminated path: the NUL must close the string exactly. */
+    sz = build_pie_interp_image("/lib/ld.soX", 11);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_rng_push(true, 0ULL);
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0, elf_load_state.total_rng_calls);
+    teardown_fixture();
+
+    /* Over-long path: beyond the 256-byte cap the PIE validator
+     * rejects the PT_INTERP segment itself. */
+    char long_path[300];
+    memset(long_path, 'x', sizeof(long_path));
+    long_path[0] = '/';
+    long_path[299] = '\0';
+    sz = build_pie_interp_image(long_path, 300);
+    setup_fixture(sz, 0x100000ULL);
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0, elf_load_state.total_rng_calls);
+    teardown_fixture();
+}
+
+TEST_FUNC(test_etexec_interp_rejected)
+{
+    /* ET_EXEC + PT_INTERP is rejected outright: running the main
+     * entry would silently skip the interpreter the image needs. */
+    segment_spec_t segs[2] = {
+        { .flags = PF_R | PF_X, .vaddr = 0x400000, .filesz = 0x100,
+          .memsz = 0x1000, .data = NULL },
+        { .flags = PF_R | PF_W, .vaddr = 0x401000, .filesz = 0x40,
+          .memsz = 0x1000, .data = NULL },
+    };
+    size_t file_size = build_elf_image(0x400010, segs, 2);
+    elf64_phdr_t *ph = (elf64_phdr_t *)(elf_buf + sizeof(elf64_ehdr_t));
+    ph[1].p_type = PT_INTERP;
+    ph[1].p_flags = PF_R;
+    ph[1].p_offset = 0x40;
+    ph[1].p_vaddr = 0x401000;
+    ph[1].p_filesz = 11;
+    ph[1].p_memsz = 11;
+    setup_fixture(file_size, 0x100000ULL);
+
+    x86_elf_image_t img;
+    memset(&img, 0xAA, sizeof(img));
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0, elf_load_state.total_rng_calls);
+    assert_eq(0, elf_load_state.total_allocs);
+    teardown_fixture();
+}
+
+/* ══════════════════════════════════════════════════════════════
  * PT_TLS — Variant II static TLS
  * ══════════════════════════════════════════════════════════════ */
 
@@ -2245,6 +2518,12 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_pie_reject_before_mapping),
     TEST_ENTRY(test_pie_failure_unwinds),
     TEST_ENTRY(test_pie_phdr_snapshot),
+    TEST_ENTRY(test_pie_interp_accepted_and_published),
+    TEST_ENTRY(test_pie_interp_collision_resamples),
+    TEST_ENTRY(test_pie_interp_collision_exhausted),
+    TEST_ENTRY(test_pie_interp_missing_file_enoent),
+    TEST_ENTRY(test_pie_interp_bad_path_rejected),
+    TEST_ENTRY(test_etexec_interp_rejected),
     TEST_ENTRY(test_tls_etexec_variant_ii),
     TEST_ENTRY(test_tls_align_zero_and_one),
     TEST_ENTRY(test_tls_pure_tbss_tinygo_shape),
