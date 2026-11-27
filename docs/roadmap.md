@@ -51,7 +51,8 @@
 
 | 问题 | 位置 | 真机影响 | 状态 / 剩余解法 |
 |------|------|----------|----------|
-| **根文件系统无块设备**（RPi5 / Dragon Q8B 当前唯一阻断） | `kernel/fs/boot.c:92` `mount_disk_by_guid()` 在 `block_device_count() <= 0` 时返回 `-ENODEV`；Dragon Q8B 无 NVMe/USB 块驱动，RPi5 RP1 xHCI + USB MSC 已实现并完成 QEMU `virt` E2E 验收（`test-aarch64-usb-boot`），物理板冷启动取证待实测（[aarch64-usb-boot-qualification.md](driver/aarch64-usb-boot-qualification.md)） | boot-3 `stage=fs component=root rc=-19`，进不了 rootfs 与用户态 | ❌ **仍开放**（QEMU aarch64 USB 引导已闭环，RPi5 真机实测待完成；Dragon Q8B 仍待存储或内存根方案） |
+| **根文件系统无块设备**（Dragon Q8B 当前唯一阻断；RPi5 已打通） | `kernel/fs/boot.c:92` `mount_disk_by_guid()` 在 `block_device_count() <= 0` 时返回 `-ENODEV`；Dragon Q8B 无 NVMe/USB 块驱动。RPi5 RP1 xHCI + USB MSC 已于 2026-11-28 在真机实测通过（`rp1-usb0`/`rp1-usb1`、`0951:1665` `usba`、`root=usba2 boot=usba1`、`SHOOTDOWN-PROBE: OK` 并拉起 `pid=1`，[aarch64-usb-boot-qualification.md](driver/aarch64-usb-boot-qualification.md)） | Dragon Q8B 停在 boot-3 `stage=fs component=root rc=-19`；RPi5 已跨过根盘挂载并进入用户态 `init` | ❌ **Dragon Q8B 仍开放**（待存储或内存根方案）；✅ **RPi5 USB 根盘挂载已实测打通** |
+| **Cortex-A76（RPi5）ARMv8.1-PAN 用户态写权限异常** | `kernel/arch/aarch64/syscall/sys_misc.c:53-59`（`getrandom` 在 `uaccess_user_write_begin()` 后直接把用户地址传给 `get_random_bytes()` → `memcpy()`）及未显式管理 `PSTATE.PAN` / `SCTLR_EL1.SPAN` 的 `uaccess` 路径 | RPi5（Cortex-A76）拉起 `init`（`pid=1`）后首个 `getrandom` 触发 Data Abort 停机：`ec=0x25 esr=0x9600004f`（level-3 Permission fault）、`spsr=0x204003c5`（bit 22 `PAN=1`）、`far=0x07af57c0`；QEMU `cortex-a53`（ARMv8.0-A）无 PAN 硬件特性故未复现 | ❌ **仍开放**（需将直写用户地址的 syscall 改为经内核缓冲 + `copy_to_user()`，或在 `uaccess` / 异常入口管理 `PAN`） |
 
 （注：`GICv3 驱动缺失` 已于 2026-11-27 通过 ACPI + `gic_driver.c`/`gic.c`/`ipi.c` 落地并在 Dragon Q8B 实机跑通 `intids=992`；DTB 路径的 `arm,gic-v3` 节点解析与 GICv3 多核 SMP IPI 实测待后续补齐。）
 
@@ -68,7 +69,8 @@
 
 | 项 | 内容 | 状态 |
 |----|------|------|
-| 4 核 SMP / AP 启动实测 | RPi5 DTB 报 4 CPUs（`[dtb] /cpus: 4 CPUs, BSP MPIDR=0x0`），目前只跑通 BSP；AP 启动需 PSCI 实测（DTB `psci conduit=1`）与 `SUBSYS_INITCALL` 下的 SMP 门禁验证 | ❌ **仍开放** |
+| 4 核 SMP / AP 启动实测 | RPi5 4 核 PSCI SMP 与 `SHOOTDOWN-PROBE: OK`（经 `config.txt` `platform rpi5` 传递 `0x2000000000` 探测 PA）已于 2026-11-28 在真机实测通过：`requested=4 online=4 status=PASS`、`spinlock`、`clocksource`、`cntp`、`IRQ` 均通过 | ✅ **RPi5 4 核 SMP 已实测通过** |
+| RPi5 显示分辨率与串口 RX | 真机 UEFI GOP 仅由 TF 卡 VideoCore `config.txt` 控制（实测 `[logo] boot logo drawn (aarch64, 1920x1080)`）；DTB 中 PL011 `spi=0`，控制台 RX IRQ 未武装（`PL011 console RX IRQ not armed (intid=0)`） | ⚠️ **已知边界**（分辨率需改 TF 卡 VideoCore `config.txt`；串口交互需轮询或后续接入 RP1/PL011 中断） |
 
 **平台能力上限（非阻断，选型需知）**：PA 上限 40-bit/1 TiB（`kernel/arch/aarch64/head.S:252-268` TCR IPS=0b010、`kernel/arch/aarch64/memory/page_table.c:51`，未实现 `ID_AA64MMFR0_EL1.PARange` 动态探测）；早期 identity map 默认 [0x0, 0x80000000)，`AARCH64_BOOT_BLOCK_BASE >= 0x80000000` 时扩展为 [0x0, 0xC0000000)。
 

@@ -2,16 +2,15 @@
 
 本文档记录 `feat/aarch64-usb-boot` 分支上 AArch64 USB Mass Storage（512 B、单 LUN、BOT）引导的自动化验证结果、`/etc/usb-boot-check.sh` 脚本验证，以及 Raspberry Pi 5 Model B 物理实机的待测边界。
 
-## 1. 实机与硬件覆盖声明（QEMU-only）
+## 1. 实机与硬件覆盖（QEMU + RPi5 实机串口取证）
 
-- **当前验证环境为纯 QEMU 虚拟化环境，无物理 Raspberry Pi 5 Model B 硬件连接。**
-- 已在本地完成 RPi5 目标产物构建：`make PROFILE=aarch64-clang AARCH64_PLATFORM=rpi5 aarch64-uefi`（产物 `build/aarch64-clang/image/rpi5/aarch64-uefi.img`）及 Dragon Q8B 构建（`build/aarch64-clang/image/dragon-q8b/aarch64-uefi.img`，ACPI-only 路径 `rp1-xhci` 安全缺席）。
-- 以下 RPi5 物理实机项目**尚未执行（待物理板就绪后由 T5 实测补齐）**：
-  - WoR UEFI v0.3 DT 模式下实机 `RPI_EFI.fd` + 平台 DTB 冷启动两次取证；
-  - 真实 BCM2712 RC `BAR1` / `outbound` / `inbound` 窗口、`DWC3 GSNPSID`、`xHCI HCH` 与 RP1 115200 8N1 串口 `OS01-USB# ` 提示符；
-  - 拔除 U 盘后确认 TF 卡无 OS01 可启动项；
-  - 物理 U 盘 `VID:PID`、协商速度与双分区读回记录。
-- **路线图阻断状态**：因 RPi5 真机实测尚未执行，[路线图](../roadmap.md) 中 RPi5 USB 根盘真机阻断保持开放。
+- **RPi5 实机实测结果（2026-11-28，`/dev/ttyUSB0` 115200 8N1）**：
+  - 硬件与固件：`boardrev c04170`、`bcm2712-rpi-5-b.dtb`、WoR `RPI_EFI.fd`（v0.3 DT 模式），测试 U 盘 `Kingston DataTraveler 2.0 1.00`（`0951:1665`，High-Speed `speed=3`，30233588 扇区，512 B 块）；
+  - **已实测通过**：RP1 xHCI 接管（`bar1=0x1f00000000 dma=[0x0,0xc0000000) ctrls=2`、`rp1-usb0 @ 0x1f00200000`、`rp1-usb1 @ 0x1f00300000`）→ USB MSC 发布 `usba` → GUID 选盘并挂载 `root=usba2 boot=usba1 (/boot ok)` → 4 核 PSCI SMP（`requested=4 online=4 status=PASS`）→ `SHOOTDOWN-PROBE: OK`（经 `config.txt` `platform rpi5` 传递 `0x2000000000`）→ 拉起用户态 `init`（`pid=1`）；
+  - **当前真机阻断（未进 shell）**：`init`（`pid=1`）首个 `getrandom` 系统调用在 `memcpy` 触发 Data Abort：`ec=0x25 esr=0x9600004f`（level-3 Permission fault）、`spsr=0x204003c5`（Cortex-A76 硬件 `ARMv8.1-PAN` 置位 `PAN=1`）、`far=0x07af57c0`；已记录至 [roadmap.md](../roadmap.md)。
+  - **其余待补**：解决 PAN 问题后完成 `OS01-USB# ` shell 标记读回与拔除 U 盘冷启动阴性验证；
+  - 串口原始日志归档：`test-results/rpi5-usb-boot/{serial-live.log,serial-run2.log,serial-run3.log}`。
+- **Dragon Q8B**：完成镜像构建（`build/aarch64-clang/image/dragon-q8b/aarch64-uefi.img`），ACPI-only 路径 `rp1-xhci` 安全缺席；物理板仍待存储或内存根方案。
 
 ## 2. `/etc/usb-boot-check.sh` 验收脚本验证（QEMU `virt`）
 

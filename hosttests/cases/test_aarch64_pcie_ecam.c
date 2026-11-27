@@ -737,7 +737,6 @@ static void case_ecam_xhci_high_bar0_mapping(void)
     };
     assert_eq(0, aarch64_pcie_prepare(&ctx));
     assert_true(!aarch64_pcie_xhci_bar0_ready(&pdev));
->>>>>>> 8bfcfa31 (feat(aarch64): boot USB mass storage on QEMU PCI xHCI)
 }
 
 int main(void)
