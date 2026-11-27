@@ -26,8 +26,9 @@
  * for(;;) arch_cpu_halt() — the probe MUST NOT return on failure
  * (the production build is meant to halt, not crash).
  *
- * SCRATCH_VA = ARCH_PAGE_OFFSET + 0x10000000 (PA 0x10000000 ∈ QEMU
- * virt device gap [0x0a000000, 0x40000000); not in M1 R∪B∪D so the
+ * SCRATCH_VA = ARCH_PAGE_OFFSET + 0x0a200000 (PA 0x0a200000 ∈ the
+ * QEMU virt device-gap hole [0x0a200000, 0x10000000) — above the
+ * virtio-mmio window and below the PCIe MMIO32 bus window, so the
  * L2 slot is empty and map_4k_new cannot collide). The pre-condition
  * `query == -ENOENT` is a regression trap: if a future memory-layout
  * change adds a mapping at this PA, the probe fails loudly rather
@@ -71,14 +72,26 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <errno.h>                /* ENOENT */
+#include <arch/aarch64/boot_layout.h> /* AARCH64_SHOOTDOWN_PROBE_SCRATCH_PA */
 #include <memory/vmm.h>           /* ARCH_PAGE_OFFSET (via arch/mmu.h),
                                    * VM_KERNEL_RW semantic bits */
 
-/* SCRATCH_VA — QEMU virt device-gap window PA 0x10000000 (spec §7.3
+/* SCRATCH_VA — QEMU virt device-gap hole PA 0x0a200000 (spec §7.3
  * v5). Lives at PGD[0] (kernel-high half at 0xffff_0000_0000_0000,
  * PGD index = 0) so the production image's TTBR1 root has the L1/L2
- * slots guaranteed empty for this VA. */
-#define AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA  (ARCH_PAGE_OFFSET + 0x10000000UL)
+ * slots guaranteed empty for this VA.
+ *
+ * The PA MUST sit in a 2 MiB block that no device window maps: the
+ * probe's step-3 precondition is `query_4k(SCRATCH_VA) == -ENOENT`
+ * and map_4k_new cannot split an occupied 2 MiB block.  The QEMU virt
+ * device map is listed in boot_layout.h next to
+ * AARCH64_SHOOTDOWN_PROBE_SCRATCH_PA.
+ *
+ * 2026-11-27: the scratch VA used to be PA 0x10000000 — the base of the
+ * PCIe MMIO32 bus window, which aarch64_pcie_prepare() pre-maps at
+ * 2 MiB granularity.  The probe then failed with "scratch-non-empty"
+ * and halted the kernel before the SMP scheduler selftest. */
+#define AARCH64_SHOOTDOWN_PROBE_SCRATCH_VA  (ARCH_PAGE_OFFSET + AARCH64_SHOOTDOWN_PROBE_SCRATCH_PA)
 
 /* Distinct 64-bit patterns written to the two scratch pages before
  * mapping them at SCRATCH_VA. Both fit comfortably in a 64-bit word
@@ -277,7 +290,7 @@ aarch64_shootdown_probe_body(const struct aarch64_shootdown_probe_ops *ops)
 
     /* Step 3: scratch VA must be absent before any map_4k_new.
      * Regression trap — if the memory layout ever places a
-     * mapping at PA 0x10000000, this assertion fires before the
+     * mapping at the scratch PA, this assertion fires before the
      * probe would silently overwrite a live entry. */
     void *pgdir = ops->pgdir_get();
     {
