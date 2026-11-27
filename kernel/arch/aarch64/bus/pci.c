@@ -21,6 +21,22 @@ static struct aarch64_pcie_root_desc s_ready_roots[AARCH64_PCIE_MAX_ROOTS];
 static struct pci_root s_pci_roots[AARCH64_PCIE_MAX_ROOTS];
 static uint32_t s_ready_root_count = 0U;
 
+#define AARCH64_PCIE_MAX_XHCI 4U
+#define AARCH64_XHCI_BAR0_SIZE 0x4000ULL
+
+struct aarch64_xhci_bar0_window {
+    bool valid;
+    uint16_t domain;
+    uint8_t bus;
+    uint8_t slot;
+    uint8_t fn;
+    uint64_t cpu_pa;
+    uint64_t size;
+};
+
+static struct aarch64_xhci_bar0_window s_xhci_bar0_windows[AARCH64_PCIE_MAX_XHCI];
+static uint32_t s_xhci_bar0_count = 0U;
+
 #define GICV2M_MSI_TYPER     0x008ULL
 #define GICV2M_MSI_SETSPI_NS 0x040ULL
 
@@ -243,6 +259,14 @@ static int aarch64_pci_map_mmio(uint16_t domain, uint64_t cpu_phys, uint64_t len
             return 0;
         }
     }
+    for (uint32_t i = 0U; i < s_xhci_bar0_count; i++) {
+        const struct aarch64_xhci_bar0_window *win = &s_xhci_bar0_windows[i];
+        if (win->valid && win->domain == domain &&
+            pcie_range_contains(win->cpu_pa, win->size, cpu_phys, length, NULL)) {
+            *out_virt = (void *)(uintptr_t)(ARCH_PAGE_OFFSET + cpu_phys);
+            return 0;
+        }
+    }
     return -ENOENT;
 }
 
@@ -325,9 +349,153 @@ static bool pcie_map_device_window_2m(uint16_t domain, const char *label,
     return true;
 }
 
+static void pcie_prepare_xhci_bar0(const struct aarch64_pcie_root_desc *ready,
+                                   const void *mmap_ptr, uint32_t stride,
+                                   uint32_t desc_count, uint64_t *ttbr1_root)
+{
+    uint8_t bus = ready->bus_start;
+    for (uint8_t slot = 0U; slot < 32U; slot++) {
+        for (uint8_t fn = 0U; fn < 8U; fn++) {
+            if (s_xhci_bar0_count >= AARCH64_PCIE_MAX_XHCI) {
+                return;
+            }
+            uint32_t id_reg = 0U;
+            if (aarch64_pci_read32(ready->domain, bus, slot, fn, 0x00U, &id_reg, NULL) != 0) {
+                continue;
+            }
+            uint16_t vendor = (uint16_t)(id_reg & 0xFFFFU);
+            uint16_t device = (uint16_t)((id_reg >> 16) & 0xFFFFU);
+            if (vendor != 0x1b36U || device != 0x000dU) {
+                continue;
+            }
+
+            uint32_t class_reg = 0U;
+            if (aarch64_pci_read32(ready->domain, bus, slot, fn, 0x08U, &class_reg, NULL) != 0) {
+                continue;
+            }
+            if (((class_reg >> 8) & 0xFFFFFFU) != 0x0c0330U) {
+                continue;
+            }
+
+            uint32_t bar0_lo = 0U;
+            if (aarch64_pci_read32(ready->domain, bus, slot, fn, 0x10U, &bar0_lo, NULL) != 0) {
+                continue;
+            }
+            if ((bar0_lo & 0x1U) != 0U) {
+                continue;
+            }
+
+            uint8_t bar_type = (uint8_t)((bar0_lo >> 1) & 0x3U);
+            uint64_t pci_addr = 0ULL;
+            uint8_t space = PCI_SPACE_MMIO32;
+            if (bar_type == 0x2U) {
+                uint32_t bar0_hi = 0U;
+                if (aarch64_pci_read32(ready->domain, bus, slot, fn, 0x14U, &bar0_hi, NULL) != 0) {
+                    continue;
+                }
+                pci_addr = ((uint64_t)bar0_hi << 32) | (uint64_t)(bar0_lo & ~0xFULL);
+                space = PCI_SPACE_MMIO64;
+            } else if (bar_type == 0x0U) {
+                pci_addr = (uint64_t)(bar0_lo & ~0xFULL);
+                space = PCI_SPACE_MMIO32;
+            } else {
+                continue;
+            }
+
+            if (pci_addr == 0ULL || (pci_addr & (AARCH64_XHCI_BAR0_SIZE - 1ULL)) != 0ULL) {
+                continue;
+            }
+
+            uint64_t cpu_pa = 0ULL;
+            if (aarch64_pci_translate_resource(ready->domain, space, pci_addr,
+                                               AARCH64_XHCI_BAR0_SIZE, &cpu_pa) != 0) {
+                continue;
+            }
+
+            if (!pcie_map_device_window_2m(ready->domain, "xHCI-BAR0", cpu_pa,
+                                           AARCH64_XHCI_BAR0_SIZE, mmap_ptr, stride,
+                                           desc_count, ttbr1_root)) {
+                continue;
+            }
+
+            s_xhci_bar0_windows[s_xhci_bar0_count++] = (struct aarch64_xhci_bar0_window){
+                .valid = true,
+                .domain = ready->domain,
+                .bus = bus,
+                .slot = slot,
+                .fn = fn,
+                .cpu_pa = cpu_pa,
+                .size = AARCH64_XHCI_BAR0_SIZE,
+            };
+        }
+    }
+}
+
+bool aarch64_pcie_xhci_bar0_ready(const struct pci_device *pdev)
+{
+    if (!pdev || pdev->vendor != 0x1b36U || pdev->device != 0x000dU ||
+        pdev->class_code != 0x0c0330U) {
+        return false;
+    }
+    const struct aarch64_xhci_bar0_window *win = NULL;
+    for (uint32_t i = 0U; i < s_xhci_bar0_count; i++) {
+        if (s_xhci_bar0_windows[i].valid &&
+            s_xhci_bar0_windows[i].domain == pdev->domain &&
+            s_xhci_bar0_windows[i].bus == pdev->bus &&
+            s_xhci_bar0_windows[i].slot == pdev->slot &&
+            s_xhci_bar0_windows[i].fn == pdev->fn) {
+            win = &s_xhci_bar0_windows[i];
+            break;
+        }
+    }
+    if (!win) {
+        return false;
+    }
+
+    uint32_t bar0_lo = 0U;
+    if (aarch64_pci_read32(pdev->domain, pdev->bus, pdev->slot, pdev->fn,
+                           0x10U, &bar0_lo, NULL) != 0 || (bar0_lo & 0x1U) != 0U) {
+        return false;
+    }
+    uint8_t bar_type = (uint8_t)((bar0_lo >> 1) & 0x3U);
+    uint64_t pci_addr = 0ULL;
+    uint8_t space = PCI_SPACE_MMIO32;
+    if (bar_type == 0x2U) {
+        uint32_t bar0_hi = 0U;
+        if (aarch64_pci_read32(pdev->domain, pdev->bus, pdev->slot, pdev->fn,
+                               0x14U, &bar0_hi, NULL) != 0) {
+            return false;
+        }
+        pci_addr = ((uint64_t)bar0_hi << 32) | (uint64_t)(bar0_lo & ~0xFULL);
+        space = PCI_SPACE_MMIO64;
+    } else if (bar_type == 0x0U) {
+        pci_addr = (uint64_t)(bar0_lo & ~0xFULL);
+        space = PCI_SPACE_MMIO32;
+    } else {
+        return false;
+    }
+
+    uint64_t cur_cpu_pa = 0ULL;
+    if (aarch64_pci_translate_resource(pdev->domain, space, pci_addr,
+                                       win->size, &cur_cpu_pa) != 0) {
+        return false;
+    }
+    if (cur_cpu_pa != win->cpu_pa) {
+        return false;
+    }
+    if (!pdev->bars[0].valid || pdev->bars[0].address != win->cpu_pa) {
+        return false;
+    }
+    return true;
+}
+
 int aarch64_pcie_prepare(const struct boot_context *ctx)
 {
     s_ready_root_count = 0U;
+    s_xhci_bar0_count = 0U;
+    for (uint32_t i = 0U; i < AARCH64_PCIE_MAX_XHCI; i++) {
+        s_xhci_bar0_windows[i] = (struct aarch64_xhci_bar0_window){0};
+    }
     s_aarch64_pci_backend.root_count = 0U;
     s_v2m_ready = false;
     s_v2m_base = 0ULL;
@@ -430,6 +598,7 @@ int aarch64_pcie_prepare(const struct boot_context *ctx)
         s_pci_roots[s_ready_root_count].domain = ready.domain;
         s_pci_roots[s_ready_root_count].bus = ready.bus_start;
         s_ready_root_count++;
+        pcie_prepare_xhci_bar0(&ready, mmap_ptr, stride, desc_count, ttbr1_root);
     }
 
     if (s_ready_root_count > 0U) {

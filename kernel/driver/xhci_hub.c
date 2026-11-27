@@ -540,7 +540,7 @@ static void hub_log_device(const struct xhci_controller *ctrl,
     uint8_t isc = slot->msc_iface.active ? 0x06 : slot->iface.subclass_code;
     uint8_t ip = slot->msc_iface.active ? 0x50 : slot->iface.protocol;
     (void)ic; (void)isc; (void)ip;
-    log_info("[xhci] device %s root=%u route=0x%05x slot=%u parent=%u port=%u speed=%u speed_id=%u iface=%02x:%02x:%02x\n",
+    log_info("[xhci] device %s root=%u route=0x%x slot=%u parent=%u port=%u speed=%u speed_id=%u iface=%02x:%02x:%02x\n",
              xhci_ctrl_loc(ctrl),
              (unsigned)slot->loc.root_port, (unsigned)slot->loc.route,
              (unsigned)slot->slot_id, (unsigned)slot->loc.parent_slot,
@@ -557,7 +557,7 @@ static int hub_probe_location(struct xhci_controller *ctrl,
     uint8_t slot_id = 0;
     int rc = xhci_enumerate_at(ctrl, loc, NULL, deadline_ns, &slot_id);
     if (rc != 0) {
-        log_warn("[xhci-hub] root=%u route=0x%05x: enumerate failed (rc=%d)\n",
+        log_warn("[xhci-hub] root=%u route=0x%x: enumerate failed (rc=%d)\n",
                  (unsigned)loc->root_port, (unsigned)loc->route, rc);
         return rc;
     }
@@ -580,7 +580,7 @@ static int hub_probe_location(struct xhci_controller *ctrl,
 
     uint8_t hub_status_dci = 0;
     if (desc.bDeviceClass == USB_CLASS_HUB) {
-        rc = xhci_hub_validate_config_dci(slot, (const uint8_t *)slot->dma_buf_virt,
+        rc = xhci_hub_validate_config_dci(slot, (const uint8_t *)slot->data_dma.cpu,
                                           cfg_actual_len, &hub_status_dci);
         if (rc != 0) {
             xhci_free_slot(ctrl, slot_id);
@@ -588,7 +588,7 @@ static int hub_probe_location(struct xhci_controller *ctrl,
         }
     }
 
-    rc = xhci_setup_endpoint_rings(slot, (const uint8_t *)slot->dma_buf_virt,
+    rc = xhci_setup_endpoint_rings(slot, (const uint8_t *)slot->data_dma.cpu,
                                    cfg_actual_len);
     if (rc != 0) {
         xhci_free_slot(ctrl, slot_id);
@@ -615,7 +615,7 @@ static int hub_probe_location(struct xhci_controller *ctrl,
     if (slot->raw_descriptors) {
         memcpy(slot->raw_descriptors, &slot->desc, sizeof(struct usb_device_descriptor));
         memcpy(slot->raw_descriptors + sizeof(struct usb_device_descriptor),
-               slot->dma_buf_virt, cfg_actual_len);
+               slot->data_dma.cpu, cfg_actual_len);
         slot->raw_descriptors_len = total_len;
     }
 
@@ -711,7 +711,7 @@ static int hub_probe_location(struct xhci_controller *ctrl,
             }
             kfree(id_copy);
             if (rc != 0) {
-                log_warn("[xhci-hub] root=%u route=0x%05x: hub rebuild failed (rc=%d)\n",
+                log_warn("[xhci-hub] root=%u route=0x%x: hub rebuild failed (rc=%d)\n",
                          (unsigned)loc->root_port, (unsigned)loc->route, rc);
                 return rc;
             }
@@ -739,7 +739,7 @@ static int hub_probe_location(struct xhci_controller *ctrl,
             }
         }
 
-        log_info("[xhci-hub] ready %s root=%u route=0x%05x slot=%u protocol=%s ports=%u ttt=%u\n",
+        log_info("[xhci-hub] ready %s root=%u route=0x%x slot=%u protocol=%s ports=%u ttt=%u\n",
                  xhci_ctrl_loc(ctrl),
                  (unsigned)slot->loc.root_port, (unsigned)slot->loc.route,
                  (unsigned)slot->slot_id, hub_info.superspeed ? "usb3" : "usb2",

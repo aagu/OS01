@@ -144,6 +144,12 @@ $(TEST_BLD)/test_usb_msc.o: $(TEST_CASES)/test_usb_msc.c
 $(TEST_BLD)/test_usb_msc.elf: $(TEST_BLD)/test_usb_msc.o $(LINK_GROUP_usb-msc)
 	$(HOST_CC) $(LINK_LDFLAGS_usb-msc) -o $@ $^
 
+$(TEST_BLD)/test_xhci_dma.o: $(TEST_CASES)/test_xhci_dma.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_xhci-dma)),$(LINK_CFLAGS_xhci-dma),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_xhci_dma.elf: $(TEST_BLD)/test_xhci_dma.o $(LINK_GROUP_xhci-dma)
+	$(HOST_CC) $(LINK_LDFLAGS_xhci-dma) -o $@ $^
+
 $(TEST_BLD)/test_xhci_hid_desc.o: $(TEST_CASES)/test_xhci_hid_desc.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_xhci-hid-desc)),$(LINK_CFLAGS_xhci-hid-desc),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@

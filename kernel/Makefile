@@ -163,6 +163,14 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_boot.c \
                    driver/virtio_blk.c \
                    driver/ahci.c \
                    driver/ahci_lifecycle.c \
+                   driver/xhci.c \
+                   driver/xhci_pci.c \
+                   driver/xhci_dma.c \
+                   driver/xhci_hub.c \
+                   driver/xhci_hid_desc.c \
+                   driver/xhci_msc.c \
+                   driver/usb_msc.c \
+                   driver/usb_msc_bot.c \
                    subsys/subsys.c \
                    random/random.c \
                    ../libc/random/chacha20.c \

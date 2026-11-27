@@ -6,6 +6,7 @@
 #include <stddef.h>
 
 struct boot_context;
+struct pci_device;
 
 #define AARCH64_PCIE_MAX_ROOTS   4U
 #define AARCH64_PCIE_MAX_RANGES  8U
@@ -68,5 +69,6 @@ int aarch64_dtb_parse_pcie(const void *blob, uint32_t size,
                            struct aarch64_pcie_topology *out);
 const struct aarch64_pcie_topology *aarch64_pcie_topology_get(void);
 int aarch64_pcie_prepare(const struct boot_context *ctx);
+bool aarch64_pcie_xhci_bar0_ready(const struct pci_device *pdev);
 
 #endif /* OS01_AARCH64_PCIE_H */

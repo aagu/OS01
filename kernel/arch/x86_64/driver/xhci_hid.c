@@ -163,7 +163,7 @@ static bool xhci_hid_ring_valid(const struct xhci_slot *slot, uint8_t dci, uint1
     if (!slot || dci < XHCI_MIN_ENDPOINT_DCI || dci > slot->max_dci || !slot->ep_rings)
         return false;
     const struct xhci_ep_ring *ring = slot->ep_rings[dci];
-    if (!ring || !ring->active || !ring->ring_virt || !ring->ring_phys)
+    if (!ring || !ring->active || !ring->ring_dma.cpu || !ring->ring_dma.bus)
         return false;
     if (ring->ep_type != XHCI_EP_TYPE_INTR_IN)
         return false;

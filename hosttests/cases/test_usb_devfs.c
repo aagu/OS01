@@ -29,8 +29,9 @@ static int s_mock_page_count = 0;
 uint64_t alloc_4k_page(void)
 {
     if (s_mock_page_count >= MAX_MOCK_PAGES) return 0;
-    void *p = calloc(1, 4096);
+    void *p = aligned_alloc(4096, 4096);
     if (!p) return 0;
+    memset(p, 0, 4096);
     s_mock_page_ptrs[s_mock_page_count++] = p;
     return (uint64_t)(uintptr_t)p;
 }

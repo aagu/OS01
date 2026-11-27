@@ -139,8 +139,9 @@ uint64_t alloc_4k_page(void)
     if (s_inject_phys_head < s_inject_phys_tail)
         return s_inject_phys[s_inject_phys_head++ % 8];
     if (s_mock_page_count >= MAX_MOCK_PAGES) return 0;
-    void *p = calloc(1, 4096);
+    void *p = aligned_alloc(4096, 4096);
     if (!p) return 0;
+    memset(p, 0, 4096);
     s_mock_page_ptrs[s_mock_page_count++] = p;
     return (uint64_t)(uintptr_t)p;
 }
@@ -230,8 +231,8 @@ void test_xhci_event_poll_with_intervening_port_change(void)
     uint8_t rt_regs[0x100];
     memset(rt_regs, 0, sizeof(rt_regs));
 
-    ctrl.event_ring_virt = event_ring;
-    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_dma.cpu = event_ring;
+    ctrl.event_ring_dma.bus = 0x20000;
     ctrl.event_ring_dequeue = 0;
     ctrl.event_ring_cycle = 1;
     ctrl.rt_regs = rt_regs;
@@ -270,7 +271,7 @@ void test_xhci_event_poll_timeout(void)
     uint8_t rt_regs[0x100];
     memset(rt_regs, 0, sizeof(rt_regs));
 
-    ctrl.event_ring_virt = event_ring;
+    ctrl.event_ring_dma.cpu = event_ring;
     ctrl.event_ring_dequeue = 0;
     ctrl.event_ring_cycle = 1; /* Ring expects 1, but entry has cycle 0 */
     ctrl.rt_regs = rt_regs;
@@ -322,15 +323,15 @@ void test_xhci_slot_lifecycle_and_address_device(void)
 
     struct xhci_trb cmd_ring[XHCI_TRB_RING_SIZE];
     memset(cmd_ring, 0, sizeof(cmd_ring));
-    ctrl.cmd_ring_virt = cmd_ring;
-    ctrl.cmd_ring_phys = 0x10000;
+    ctrl.cmd_ring_dma.cpu = cmd_ring;
+    ctrl.cmd_ring_dma.bus = 0x10000;
     ctrl.cmd_ring_enqueue = 0;
     ctrl.cmd_ring_cycle = 1;
 
     struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
     memset(event_ring, 0, sizeof(event_ring));
-    ctrl.event_ring_virt = event_ring;
-    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_dma.cpu = event_ring;
+    ctrl.event_ring_dma.bus = 0x20000;
     ctrl.event_ring_dequeue = 0;
     ctrl.event_ring_cycle = 1;
 
@@ -344,8 +345,8 @@ void test_xhci_slot_lifecycle_and_address_device(void)
 
     uint64_t dcbaa[64];
     memset(dcbaa, 0, sizeof(dcbaa));
-    ctrl.dcbaa_virt = dcbaa;
-    ctrl.dcbaa_phys = 0x30000;
+    ctrl.dcbaa_dma.cpu = dcbaa;
+    ctrl.dcbaa_dma.bus = 0x30000;
     ctrl.csz = 0;
 
     /* Pre-populate event ring:
@@ -372,24 +373,24 @@ void test_xhci_slot_lifecycle_and_address_device(void)
     assert_eq(rc, 0);
 
     /* Verify DCBAA[1] set to physical address of dev_ctx */
-    assert_eq(ctrl.dcbaa_virt[1], ctrl.slots[1]->dev_ctx_phys);
+    assert_eq(((uint64_t *)ctrl.dcbaa_dma.cpu)[1], ctrl.slots[1]->dev_ctx_dma.bus);
 
     /* Verify Input Context DW fields */
-    uint32_t *ctrl_ctx = (uint32_t *)xhci_input_ctrl_ctx(ctrl.slots[1]->input_ctx_virt, ctrl.csz);
+    uint32_t *ctrl_ctx = (uint32_t *)xhci_input_ctrl_ctx(ctrl.slots[1]->input_ctx_dma.cpu, ctrl.csz);
     assert_eq(ctrl_ctx[0], 0);                /* Drop Flags */
     assert_eq(ctrl_ctx[1], (1U<<0) | (1U<<1));/* Add Flags: Slot + EP0 */
 
-    uint32_t *slot_ctx = (uint32_t *)xhci_input_slot_ctx(ctrl.slots[1]->input_ctx_virt, ctrl.csz);
+    uint32_t *slot_ctx = (uint32_t *)xhci_input_slot_ctx(ctrl.slots[1]->input_ctx_dma.cpu, ctrl.csz);
     assert_eq(slot_ctx[0], (3U << 20) | (1U << 27)); /* Speed=3, Context Entries=1 */
     assert_eq(slot_ctx[1], (1U << 16));               /* Root Hub Port = 1 */
 
-    uint32_t *ep0_ctx = (uint32_t *)xhci_input_ep0_ctx(ctrl.slots[1]->input_ctx_virt, ctrl.csz);
+    uint32_t *ep0_ctx = (uint32_t *)xhci_input_ep0_ctx(ctrl.slots[1]->input_ctx_dma.cpu, ctrl.csz);
     assert_eq(ep0_ctx[1], (3U << 1) | (4U << 3) | (64U << 16)); /* CErr=3, EP Type=4, MPS=64 */
     assert_eq(ep0_ctx[2] & 1U, 1U);                              /* DCS = 1 */
     assert_eq(ep0_ctx[4], 8U);                                   /* Average TRB Length = 8 */
 
     /* Verify EP0 Ring Link TRB at index 255 */
-    struct xhci_trb *link = &ctrl.slots[1]->ep0_ring_virt[XHCI_TRB_RING_SIZE - 1];
+    struct xhci_trb *link = &((struct xhci_trb *)ctrl.slots[1]->ep0_ring_dma.cpu)[XHCI_TRB_RING_SIZE - 1];
     assert_eq((link->control >> 10) & 0x3F, XHCI_TRB_TYPE_LINK);
     assert_true((link->control & XHCI_TRB_LINK_TC) != 0);
 
@@ -397,7 +398,7 @@ void test_xhci_slot_lifecycle_and_address_device(void)
     int initial_pages = s_mock_page_count;
     xhci_free_slot(&ctrl, slot_id);
     assert_true(ctrl.slots[1] == NULL);
-    assert_eq(ctrl.dcbaa_virt[1], 0);
+    assert_eq(((uint64_t *)ctrl.dcbaa_dma.cpu)[1], 0);
     assert_eq(s_mock_page_count, initial_pages - 4); /* 4 pages freed */
 }
 
@@ -413,8 +414,8 @@ void test_xhci_ep0_control_transfer_and_descriptor(void)
 
     struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE];
     memset(ep0_ring, 0, sizeof(ep0_ring));
-    slot.ep0_ring_virt = ep0_ring;
-    slot.ep0_ring_phys = 0x40000;
+    slot.ep0_ring_dma.cpu = ep0_ring;
+    slot.ep0_ring_dma.bus = 0x40000;
     slot.ep0_ring_cycle = 1;
     slot.ep0_ring_enqueue = 0;
 
@@ -424,8 +425,8 @@ void test_xhci_ep0_control_transfer_and_descriptor(void)
 
     uint8_t dma_buf[4096];
     memset(dma_buf, 0, sizeof(dma_buf));
-    slot.dma_buf_virt = dma_buf;
-    slot.dma_buf_phys = 0x50000;
+    slot.data_dma.cpu = dma_buf;
+    slot.data_dma.bus = 0x50000;
 
     struct usb_device_descriptor raw = {
         .bLength = 18,
@@ -446,8 +447,8 @@ void test_xhci_ep0_control_transfer_and_descriptor(void)
 
     struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
     memset(event_ring, 0, sizeof(event_ring));
-    ctrl.event_ring_virt = event_ring;
-    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_dma.cpu = event_ring;
+    ctrl.event_ring_dma.bus = 0x20000;
     ctrl.event_ring_dequeue = 0;
     ctrl.event_ring_cycle = 1;
 
@@ -546,8 +547,8 @@ void test_xhci_ep0_ring_wrap(void)
 
     struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE];
     memset(ep0_ring, 0, sizeof(ep0_ring));
-    slot.ep0_ring_virt = ep0_ring;
-    slot.ep0_ring_phys = 0x40000;
+    slot.ep0_ring_dma.cpu = ep0_ring;
+    slot.ep0_ring_dma.bus = 0x40000;
     slot.ep0_ring_cycle = 1;
     slot.ep0_ring_enqueue = 254;
 
@@ -580,15 +581,15 @@ void test_xhci_command_completion_param_match(void)
 
     struct xhci_trb cmd_ring[XHCI_TRB_RING_SIZE];
     memset(cmd_ring, 0, sizeof(cmd_ring));
-    ctrl.cmd_ring_virt = cmd_ring;
-    ctrl.cmd_ring_phys = 0x10000;
+    ctrl.cmd_ring_dma.cpu = cmd_ring;
+    ctrl.cmd_ring_dma.bus = 0x10000;
     ctrl.cmd_ring_enqueue = 0;
     ctrl.cmd_ring_cycle = 1;
 
     struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
     memset(event_ring, 0, sizeof(event_ring));
-    ctrl.event_ring_virt = event_ring;
-    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_dma.cpu = event_ring;
+    ctrl.event_ring_dma.bus = 0x20000;
     ctrl.event_ring_dequeue = 0;
     ctrl.event_ring_cycle = 1;
 
@@ -633,8 +634,8 @@ void test_xhci_transfer_event_slot_match(void)
 
     struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE];
     memset(ep0_ring, 0, sizeof(ep0_ring));
-    slot.ep0_ring_virt = ep0_ring;
-    slot.ep0_ring_phys = 0x40000;
+    slot.ep0_ring_dma.cpu = ep0_ring;
+    slot.ep0_ring_dma.bus = 0x40000;
     slot.ep0_ring_cycle = 1;
     slot.ep0_ring_enqueue = 0;
     ep0_ring[XHCI_TRB_RING_SIZE - 1].parameter = 0x40000;
@@ -642,8 +643,8 @@ void test_xhci_transfer_event_slot_match(void)
 
     uint8_t dma_buf[4096];
     memset(dma_buf, 0, sizeof(dma_buf));
-    slot.dma_buf_virt = dma_buf;
-    slot.dma_buf_phys = 0x50000;
+    slot.data_dma.cpu = dma_buf;
+    slot.data_dma.bus = 0x50000;
 
     struct usb_device_descriptor raw = {
         .bLength = 18,
@@ -660,8 +661,8 @@ void test_xhci_transfer_event_slot_match(void)
 
     struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
     memset(event_ring, 0, sizeof(event_ring));
-    ctrl.event_ring_virt = event_ring;
-    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_dma.cpu = event_ring;
+    ctrl.event_ring_dma.bus = 0x20000;
     ctrl.event_ring_dequeue = 0;
     ctrl.event_ring_cycle = 1;
 
@@ -707,8 +708,8 @@ void test_xhci_ep0_no_data_error(void)
 
     struct xhci_trb ep0_ring[XHCI_TRB_RING_SIZE];
     memset(ep0_ring, 0, sizeof(ep0_ring));
-    slot.ep0_ring_virt = ep0_ring;
-    slot.ep0_ring_phys = 0x40000;
+    slot.ep0_ring_dma.cpu = ep0_ring;
+    slot.ep0_ring_dma.bus = 0x40000;
     slot.ep0_ring_cycle = 1;
     slot.ep0_ring_enqueue = 0;
     ep0_ring[XHCI_TRB_RING_SIZE - 1].parameter = 0x40000;
@@ -716,14 +717,14 @@ void test_xhci_ep0_no_data_error(void)
 
     uint8_t dma_buf[4096];
     memset(dma_buf, 0, sizeof(dma_buf));
-    slot.dma_buf_virt = dma_buf;
-    slot.dma_buf_phys = 0x50000;
+    slot.data_dma.cpu = dma_buf;
+    slot.data_dma.bus = 0x50000;
     ctrl.slots[1] = &slot;
 
     struct xhci_trb event_ring[XHCI_TRB_RING_SIZE];
     memset(event_ring, 0, sizeof(event_ring));
-    ctrl.event_ring_virt = event_ring;
-    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_dma.cpu = event_ring;
+    ctrl.event_ring_dma.bus = 0x20000;
     ctrl.event_ring_dequeue = 0;
     ctrl.event_ring_cycle = 1;
 
@@ -811,16 +812,16 @@ void test_xhci_timeout_owns_dma(void)
     uint64_t dcbaa[64];
     memset(dcbaa, 0, sizeof(dcbaa));
 
-    ctrl.cmd_ring_virt = cmd_ring;
-    ctrl.cmd_ring_phys = 0x10000;
+    ctrl.cmd_ring_dma.cpu = cmd_ring;
+    ctrl.cmd_ring_dma.bus = 0x10000;
     ctrl.cmd_ring_cycle = 1;
-    ctrl.event_ring_virt = event_ring;
-    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_dma.cpu = event_ring;
+    ctrl.event_ring_dma.bus = 0x20000;
     ctrl.event_ring_cycle = 1;
     ctrl.rt_regs = rt_regs;
     ctrl.db_regs = db_regs;
-    ctrl.dcbaa_virt = dcbaa;
-    ctrl.dcbaa_phys = 0x30000;
+    ctrl.dcbaa_dma.cpu = dcbaa;
+    ctrl.dcbaa_dma.bus = 0x30000;
     ctrl.running = true;
 
     struct xhci_slot slot;
@@ -858,11 +859,11 @@ void test_xhci_timeout_owns_dma(void)
     healthy_slot->slot_id = 2;
     healthy_slot->active = true;
     healthy_slot->ctx_published = true;
-    healthy_slot->input_ctx_phys = alloc_4k_page();
-    healthy_slot->dev_ctx_phys = alloc_4k_page();
-    healthy_slot->ep0_ring_phys = alloc_4k_page();
-    healthy_slot->dma_buf_phys = alloc_4k_page();
-    dcbaa[2] = healthy_slot->dev_ctx_phys;
+    healthy_slot->input_ctx_dma.bus = alloc_4k_page();
+    healthy_slot->dev_ctx_dma.bus = alloc_4k_page();
+    healthy_slot->ep0_ring_dma.bus = alloc_4k_page();
+    healthy_slot->data_dma.bus = alloc_4k_page();
+    dcbaa[2] = healthy_slot->dev_ctx_dma.bus;
     ctrl.slots[2] = healthy_slot;
     int pages_with_healthy = s_mock_page_count;
 
@@ -879,15 +880,15 @@ void test_xhci_timeout_owns_dma(void)
     assert_true(dcbaa[2] != 0);
 
     /* Cleanup mock pages manually so test doesn't leak host pages */
-    free_4k_page(healthy_slot->input_ctx_phys);
-    free_4k_page(healthy_slot->dev_ctx_phys);
-    free_4k_page(healthy_slot->ep0_ring_phys);
-    free_4k_page(healthy_slot->dma_buf_phys);
+    free_4k_page(healthy_slot->input_ctx_dma.bus);
+    free_4k_page(healthy_slot->dev_ctx_dma.bus);
+    free_4k_page(healthy_slot->ep0_ring_dma.bus);
+    free_4k_page(healthy_slot->data_dma.bus);
     kfree(healthy_slot);
-    free_4k_page(slot.input_ctx_phys);
-    free_4k_page(slot.dev_ctx_phys);
-    free_4k_page(slot.ep0_ring_phys);
-    free_4k_page(slot.dma_buf_phys);
+    free_4k_page(slot.input_ctx_dma.bus);
+    free_4k_page(slot.dev_ctx_dma.bus);
+    free_4k_page(slot.ep0_ring_dma.bus);
+    free_4k_page(slot.data_dma.bus);
 }
 
 void test_xhci_ownership_and_dma(void)
@@ -911,7 +912,7 @@ void test_xhci_ownership_and_dma(void)
     s_inject_phys_head = s_inject_phys_tail = 0;
     push_inject_phys(0x100000000ULL);
     assert_true(xhci_alloc_dma(&ctrl) < 0);
-    assert_eq(ctrl.dcbaa_phys, 0);
+    assert_eq(ctrl.dcbaa_dma.bus, 0);
 
     /* 2. AC64=0 rejects high DMA in late slot allocation (xhci_address_device) without publishing */
     uint64_t dcbaa[33];
@@ -922,9 +923,9 @@ void test_xhci_ownership_and_dma(void)
     memset(cmd_ring, 0, sizeof(cmd_ring));
     memset(db_regs, 0, sizeof(db_regs));
     memset(&slot, 0, sizeof(slot));
-    ctrl.dcbaa_virt = dcbaa;
-    ctrl.cmd_ring_virt = cmd_ring;
-    ctrl.cmd_ring_phys = 0x10000;
+    ctrl.dcbaa_dma.cpu = dcbaa;
+    ctrl.cmd_ring_dma.cpu = cmd_ring;
+    ctrl.cmd_ring_dma.bus = 0x10000;
     ctrl.cmd_ring_cycle = 1;
     ctrl.db_regs = db_regs;
     slot.slot_id = 1;
@@ -942,7 +943,7 @@ void test_xhci_ownership_and_dma(void)
     /* 3. AC64=0 rejects bulk staging straddling 4 GiB */
     struct xhci_trb ep_trbs[XHCI_TRB_RING_SIZE];
     struct xhci_ep_ring in_ring = {
-        .ring_phys = 0x60000, .ring_virt = ep_trbs,
+        .ring_dma.bus = 0x60000, .ring_dma.cpu = ep_trbs,
         .enqueue = 0, .cycle = 1, .dci = 3, .ep_type = XHCI_EP_TYPE_BULK_IN,
         .max_packet_size = 512, .active = true,
     };
@@ -950,9 +951,9 @@ void test_xhci_ownership_and_dma(void)
     slot.configured = true;
     slot.ep_rings = rings;
     slot.max_dci = 3;
-    slot.bulk_staging_virt = (void *)(uintptr_t)0x1000; /* non-NULL dummy */
-    slot.bulk_staging_phys = 0xFFFF0000ULL; /* 0xFFFF0000 + 65536 = 0x100000000 (ends at 4 GiB, ok? Wait: 0xFFFF0000..0xFFFFFFFF is 64 KiB ending at 4 GiB -> OK; 0xFFFFF000 + 65536 straddles!) */
-    slot.bulk_staging_phys = 0xFFFFF000ULL; /* unaligned + straddles 4 GiB */
+    slot.bulk_staging_dma.cpu = (void *)(uintptr_t)0x1000; /* non-NULL dummy */
+    slot.bulk_staging_dma.bus = 0xFFFF0000ULL; /* 0xFFFF0000 + 65536 = 0x100000000 (ends at 4 GiB, ok? Wait: 0xFFFF0000..0xFFFFFFFF is 64 KiB ending at 4 GiB -> OK; 0xFFFFF000 + 65536 straddles!) */
+    slot.bulk_staging_dma.bus = 0xFFFFF000ULL; /* unaligned + straddles 4 GiB */
     uint8_t dummy[64];
     size_t actual = 0;
     assert_true(xhci_bulk_transfer(&ctrl, 1, 3, dummy, sizeof(dummy), &actual) < 0);
@@ -1050,19 +1051,19 @@ static void init_ep0_fixture(struct xhci_controller *ctrl, struct xhci_slot *slo
     memset(db_regs, 0, 0x1000);
 
     slot->slot_id = 1;
-    slot->ep0_ring_virt = ep0_ring;
-    slot->ep0_ring_phys = 0x40000;
+    slot->ep0_ring_dma.cpu = ep0_ring;
+    slot->ep0_ring_dma.bus = 0x40000;
     slot->ep0_ring_cycle = 1;
     slot->ep0_ring_enqueue = 0;
     ep0_ring[XHCI_TRB_RING_SIZE - 1].parameter = 0x40000;
     ep0_ring[XHCI_TRB_RING_SIZE - 1].control = (XHCI_TRB_TYPE_LINK << 10) | XHCI_TRB_LINK_TC;
 
-    slot->dma_buf_virt = dma_buf;
-    slot->dma_buf_phys = 0x50000;
+    slot->data_dma.cpu = dma_buf;
+    slot->data_dma.bus = 0x50000;
     ctrl->slots[1] = slot;
 
-    ctrl->event_ring_virt = event_ring;
-    ctrl->event_ring_phys = 0x20000;
+    ctrl->event_ring_dma.cpu = event_ring;
+    ctrl->event_ring_dma.bus = 0x20000;
     ctrl->event_ring_dequeue = 0;
     ctrl->event_ring_cycle = 1;
     ctrl->rt_regs = rt_regs;
@@ -1178,11 +1179,11 @@ static void test_xhci_command_deadline_ownership(void)
     memset(rt_regs, 0, sizeof(rt_regs));
     memset(db_regs, 0, sizeof(db_regs));
 
-    ctrl.cmd_ring_virt = cmd_ring;
-    ctrl.cmd_ring_phys = 0x10000;
+    ctrl.cmd_ring_dma.cpu = cmd_ring;
+    ctrl.cmd_ring_dma.bus = 0x10000;
     ctrl.cmd_ring_cycle = 1;
-    ctrl.event_ring_virt = event_ring;
-    ctrl.event_ring_phys = 0x20000;
+    ctrl.event_ring_dma.cpu = event_ring;
+    ctrl.event_ring_dma.bus = 0x20000;
     ctrl.event_ring_cycle = 1;
     ctrl.rt_regs = rt_regs;
     ctrl.db_regs = db_regs;
@@ -1235,14 +1236,14 @@ static void test_xhci_fs_mps_and_address_recovery(void)
     memset(rt_regs, 0, sizeof(rt_regs));
     memset(db_regs, 0, sizeof(db_regs));
 
-    ctrl.cmd_ring_virt = cmd_ring;
-    ctrl.cmd_ring_phys = (uint64_t)(uintptr_t)cmd_ring;
+    ctrl.cmd_ring_dma.cpu = cmd_ring;
+    ctrl.cmd_ring_dma.bus = (uint64_t)(uintptr_t)cmd_ring;
     ctrl.cmd_ring_cycle = 1;
-    ctrl.event_ring_virt = event_ring;
-    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_dma.cpu = event_ring;
+    ctrl.event_ring_dma.bus = (uint64_t)(uintptr_t)event_ring;
     ctrl.event_ring_cycle = 1;
-    ctrl.dcbaa_virt = dcbaa;
-    ctrl.dcbaa_phys = (uint64_t)(uintptr_t)dcbaa;
+    ctrl.dcbaa_dma.cpu = dcbaa;
+    ctrl.dcbaa_dma.bus = (uint64_t)(uintptr_t)dcbaa;
     ctrl.rt_regs = rt_regs;
     ctrl.db_regs = db_regs;
     ctrl.ac64 = true;
@@ -1280,13 +1281,13 @@ static void test_xhci_fs_mps_and_address_recovery(void)
         .bMaxPacketSize0 = 32, .idVendor = 0x1234, .idProduct = 0x5678,
         .bNumConfigurations = 1,
     };
-    memcpy(slot->dma_buf_virt, &raw, 18);
+    memcpy(slot->data_dma.cpu, &raw, 18);
 
     /* 1st GET_DESCRIPTOR(8): Data TRB (ep0[1]) + Status TRB (ep0[2]) */
-    event_ring[2].parameter = slot->ep0_ring_phys + 1 * sizeof(struct xhci_trb);
+    event_ring[2].parameter = slot->ep0_ring_dma.bus + 1 * sizeof(struct xhci_trb);
     event_ring[2].status = (XHCI_COMP_SUCCESS << 24) | 0;
     event_ring[2].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
-    event_ring[3].parameter = slot->ep0_ring_phys + 2 * sizeof(struct xhci_trb);
+    event_ring[3].parameter = slot->ep0_ring_dma.bus + 2 * sizeof(struct xhci_trb);
     event_ring[3].status = (XHCI_COMP_SUCCESS << 24) | 0;
     event_ring[3].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
@@ -1296,10 +1297,10 @@ static void test_xhci_fs_mps_and_address_recovery(void)
     event_ring[4].control = (1U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
 
     /* 2nd GET_DESCRIPTOR(18): Data TRB (ep0[4]) + Status TRB (ep0[5]) */
-    event_ring[5].parameter = slot->ep0_ring_phys + 4 * sizeof(struct xhci_trb);
+    event_ring[5].parameter = slot->ep0_ring_dma.bus + 4 * sizeof(struct xhci_trb);
     event_ring[5].status = (XHCI_COMP_SUCCESS << 24) | 0;
     event_ring[5].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
-    event_ring[6].parameter = slot->ep0_ring_phys + 5 * sizeof(struct xhci_trb);
+    event_ring[6].parameter = slot->ep0_ring_dma.bus + 5 * sizeof(struct xhci_trb);
     event_ring[6].status = (XHCI_COMP_SUCCESS << 24) | 0;
     event_ring[6].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
@@ -1309,7 +1310,7 @@ static void test_xhci_fs_mps_and_address_recovery(void)
     assert_eq(0x1234, out_desc.idVendor);
     /* Verify EVAL_CTX was issued with Add Flags = A1 only */
     assert_eq(XHCI_TRB_TYPE_EVAL_CTX, (cmd_ring[2].control >> 10) & 0x3F);
-    uint32_t *ctrl_ctx = (uint32_t *)slot->input_ctx_virt;
+    uint32_t *ctrl_ctx = (uint32_t *)slot->input_ctx_dma.cpu;
     assert_eq(0U, ctrl_ctx[0]);
     assert_eq((1U << 1), ctrl_ctx[1]);
 
@@ -1468,14 +1469,14 @@ static void test_xhci_default_target_rollback(void)
     memset(rt_regs, 0, sizeof(rt_regs));
     memset(db_regs, 0, sizeof(db_regs));
 
-    ctrl.cmd_ring_virt = cmd_ring;
-    ctrl.cmd_ring_phys = (uint64_t)(uintptr_t)cmd_ring;
+    ctrl.cmd_ring_dma.cpu = cmd_ring;
+    ctrl.cmd_ring_dma.bus = (uint64_t)(uintptr_t)cmd_ring;
     ctrl.cmd_ring_cycle = 1;
-    ctrl.event_ring_virt = event_ring;
-    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_dma.cpu = event_ring;
+    ctrl.event_ring_dma.bus = (uint64_t)(uintptr_t)event_ring;
     ctrl.event_ring_cycle = 1;
-    ctrl.dcbaa_virt = dcbaa;
-    ctrl.dcbaa_phys = (uint64_t)(uintptr_t)dcbaa;
+    ctrl.dcbaa_dma.cpu = dcbaa;
+    ctrl.dcbaa_dma.bus = (uint64_t)(uintptr_t)dcbaa;
     ctrl.op_regs = op_regs;
     ctrl.rt_regs = rt_regs;
     ctrl.db_regs = db_regs;
@@ -1541,14 +1542,14 @@ static void test_xhci_split_address_failure(void)
     memset(rt_regs, 0, sizeof(rt_regs));
     memset(db_regs, 0, sizeof(db_regs));
 
-    ctrl.cmd_ring_virt = cmd_ring;
-    ctrl.cmd_ring_phys = (uint64_t)(uintptr_t)cmd_ring;
+    ctrl.cmd_ring_dma.cpu = cmd_ring;
+    ctrl.cmd_ring_dma.bus = (uint64_t)(uintptr_t)cmd_ring;
     ctrl.cmd_ring_cycle = 1;
-    ctrl.event_ring_virt = event_ring;
-    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_dma.cpu = event_ring;
+    ctrl.event_ring_dma.bus = (uint64_t)(uintptr_t)event_ring;
     ctrl.event_ring_cycle = 1;
-    ctrl.dcbaa_virt = dcbaa;
-    ctrl.dcbaa_phys = (uint64_t)(uintptr_t)dcbaa;
+    ctrl.dcbaa_dma.cpu = dcbaa;
+    ctrl.dcbaa_dma.bus = (uint64_t)(uintptr_t)dcbaa;
     ctrl.rt_regs = rt_regs;
     ctrl.db_regs = db_regs;
     ctrl.ac64 = true;
@@ -1565,11 +1566,11 @@ static void test_xhci_split_address_failure(void)
     hs_hub.ctrl = &ctrl;
     hs_hub.slot_id = 1;
     hs_hub.active = true;
-    hs_hub.ep0_ring_virt = hub_ep0;
-    hs_hub.ep0_ring_phys = (uint64_t)(uintptr_t)hub_ep0;
+    hs_hub.ep0_ring_dma.cpu = hub_ep0;
+    hs_hub.ep0_ring_dma.bus = (uint64_t)(uintptr_t)hub_ep0;
     hs_hub.ep0_ring_cycle = 1;
-    hs_hub.dma_buf_virt = hub_dma;
-    hs_hub.dma_buf_phys = (uint64_t)(uintptr_t)hub_dma;
+    hs_hub.data_dma.cpu = hub_dma;
+    hs_hub.data_dma.bus = (uint64_t)(uintptr_t)hub_dma;
     hs_hub.loc = (struct xhci_location){
         .route = 0, .root_port = 1, .depth = 0,
         .speed_id = XHCI_PORT_SPEED_HIGH, .speed_class = XHCI_PORT_SPEED_HIGH
@@ -1610,11 +1611,11 @@ static void test_xhci_split_address_failure(void)
     event_ring[1].control = (4U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
 
     /* CLEAR_TT OUT status */
-    event_ring[2].parameter = hs_hub.ep0_ring_phys + 1 * sizeof(struct xhci_trb);
+    event_ring[2].parameter = hs_hub.ep0_ring_dma.bus + 1 * sizeof(struct xhci_trb);
     event_ring[2].status = (XHCI_COMP_SUCCESS << 24);
     event_ring[2].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
     /* CLEAR_TT IN status */
-    event_ring[3].parameter = hs_hub.ep0_ring_phys + 3 * sizeof(struct xhci_trb);
+    event_ring[3].parameter = hs_hub.ep0_ring_dma.bus + 3 * sizeof(struct xhci_trb);
     event_ring[3].status = (XHCI_COMP_SUCCESS << 24);
     event_ring[3].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
@@ -1639,7 +1640,7 @@ static void test_xhci_split_address_failure(void)
     assert_eq(0x0000000280000823ULL, hub_ep0[2].parameter);
 
     /* Now test TT clear failure -> QUARANTINED gates sibling_fs, but sibling_hs stays usable */
-    event_ring[5].parameter = hs_hub.ep0_ring_phys + 5 * sizeof(struct xhci_trb);
+    event_ring[5].parameter = hs_hub.ep0_ring_dma.bus + 5 * sizeof(struct xhci_trb);
     event_ring[5].status = (XHCI_COMP_STALL << 24);
     event_ring[5].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
     assert_true(xhci_tt_clear_locked(&ctrl, &child_loc, 0, 0x00, 0, s_mock_clock_ns + 5000000ULL) < 0);
@@ -1662,11 +1663,11 @@ static void test_xhci_split_ep0_terminal(void)
     memset(rt_regs, 0, sizeof(rt_regs));
     memset(db_regs, 0, sizeof(db_regs));
 
-    ctrl.cmd_ring_virt = cmd_ring;
-    ctrl.cmd_ring_phys = (uint64_t)(uintptr_t)cmd_ring;
+    ctrl.cmd_ring_dma.cpu = cmd_ring;
+    ctrl.cmd_ring_dma.bus = (uint64_t)(uintptr_t)cmd_ring;
     ctrl.cmd_ring_cycle = 1;
-    ctrl.event_ring_virt = event_ring;
-    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_dma.cpu = event_ring;
+    ctrl.event_ring_dma.bus = (uint64_t)(uintptr_t)event_ring;
     ctrl.event_ring_cycle = 1;
     ctrl.rt_regs = rt_regs;
     ctrl.db_regs = db_regs;
@@ -1681,16 +1682,16 @@ static void test_xhci_split_ep0_terminal(void)
     memset(child_dev_ctx, 0, sizeof(child_dev_ctx));
 
     hs_hub.ctrl = &ctrl; hs_hub.slot_id = 1; hs_hub.active = true;
-    hs_hub.ep0_ring_virt = hub_ep0; hs_hub.ep0_ring_phys = (uint64_t)(uintptr_t)hub_ep0;
+    hs_hub.ep0_ring_dma.cpu = hub_ep0; hs_hub.ep0_ring_dma.bus = (uint64_t)(uintptr_t)hub_ep0;
     hs_hub.ep0_ring_cycle = 1;
-    hs_hub.dma_buf_virt = hub_dma; hs_hub.dma_buf_phys = (uint64_t)(uintptr_t)hub_dma;
+    hs_hub.data_dma.cpu = hub_dma; hs_hub.data_dma.bus = (uint64_t)(uintptr_t)hub_dma;
     hs_hub.loc = (struct xhci_location){ .root_port = 1, .speed_class = XHCI_PORT_SPEED_HIGH };
 
     child.ctrl = &ctrl; child.slot_id = 2; child.active = true;
-    child.ep0_ring_virt = child_ep0; child.ep0_ring_phys = (uint64_t)(uintptr_t)child_ep0;
+    child.ep0_ring_dma.cpu = child_ep0; child.ep0_ring_dma.bus = (uint64_t)(uintptr_t)child_ep0;
     child.ep0_ring_cycle = 1;
-    child.dma_buf_virt = child_dma; child.dma_buf_phys = (uint64_t)(uintptr_t)child_dma;
-    child.dev_ctx_virt = child_dev_ctx; child.dev_ctx_phys = (uint64_t)(uintptr_t)child_dev_ctx;
+    child.data_dma.cpu = child_dma; child.data_dma.bus = (uint64_t)(uintptr_t)child_dma;
+    child.dev_ctx_dma.cpu = child_dev_ctx; child.dev_ctx_dma.bus = (uint64_t)(uintptr_t)child_dev_ctx;
     child.loc = (struct xhci_location){
         .route = 0x1U, .root_port = 1, .parent_slot = 1, .parent_port = 1, .depth = 1,
         .speed_id = XHCI_PORT_SPEED_FULL, .speed_class = XHCI_PORT_SPEED_FULL,
@@ -1709,7 +1710,7 @@ static void test_xhci_split_ep0_terminal(void)
     s_mock_clock_step_ns = 1000ULL;
 
     /* Child EP0 IN fails with TX_ERR -> Reset Endpoint (cmd[0]) -> CLEAR_TT OUT+IN (hub_ep0[0..3]) */
-    event_ring[0].parameter = child.ep0_ring_phys + 1 * sizeof(struct xhci_trb);
+    event_ring[0].parameter = child.ep0_ring_dma.bus + 1 * sizeof(struct xhci_trb);
     event_ring[0].status = (XHCI_COMP_TX_ERR << 24);
     event_ring[0].control = (2U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
@@ -1717,11 +1718,11 @@ static void test_xhci_split_ep0_terminal(void)
     event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
     event_ring[1].control = (2U << 24) | (XHCI_TRB_TYPE_CMD_CMPL_EVT << 10) | 1;
 
-    event_ring[2].parameter = hs_hub.ep0_ring_phys + 1 * sizeof(struct xhci_trb);
+    event_ring[2].parameter = hs_hub.ep0_ring_dma.bus + 1 * sizeof(struct xhci_trb);
     event_ring[2].status = (XHCI_COMP_SUCCESS << 24);
     event_ring[2].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
-    event_ring[3].parameter = hs_hub.ep0_ring_phys + 3 * sizeof(struct xhci_trb);
+    event_ring[3].parameter = hs_hub.ep0_ring_dma.bus + 3 * sizeof(struct xhci_trb);
     event_ring[3].status = (XHCI_COMP_SUCCESS << 24);
     event_ring[3].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
@@ -1752,11 +1753,11 @@ static void test_hub_usb2_controls(void)
     memset(rt_regs, 0, sizeof(rt_regs));
     memset(db_regs, 0, sizeof(db_regs));
 
-    ctrl.cmd_ring_virt = cmd_ring;
-    ctrl.cmd_ring_phys = (uint64_t)(uintptr_t)cmd_ring;
+    ctrl.cmd_ring_dma.cpu = cmd_ring;
+    ctrl.cmd_ring_dma.bus = (uint64_t)(uintptr_t)cmd_ring;
     ctrl.cmd_ring_cycle = 1;
-    ctrl.event_ring_virt = event_ring;
-    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_dma.cpu = event_ring;
+    ctrl.event_ring_dma.bus = (uint64_t)(uintptr_t)event_ring;
     ctrl.event_ring_cycle = 1;
     ctrl.rt_regs = rt_regs;
     ctrl.db_regs = db_regs;
@@ -1770,11 +1771,11 @@ static void test_hub_usb2_controls(void)
     memset(hub_in_ctx, 0, sizeof(hub_in_ctx));
 
     hub.ctrl = &ctrl; hub.slot_id = 1; hub.active = true;
-    hub.ep0_ring_virt = hub_ep0; hub.ep0_ring_phys = (uint64_t)(uintptr_t)hub_ep0;
+    hub.ep0_ring_dma.cpu = hub_ep0; hub.ep0_ring_dma.bus = (uint64_t)(uintptr_t)hub_ep0;
     hub.ep0_ring_cycle = 1;
-    hub.dma_buf_virt = hub_dma; hub.dma_buf_phys = (uint64_t)(uintptr_t)hub_dma;
-    hub.dev_ctx_virt = hub_dev_ctx; hub.dev_ctx_phys = (uint64_t)(uintptr_t)hub_dev_ctx;
-    hub.input_ctx_virt = hub_in_ctx; hub.input_ctx_phys = (uint64_t)(uintptr_t)hub_in_ctx;
+    hub.data_dma.cpu = hub_dma; hub.data_dma.bus = (uint64_t)(uintptr_t)hub_dma;
+    hub.dev_ctx_dma.cpu = hub_dev_ctx; hub.dev_ctx_dma.bus = (uint64_t)(uintptr_t)hub_dev_ctx;
+    hub.input_ctx_dma.cpu = hub_in_ctx; hub.input_ctx_dma.bus = (uint64_t)(uintptr_t)hub_in_ctx;
     hub.loc = (struct xhci_location){ .root_port = 1, .speed_id = XHCI_PORT_SPEED_HIGH, .speed_class = XHCI_PORT_SPEED_HIGH };
     hub.speed = XHCI_PORT_SPEED_HIGH;
     hub.port_num = 1;
@@ -1787,10 +1788,10 @@ static void test_hub_usb2_controls(void)
     hub_dma[0] = 11; hub_dma[1] = 0x29; hub_dma[2] = 8;
     hub_dma[3] = 0x00; hub_dma[4] = 0x00; /* ganged power, global OC, TTT=0 */
     hub_dma[5] = 25; /* 2 * 25ms = 50ms */
-    event_ring[0].parameter = hub.ep0_ring_phys + 1 * sizeof(struct xhci_trb);
+    event_ring[0].parameter = hub.ep0_ring_dma.bus + 1 * sizeof(struct xhci_trb);
     event_ring[0].status = (XHCI_COMP_SUCCESS << 24) | 0;
     event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
-    event_ring[1].parameter = hub.ep0_ring_phys + 2 * sizeof(struct xhci_trb);
+    event_ring[1].parameter = hub.ep0_ring_dma.bus + 2 * sizeof(struct xhci_trb);
     event_ring[1].status = (XHCI_COMP_SUCCESS << 24) | 0;
     event_ring[1].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
@@ -1804,10 +1805,10 @@ static void test_hub_usb2_controls(void)
     /* Reject truncated 0x29 descriptor (9 bytes is too short for 9 ports, needs >= 11) */
     hub_dma[0] = 9;
     hub_dma[2] = 9;
-    event_ring[2].parameter = hub.ep0_ring_phys + 4 * sizeof(struct xhci_trb);
+    event_ring[2].parameter = hub.ep0_ring_dma.bus + 4 * sizeof(struct xhci_trb);
     event_ring[2].status = (XHCI_COMP_SUCCESS << 24);
     event_ring[2].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
-    event_ring[3].parameter = hub.ep0_ring_phys + 5 * sizeof(struct xhci_trb);
+    event_ring[3].parameter = hub.ep0_ring_dma.bus + 5 * sizeof(struct xhci_trb);
     event_ring[3].status = (XHCI_COMP_SUCCESS << 24);
     event_ring[3].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
     assert_true(xhci_hub_read_info(&ctrl, 1, s_mock_clock_ns + 50000000ULL, &info) < 0);
@@ -1852,10 +1853,10 @@ static void test_hub_usb2_controls(void)
     /* 3. Global overcurrent rejects prepare_ports */
     info = (struct xhci_hub_info){ .nports = 2, .pwr_good_2ms = 25, .global_overcurrent = true };
     hub_dma[0] = 0x02; hub_dma[1] = 0x00; hub_dma[2] = 0x02; hub_dma[3] = 0x00; /* HUB OC */
-    event_ring[4].parameter = hub.ep0_ring_phys + 7 * sizeof(struct xhci_trb);
+    event_ring[4].parameter = hub.ep0_ring_dma.bus + 7 * sizeof(struct xhci_trb);
     event_ring[4].status = (XHCI_COMP_SUCCESS << 24);
     event_ring[4].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
-    event_ring[5].parameter = hub.ep0_ring_phys + 8 * sizeof(struct xhci_trb);
+    event_ring[5].parameter = hub.ep0_ring_dma.bus + 8 * sizeof(struct xhci_trb);
     event_ring[5].status = (XHCI_COMP_SUCCESS << 24);
     event_ring[5].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
     uint16_t mask = 0;
@@ -1876,11 +1877,11 @@ static void test_hub_usb2_reset_and_isolation(void)
     memset(rt_regs, 0, sizeof(rt_regs));
     memset(db_regs, 0, sizeof(db_regs));
 
-    ctrl.cmd_ring_virt = cmd_ring;
-    ctrl.cmd_ring_phys = (uint64_t)(uintptr_t)cmd_ring;
+    ctrl.cmd_ring_dma.cpu = cmd_ring;
+    ctrl.cmd_ring_dma.bus = (uint64_t)(uintptr_t)cmd_ring;
     ctrl.cmd_ring_cycle = 1;
-    ctrl.event_ring_virt = event_ring;
-    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_dma.cpu = event_ring;
+    ctrl.event_ring_dma.bus = (uint64_t)(uintptr_t)event_ring;
     ctrl.event_ring_cycle = 1;
     ctrl.rt_regs = rt_regs;
     ctrl.db_regs = db_regs;
@@ -1893,24 +1894,24 @@ static void test_hub_usb2_reset_and_isolation(void)
     memset(hub_dma, 0, sizeof(hub_dma));
 
     hub.ctrl = &ctrl; hub.slot_id = 1; hub.active = true;
-    hub.ep0_ring_virt = hub_ep0; hub.ep0_ring_phys = (uint64_t)(uintptr_t)hub_ep0;
+    hub.ep0_ring_dma.cpu = hub_ep0; hub.ep0_ring_dma.bus = (uint64_t)(uintptr_t)hub_ep0;
     hub.ep0_ring_cycle = 1;
-    hub.dma_buf_virt = hub_dma; hub.dma_buf_phys = (uint64_t)(uintptr_t)hub_dma;
+    hub.data_dma.cpu = hub_dma; hub.data_dma.bus = (uint64_t)(uintptr_t)hub_dma;
     hub.loc = (struct xhci_location){ .root_port = 1, .speed_class = XHCI_PORT_SPEED_HIGH };
     ctrl.slots[1] = &hub;
 
     /* Isolate USB2: still connected + PED=1 -> CLEAR_FEATURE(PORT_ENABLE) -> readback PED=0 */
     hub_dma[0] = 0x03; hub_dma[1] = 0x01; hub_dma[2] = 0x00; hub_dma[3] = 0x00; /* CCS|PED|PP */
-    event_ring[0].parameter = hub.ep0_ring_phys + 1 * sizeof(struct xhci_trb);
+    event_ring[0].parameter = hub.ep0_ring_dma.bus + 1 * sizeof(struct xhci_trb);
     event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
     event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
-    event_ring[1].parameter = hub.ep0_ring_phys + 3 * sizeof(struct xhci_trb); /* CLEAR_FEATURE(ENABLE) */
+    event_ring[1].parameter = hub.ep0_ring_dma.bus + 3 * sizeof(struct xhci_trb); /* CLEAR_FEATURE(ENABLE) */
     event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
     event_ring[1].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
     /* Readback still fails if PED=1 */
-    event_ring[2].parameter = hub.ep0_ring_phys + 6 * sizeof(struct xhci_trb);
+    event_ring[2].parameter = hub.ep0_ring_dma.bus + 6 * sizeof(struct xhci_trb);
     event_ring[2].status = (XHCI_COMP_SUCCESS << 24);
     event_ring[2].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
     assert_true(xhci_hub_isolate_usb2(&ctrl, 1, 2, s_mock_clock_ns + 50000000ULL) < 0);
@@ -1939,8 +1940,8 @@ static void test_hub_ss_gen1_boundary(void)
     ctrl.db_regs = ctrl.mmio_virt + 0x100;
     ctrl.rt_regs = ctrl.mmio_virt + 0x200;
     ctrl.max_ports = 4;
-    ctrl.event_ring_virt = event_ring;
-    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_dma.cpu = event_ring;
+    ctrl.event_ring_dma.bus = (uint64_t)(uintptr_t)event_ring;
     ctrl.event_ring_cycle = 1;
     ctrl.port_proto[1] = 3;
     ctrl.port_cap_idx[1] = 1;
@@ -1956,15 +1957,15 @@ static void test_hub_ss_gen1_boundary(void)
     hub.active = true;
     hub.slot_id = 1;
     hub.ctrl = &ctrl;
-    hub.ep0_ring_virt = ep0_ring;
-    hub.ep0_ring_phys = (uint64_t)(uintptr_t)ep0_ring;
+    hub.ep0_ring_dma.cpu = ep0_ring;
+    hub.ep0_ring_dma.bus = (uint64_t)(uintptr_t)ep0_ring;
     hub.ep0_ring_cycle = 1;
-    hub.dma_buf_virt = hub_dma;
-    hub.dma_buf_phys = (uint64_t)(uintptr_t)hub_dma;
-    hub.dev_ctx_virt = hub_dev_ctx;
-    hub.dev_ctx_phys = (uint64_t)(uintptr_t)hub_dev_ctx;
-    hub.input_ctx_virt = hub_in_ctx;
-    hub.input_ctx_phys = (uint64_t)(uintptr_t)hub_in_ctx;
+    hub.data_dma.cpu = hub_dma;
+    hub.data_dma.bus = (uint64_t)(uintptr_t)hub_dma;
+    hub.dev_ctx_dma.cpu = hub_dev_ctx;
+    hub.dev_ctx_dma.bus = (uint64_t)(uintptr_t)hub_dev_ctx;
+    hub.input_ctx_dma.cpu = hub_in_ctx;
+    hub.input_ctx_dma.bus = (uint64_t)(uintptr_t)hub_in_ctx;
     hub.loc = (struct xhci_location){
         .root_port = 1, .speed_id = 4, .speed_class = XHCI_PORT_SPEED_SUPER
     };
@@ -2008,10 +2009,10 @@ static void test_hub_ss_gen1_boundary(void)
     hub_dma[0] = 12; hub_dma[1] = 0x2A; hub_dma[2] = 4;
     hub_dma[3] = 0x01; hub_dma[4] = 0x00;
     hub_dma[5] = 50;
-    event_ring[0].parameter = hub.ep0_ring_phys + 1 * sizeof(struct xhci_trb);
+    event_ring[0].parameter = hub.ep0_ring_dma.bus + 1 * sizeof(struct xhci_trb);
     event_ring[0].status = (XHCI_COMP_SUCCESS << 24) | 0;
     event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
-    event_ring[1].parameter = hub.ep0_ring_phys + 2 * sizeof(struct xhci_trb);
+    event_ring[1].parameter = hub.ep0_ring_dma.bus + 2 * sizeof(struct xhci_trb);
     event_ring[1].status = (XHCI_COMP_SUCCESS << 24) | 0;
     event_ring[1].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
 
@@ -2041,8 +2042,8 @@ static void test_hub_ss_depth_and_reset(void)
     ctrl.db_regs = ctrl.mmio_virt + 0x100;
     ctrl.rt_regs = ctrl.mmio_virt + 0x200;
     ctrl.max_ports = 4;
-    ctrl.event_ring_virt = event_ring;
-    ctrl.event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl.event_ring_dma.cpu = event_ring;
+    ctrl.event_ring_dma.bus = (uint64_t)(uintptr_t)event_ring;
     ctrl.event_ring_cycle = 1;
 
     struct xhci_slot hub;
@@ -2050,11 +2051,11 @@ static void test_hub_ss_depth_and_reset(void)
     hub.active = true;
     hub.slot_id = 1;
     hub.ctrl = &ctrl;
-    hub.ep0_ring_virt = ep0_ring;
-    hub.ep0_ring_phys = (uint64_t)(uintptr_t)ep0_ring;
+    hub.ep0_ring_dma.cpu = ep0_ring;
+    hub.ep0_ring_dma.bus = (uint64_t)(uintptr_t)ep0_ring;
     hub.ep0_ring_cycle = 1;
-    hub.dma_buf_virt = hub_dma;
-    hub.dma_buf_phys = (uint64_t)(uintptr_t)hub_dma;
+    hub.data_dma.cpu = hub_dma;
+    hub.data_dma.bus = (uint64_t)(uintptr_t)hub_dma;
     hub.loc = (struct xhci_location){
         .root_port = 1, .speed_id = 4, .speed_class = XHCI_PORT_SPEED_SUPER
     };
@@ -2066,13 +2067,13 @@ static void test_hub_ss_depth_and_reset(void)
     s_mock_clock_step_ns = 1000ULL;
 
     /* 1. SET_HUB_DEPTH depth=0 sends {0x20, 12, 0, 0, 0}; depth=4 ok; depth=5 rejected without TRB */
-    event_ring[0].parameter = hub.ep0_ring_phys + 1 * sizeof(struct xhci_trb);
+    event_ring[0].parameter = hub.ep0_ring_dma.bus + 1 * sizeof(struct xhci_trb);
     event_ring[0].status = (XHCI_COMP_SUCCESS << 24);
     event_ring[0].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
     assert_eq(0, xhci_hub_set_depth(&ctrl, 1, 0, s_mock_clock_ns + 50000000ULL));
     assert_eq(0x0000000000000C20ULL, ep0_ring[0].parameter);
 
-    event_ring[1].parameter = hub.ep0_ring_phys + 3 * sizeof(struct xhci_trb);
+    event_ring[1].parameter = hub.ep0_ring_dma.bus + 3 * sizeof(struct xhci_trb);
     event_ring[1].status = (XHCI_COMP_SUCCESS << 24);
     event_ring[1].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
     assert_eq(0, xhci_hub_set_depth(&ctrl, 1, 4, s_mock_clock_ns + 50000000ULL));
@@ -2099,7 +2100,7 @@ static void test_hub_ss_depth_and_reset(void)
      * req3..5 poll GET_STATUS (TRBs 7,8,9 -> evts 8,9; 10,11,12 -> evts 11,12) */
     uint32_t ev_trbs[] = { 1, 2, 4, 6, 8, 9, 11, 12 };
     for (int i = 0; i < 8; i++) {
-        event_ring[i].parameter = hub.ep0_ring_phys + ev_trbs[i] * sizeof(struct xhci_trb);
+        event_ring[i].parameter = hub.ep0_ring_dma.bus + ev_trbs[i] * sizeof(struct xhci_trb);
         event_ring[i].status = (XHCI_COMP_SUCCESS << 24);
         event_ring[i].control = (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | 1;
     }

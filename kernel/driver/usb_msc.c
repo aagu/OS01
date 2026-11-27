@@ -474,7 +474,7 @@ int usb_msc_probe(const struct usb_msc_transport *transport,
     if (out)
         *out = bdev;
 
-    log_info("usb_msc: %s: %llu sectors, 512-byte blocks (%s %s %s)\n",
-             name, (unsigned long long)m->sector_count, vendor, product, rev);
+    log_info("usb_msc: %s: %lu sectors, 512-byte blocks (%s %s %s)\n",
+             name, (unsigned long)m->sector_count, vendor, product, rev);
     return 0;
 }

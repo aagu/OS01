@@ -60,7 +60,7 @@ static struct {
 static void mock_push_event(uint64_t param, uint32_t status, uint32_t control_no_cycle)
 {
     uint32_t idx = s_mock.evt_write_idx;
-    struct xhci_trb *ev = &s_mock.ctrl->event_ring_virt[idx];
+    struct xhci_trb *ev = &((struct xhci_trb *)s_mock.ctrl->event_ring_dma.cpu)[idx];
     ev->parameter = param;
     ev->status = status;
     uint32_t *ctrl_ptr = (uint32_t *)((uint8_t *)ev + offsetof(struct xhci_trb, control));
@@ -80,8 +80,8 @@ static void mock_push_hid_event(void)
 {
     struct xhci_slot *s = s_mock.ctrl->slots[s_mock.hid_slot];
     struct xhci_ep_ring *r = s->ep_rings[s_mock.hid_dci];
-    if (r && r->intr_buf_virt) {
-        memcpy(r->intr_buf_virt, s_mock.hid_payload, sizeof(s_mock.hid_payload));
+    if (r && r->intr_buf_dma.cpu) {
+        memcpy(r->intr_buf_dma.cpu, s_mock.hid_payload, sizeof(s_mock.hid_payload));
     }
     uint32_t st = ((s_mock.hid_cc & 0xFFU) << 24) | (s_mock.hid_residual & 0xFFFFFFU);
     uint32_t ctl = ((uint32_t)s_mock.hid_slot << 24) |
@@ -117,8 +117,8 @@ void mock_xhci_write32(volatile void *addr, uint32_t val)
     if (slot == 0) {
         /* Command doorbell */
         uint32_t cmd_idx = (c->cmd_ring_enqueue == 0) ? (XHCI_TRB_RING_SIZE - 2) : (c->cmd_ring_enqueue - 1);
-        uint64_t cmd_phys = c->cmd_ring_phys + (uint64_t)cmd_idx * sizeof(struct xhci_trb);
-        uint32_t cmd_type = (c->cmd_ring_virt[cmd_idx].control >> 10) & 0x3FU;
+        uint64_t cmd_phys = c->cmd_ring_dma.bus + (uint64_t)cmd_idx * sizeof(struct xhci_trb);
+        uint32_t cmd_type = (((struct xhci_trb *)c->cmd_ring_dma.cpu)[cmd_idx].control >> 10) & 0x3FU;
 
         if (s_mock.mode == MOCK_DB_CMD_WITH_HID_FIRST) {
             mock_push_hid_event();
@@ -161,7 +161,7 @@ void mock_xhci_write32(volatile void *addr, uint32_t val)
         if (s_mock.mode == MOCK_DB_EP0_WITH_HID_FIRST) {
             struct xhci_slot *s = c->slots[1];
             uint32_t status_idx = (s->ep0_ring_enqueue == 0) ? (XHCI_TRB_RING_SIZE - 2) : (s->ep0_ring_enqueue - 1);
-            uint64_t status_phys = s->ep0_ring_phys + (uint64_t)status_idx * sizeof(struct xhci_trb);
+            uint64_t status_phys = s->ep0_ring_dma.bus + (uint64_t)status_idx * sizeof(struct xhci_trb);
             mock_push_hid_event();
             mock_push_event(status_phys, (XHCI_COMP_SUCCESS << 24),
                             (1U << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10));
@@ -173,7 +173,7 @@ void mock_xhci_write32(volatile void *addr, uint32_t val)
             struct xhci_slot *s = c->slots[1];
             struct xhci_ep_ring *br = s->ep_rings[dci];
             uint32_t trb_idx = (br->enqueue == 0) ? (XHCI_TRB_RING_SIZE - 2) : (br->enqueue - 1);
-            uint64_t trb_phys = br->ring_phys + (uint64_t)trb_idx * sizeof(struct xhci_trb);
+            uint64_t trb_phys = br->ring_dma.bus + (uint64_t)trb_idx * sizeof(struct xhci_trb);
             mock_push_hid_event();
             mock_push_event(trb_phys, (XHCI_COMP_SUCCESS << 24),
                             (1U << 24) | ((uint32_t)dci << 16) |
@@ -261,11 +261,11 @@ static void setup_mock_hw(struct mock_hw *hw)
     memset(hw->bulk_ring, 0, 4096);
 
     struct xhci_controller *c = &hw->ctrl;
-    c->cmd_ring_virt = (struct xhci_trb *)hw->cmd_ring;
-    c->cmd_ring_phys = (uint64_t)(uintptr_t)hw->cmd_ring;
+    c->cmd_ring_dma.cpu = (struct xhci_trb *)hw->cmd_ring;
+    c->cmd_ring_dma.bus = (uint64_t)(uintptr_t)hw->cmd_ring;
     c->cmd_ring_cycle = 1;
-    c->event_ring_virt = (struct xhci_trb *)hw->event_ring;
-    c->event_ring_phys = (uint64_t)(uintptr_t)hw->event_ring;
+    c->event_ring_dma.cpu = (struct xhci_trb *)hw->event_ring;
+    c->event_ring_dma.bus = (uint64_t)(uintptr_t)hw->event_ring;
     c->event_ring_cycle = 1;
     c->db_regs = (volatile uint8_t *)hw->db_regs;
     c->rt_regs = (volatile uint8_t *)hw->rt_regs;
@@ -281,21 +281,21 @@ static void setup_mock_hw(struct mock_hw *hw)
     s->configured = true;
     s->ctx_published = true;
     s->max_packet_size = 8;
-    s->ep0_ring_virt = (struct xhci_trb *)hw->ep0_ring;
-    s->ep0_ring_phys = (uint64_t)(uintptr_t)hw->ep0_ring;
+    s->ep0_ring_dma.cpu = (struct xhci_trb *)hw->ep0_ring;
+    s->ep0_ring_dma.bus = (uint64_t)(uintptr_t)hw->ep0_ring;
     s->ep0_ring_cycle = 1;
-    s->dma_buf_virt = hw->dma_buf;
-    s->dma_buf_phys = (uint64_t)(uintptr_t)hw->dma_buf;
-    s->dev_ctx_virt = hw->dev_ctx;
-    s->dev_ctx_phys = (uint64_t)(uintptr_t)hw->dev_ctx;
-    s->input_ctx_virt = hw->in_ctx;
-    s->input_ctx_phys = (uint64_t)(uintptr_t)hw->in_ctx;
+    s->data_dma.cpu = hw->dma_buf;
+    s->data_dma.bus = (uint64_t)(uintptr_t)hw->dma_buf;
+    s->dev_ctx_dma.cpu = hw->dev_ctx;
+    s->dev_ctx_dma.bus = (uint64_t)(uintptr_t)hw->dev_ctx;
+    s->input_ctx_dma.cpu = hw->in_ctx;
+    s->input_ctx_dma.bus = (uint64_t)(uintptr_t)hw->in_ctx;
     s->max_dci = 5;
     s->ep_rings = calloc(6, sizeof(struct xhci_ep_ring *));
 
     struct xhci_ep_ring *intr_r = calloc(1, sizeof(*intr_r));
-    intr_r->ring_virt = (struct xhci_trb *)hw->intr_ring;
-    intr_r->ring_phys = (uint64_t)(uintptr_t)hw->intr_ring;
+    intr_r->ring_dma.cpu = (struct xhci_trb *)hw->intr_ring;
+    intr_r->ring_dma.bus = (uint64_t)(uintptr_t)hw->intr_ring;
     intr_r->cycle = 1;
     intr_r->dci = 5; /* EP2 IN (0x82) */
     intr_r->ep_type = XHCI_EP_TYPE_INTR_IN;
@@ -304,8 +304,8 @@ static void setup_mock_hw(struct mock_hw *hw)
     s->ep_rings[5] = intr_r;
 
     struct xhci_ep_ring *bulk_r = calloc(1, sizeof(*bulk_r));
-    bulk_r->ring_virt = (struct xhci_trb *)hw->bulk_ring;
-    bulk_r->ring_phys = (uint64_t)(uintptr_t)hw->bulk_ring;
+    bulk_r->ring_dma.cpu = (struct xhci_trb *)hw->bulk_ring;
+    bulk_r->ring_dma.bus = (uint64_t)(uintptr_t)hw->bulk_ring;
     bulk_r->cycle = 1;
     bulk_r->dci = 3; /* EP1 IN (0x81) */
     bulk_r->ep_type = XHCI_EP_TYPE_BULK_IN;
@@ -335,15 +335,15 @@ static void teardown_mock_hw(struct mock_hw *hw)
         if (s->ep_rings) {
             for (int d = 2; d <= s->max_dci; d++) {
                 if (s->ep_rings[d]) {
-                    if (s->ep_rings[d]->ring_phys) {
-                        free((void *)(uintptr_t)s->ep_rings[d]->ring_phys);
+                    if (s->ep_rings[d]->ring_dma.bus) {
+                        free((void *)(uintptr_t)s->ep_rings[d]->ring_dma.bus);
                     }
                     free(s->ep_rings[d]);
                 }
             }
             free(s->ep_rings);
         }
-        if (s->bulk_staging_page) free(s->bulk_staging_page);
+        if (s->bulk_staging_dma.cookie) free(s->bulk_staging_dma.cookie);
     }
     free(hw->cmd_ring);
     free(hw->event_ring);
@@ -371,7 +371,7 @@ static void test_async_interrupt_interleavings(void)
     /* 2. Submit HID TD & interleave before Command Completion */
     assert_eq(0, xhci_intr_in_submit_locked(c, 1, 5));
     assert_eq(1U, s_db_slot_dci_writes[1][5]);
-    s_mock.hid_trb_phys = intr_r->ring_phys;
+    s_mock.hid_trb_phys = intr_r->ring_dma.bus;
     s_mock.mode = MOCK_DB_CMD_WITH_HID_FIRST;
 
     struct xhci_trb cmd;
@@ -395,7 +395,7 @@ static void test_async_interrupt_interleavings(void)
 
     /* 3. Interleave before EP0 Status */
     assert_eq(0, xhci_intr_in_submit_locked(c, 1, 5));
-    s_mock.hid_trb_phys = intr_r->ring_phys + 1 * sizeof(struct xhci_trb);
+    s_mock.hid_trb_phys = intr_r->ring_dma.bus + 1 * sizeof(struct xhci_trb);
     s_mock.mode = MOCK_DB_EP0_WITH_HID_FIRST;
     assert_eq(0, xhci_control_no_data(c, 1, 0x21, 0x0B, 0, 0));
     assert_eq(1, xhci_intr_in_take_locked(c, 1, 5, buf, sizeof(buf), &res));
@@ -403,7 +403,7 @@ static void test_async_interrupt_interleavings(void)
 
     /* 4. Interleave before Bulk Transfer */
     assert_eq(0, xhci_intr_in_submit_locked(c, 1, 5));
-    s_mock.hid_trb_phys = intr_r->ring_phys + 2 * sizeof(struct xhci_trb);
+    s_mock.hid_trb_phys = intr_r->ring_dma.bus + 2 * sizeof(struct xhci_trb);
     s_mock.mode = MOCK_DB_BULK_WITH_HID_FIRST;
     uint8_t bulk_buf[64];
     size_t bulk_actual = 0;
@@ -413,17 +413,17 @@ static void test_async_interrupt_interleavings(void)
 
     /* 5. Interleave before xhci_recover_bulk_timeout */
     assert_eq(0, xhci_intr_in_submit_locked(c, 1, 5));
-    s_mock.hid_trb_phys = intr_r->ring_phys + 3 * sizeof(struct xhci_trb);
+    s_mock.hid_trb_phys = intr_r->ring_dma.bus + 3 * sizeof(struct xhci_trb);
     s->pending_bulk_dci = 3;
-    s->pending_bulk_trb_phys = s->ep_rings[3]->ring_phys;
-    s_mock.bulk_trb_phys = s->pending_bulk_trb_phys;
+    s->pending_bulk_trb_bus = s->ep_rings[3]->ring_dma.bus;
+    s_mock.bulk_trb_phys = s->pending_bulk_trb_bus;
     s_mock.mode = MOCK_DB_RECOVER_BULK_WITH_HID_FIRST;
     assert_eq(0, xhci_recover_bulk_timeout(c, 1, 3));
     assert_eq(1, xhci_intr_in_take_locked(c, 1, 5, buf, sizeof(buf), &res));
 
     /* 6. Interleave before xhci_stop_ep_and_wait_locked (via split EP0 timeout settle on slot 3) */
     assert_eq(0, xhci_intr_in_submit_locked(c, 1, 5));
-    s_mock.hid_trb_phys = intr_r->ring_phys + 4 * sizeof(struct xhci_trb);
+    s_mock.hid_trb_phys = intr_r->ring_dma.bus + 4 * sizeof(struct xhci_trb);
     hw.hub_slot.ctrl = c;
     hw.hub_slot.slot_id = 2;
     hw.hub_slot.active = true;
@@ -446,7 +446,7 @@ static void test_async_interrupt_interleavings(void)
 
     /* 7. Stale/invalid events: ED=1, wrong ptr, wrong slot/dci, duplicate */
     assert_eq(0, xhci_intr_in_submit_locked(c, 1, 5));
-    uint64_t expected_trb = intr_r->ring_phys + 5 * sizeof(struct xhci_trb);
+    uint64_t expected_trb = intr_r->ring_dma.bus + 5 * sizeof(struct xhci_trb);
     /* ED=1 */
     mock_push_event(expected_trb, (XHCI_COMP_SHORT_TX << 24) | 5U,
                     (1U << 24) | (5U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10) | (1U << 2));
@@ -477,14 +477,14 @@ static void test_async_interrupt_interleavings(void)
     s_mock.evt_write_idx = 255;
     s_mock.evt_write_cycle = 1;
     assert_eq(0, xhci_intr_in_submit_locked(c, 1, 5));
-    expected_trb = intr_r->ring_phys + 6 * sizeof(struct xhci_trb);
+    expected_trb = intr_r->ring_dma.bus + 6 * sizeof(struct xhci_trb);
     mock_push_event(expected_trb, (XHCI_COMP_SHORT_TX << 24) | 5U,
                     (1U << 24) | (5U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10));
     assert_eq(1U, xhci_intr_in_pump_locked(c, 8));
     assert_eq(0U, c->event_ring_dequeue);
     assert_eq(0U, c->event_ring_cycle);
     uint64_t erdp_written = *(volatile uint64_t *)(c->rt_regs + 0x20 + XHCI_INTR_ERDP);
-    assert_true(erdp_written == (c->event_ring_phys | XHCI_ERDP_EHB));
+    assert_true(erdp_written == (c->event_ring_dma.bus | XHCI_ERDP_EHB));
     assert_eq(1, xhci_intr_in_take_locked(c, 1, 5, buf, sizeof(buf), &res));
 
     /* 9. Transfer ring wrap 254 -> Link(255) -> 0 */
@@ -492,7 +492,7 @@ static void test_async_interrupt_interleavings(void)
     intr_r->cycle = 1;
     assert_eq(0, xhci_intr_in_submit_locked(c, 1, 5));
     assert_eq(255U, intr_r->enqueue);
-    mock_push_event(intr_r->ring_phys + 254U * sizeof(struct xhci_trb),
+    mock_push_event(intr_r->ring_dma.bus + 254U * sizeof(struct xhci_trb),
                     (XHCI_COMP_SHORT_TX << 24) | 5U,
                     (1U << 24) | (5U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10));
     assert_eq(1U, xhci_intr_in_pump_locked(c, 8));
@@ -502,8 +502,8 @@ static void test_async_interrupt_interleavings(void)
     assert_eq(0, xhci_intr_in_submit_locked(c, 1, 5));
     assert_eq(1U, intr_r->enqueue);
     assert_eq(0U, intr_r->cycle);
-    assert_eq(0U, (intr_r->ring_virt[0].control & XHCI_TRB_CYCLE_BIT));
-    mock_push_event(intr_r->ring_phys,
+    assert_eq(0U, (((struct xhci_trb *)intr_r->ring_dma.cpu)[0].control & XHCI_TRB_CYCLE_BIT));
+    mock_push_event(intr_r->ring_dma.bus,
                     (XHCI_COMP_SHORT_TX << 24) | 5U,
                     (1U << 24) | (5U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10));
     assert_eq(1U, xhci_intr_in_pump_locked(c, 8));
@@ -511,7 +511,7 @@ static void test_async_interrupt_interleavings(void)
 
     /* 10. Late event after retire_locked is discarded */
     assert_eq(0, xhci_intr_in_submit_locked(c, 1, 5));
-    uint64_t late_trb = intr_r->ring_phys + 1U * sizeof(struct xhci_trb);
+    uint64_t late_trb = intr_r->ring_dma.bus + 1U * sizeof(struct xhci_trb);
     xhci_intr_in_retire_locked(c, 1, 5);
     mock_push_event(late_trb, (XHCI_COMP_SHORT_TX << 24) | 5U,
                     (1U << 24) | (5U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10));
@@ -545,11 +545,11 @@ static void test_interrupt_ownership(void)
     assert_eq(db_before, s_db_slot_dci_writes[1][5]);
 
     /* 3. Normal receive MPS=8, residual=5 -> actual=3; small cap does not consume */
-    uint8_t *dma_buf = (uint8_t *)intr_r->intr_buf_virt;
+    uint8_t *dma_buf = (uint8_t *)intr_r->intr_buf_dma.cpu;
     dma_buf[0] = 0x11;
     dma_buf[1] = 0x22;
     dma_buf[2] = 0x33;
-    mock_push_event(intr_r->ring_phys, (XHCI_COMP_SHORT_TX << 24) | 5U,
+    mock_push_event(intr_r->ring_dma.bus, (XHCI_COMP_SHORT_TX << 24) | 5U,
                     (1U << 24) | (5U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10));
     assert_eq(1U, xhci_intr_in_pump_locked(c, 8));
 
@@ -571,7 +571,7 @@ static void test_interrupt_ownership(void)
 
     /* 4. residual=9 (> MPS=8) -> bad_length=true, actual=0, no copy */
     assert_eq(0, xhci_intr_in_submit_locked(c, 1, 5));
-    mock_push_event(intr_r->ring_phys + sizeof(struct xhci_trb),
+    mock_push_event(intr_r->ring_dma.bus + sizeof(struct xhci_trb),
                     (XHCI_COMP_SHORT_TX << 24) | 9U,
                     (1U << 24) | (5U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10));
     assert_eq(1U, xhci_intr_in_pump_locked(c, 8));
@@ -581,7 +581,7 @@ static void test_interrupt_ownership(void)
 
     /* 5. Retire skips cached result and forbids submit */
     assert_eq(0, xhci_intr_in_submit_locked(c, 1, 5));
-    mock_push_event(intr_r->ring_phys + 2U * sizeof(struct xhci_trb),
+    mock_push_event(intr_r->ring_dma.bus + 2U * sizeof(struct xhci_trb),
                     (XHCI_COMP_SHORT_TX << 24) | 5U,
                     (1U << 24) | (5U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10));
     assert_eq(1U, xhci_intr_in_pump_locked(c, 8));
@@ -592,7 +592,7 @@ static void test_interrupt_ownership(void)
     /* 6. Hardware-evidenced DMA teardown:
      *    Disable Slot not confirmed -> DMA page retained.
      *    Disable Slot confirmed -> DMA page freed exactly once. */
-    uint64_t intr_dma = intr_r->intr_buf_phys;
+    uint64_t intr_dma = intr_r->intr_buf_dma.bus;
     assert_true(intr_dma != 0ULL);
     s_tracked_phys = intr_dma;
     s_tracked_free_count = 0;
@@ -600,10 +600,10 @@ static void test_interrupt_ownership(void)
     /* Allocate a heap-backed slot for xhci_free_slot */
     struct xhci_slot *dyn_slot = calloc(1, sizeof(*dyn_slot));
     *dyn_slot = hw.slot;
-    dyn_slot->ep0_ring_phys = 0;
-    dyn_slot->dma_buf_phys = 0;
-    dyn_slot->dev_ctx_phys = 0;
-    dyn_slot->input_ctx_phys = 0;
+    dyn_slot->ep0_ring_dma.bus = 0;
+    dyn_slot->data_dma.bus = 0;
+    dyn_slot->dev_ctx_dma.bus = 0;
+    dyn_slot->input_ctx_dma.bus = 0;
     c->slots[1] = dyn_slot;
 
     s_mock.mode = MOCK_DB_DISABLE_SLOT_FAIL;
@@ -637,16 +637,16 @@ static void test_interrupt_ownership(void)
     assert_eq(-EIO, xhci_intr_in_prepare_locked(c, 1, 5));
     s_force_high_alloc = false;
 
-    /* Even if intr_buf_phys was >32-bit before ac64 became false, submit must not ring db */
+    /* Even if intr_buf_dma.bus was >32-bit before ac64 became false, submit must not ring db */
     c->ac64 = true;
     assert_eq(0, xhci_intr_in_prepare_locked(c, 1, 5));
     c->ac64 = false;
-    hw.slot.ep_rings[5]->intr_buf_phys = 0x100001000ULL;
+    hw.slot.ep_rings[5]->intr_buf_dma.bus = 0x100001000ULL;
     uint32_t db_before_ac64 = s_db_total_writes;
     assert_eq(-EIO, xhci_intr_in_submit_locked(c, 1, 5));
     assert_eq(db_before_ac64, s_db_total_writes);
 
-    free_4k_page((uint64_t)(uintptr_t)hw.slot.ep_rings[5]->intr_buf_virt);
+    free_4k_page((uint64_t)(uintptr_t)hw.slot.ep_rings[5]->intr_buf_dma.cpu);
     teardown_mock_hw(&hw);
 }
 

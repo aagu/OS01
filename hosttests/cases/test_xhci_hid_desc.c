@@ -46,7 +46,8 @@ void mock_xhci_write64(volatile void *addr, uint64_t val)
 
 uint64_t alloc_4k_page(void)
 {
-    void *p = calloc(1, 4096);
+    void *p = aligned_alloc(4096, 4096);
+    if (p) memset(p, 0, 4096);
     return (uint64_t)(uintptr_t)p;
 }
 
@@ -83,11 +84,11 @@ static void setup_mock_ctrl_and_slot(struct xhci_controller *ctrl,
     memset(in_ctx, 0, 4096);
     memset(dev_ctx, 0, 4096);
 
-    ctrl->cmd_ring_virt = cmd_ring;
-    ctrl->cmd_ring_phys = (uint64_t)(uintptr_t)cmd_ring;
+    ctrl->cmd_ring_dma.cpu = cmd_ring;
+    ctrl->cmd_ring_dma.bus = (uint64_t)(uintptr_t)cmd_ring;
     ctrl->cmd_ring_cycle = 1;
-    ctrl->event_ring_virt = event_ring;
-    ctrl->event_ring_phys = (uint64_t)(uintptr_t)event_ring;
+    ctrl->event_ring_dma.cpu = event_ring;
+    ctrl->event_ring_dma.bus = (uint64_t)(uintptr_t)event_ring;
     ctrl->event_ring_cycle = 1;
     ctrl->db_regs = (volatile uint8_t *)db_regs;
     ctrl->rt_regs = (volatile uint8_t *)db_regs; /* unused in configure_endpoints */
@@ -105,10 +106,10 @@ static void setup_mock_ctrl_and_slot(struct xhci_controller *ctrl,
     slot->loc.speed_class = speed_class;
     slot->active = true;
     slot->addr_completed = true;
-    slot->input_ctx_virt = in_ctx;
-    slot->input_ctx_phys = (uint64_t)(uintptr_t)in_ctx;
-    slot->dev_ctx_virt = dev_ctx;
-    slot->dev_ctx_phys = (uint64_t)(uintptr_t)dev_ctx;
+    slot->input_ctx_dma.cpu = in_ctx;
+    slot->input_ctx_dma.bus = (uint64_t)(uintptr_t)in_ctx;
+    slot->dev_ctx_dma.cpu = dev_ctx;
+    slot->dev_ctx_dma.bus = (uint64_t)(uintptr_t)dev_ctx;
     ctrl->slots[1] = slot;
 }
 

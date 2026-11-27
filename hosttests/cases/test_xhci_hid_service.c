@@ -188,7 +188,7 @@ static uint8_t s_hw_count = 0;
 static void hw_push_event(struct mock_hw *hw, uint64_t param, uint32_t status, uint32_t ctl_no_cycle)
 {
     uint32_t idx = hw->evt_write_idx;
-    struct xhci_trb *ev = &hw->ctrl.event_ring_virt[idx];
+    struct xhci_trb *ev = &((struct xhci_trb *)hw->ctrl.event_ring_dma.cpu)[idx];
     ev->parameter = param;
     ev->status = status;
     uint32_t *ctrl_ptr = (uint32_t *)((uint8_t *)ev + offsetof(struct xhci_trb, control));
@@ -206,14 +206,14 @@ static void hw_push_intr_event(struct mock_hw *hw, uint8_t slot, uint8_t dci,
 {
     struct xhci_slot *s = hw->ctrl.slots[slot];
     struct xhci_ep_ring *r = s->ep_rings[dci];
-    if (data && len > 0 && r->intr_buf_virt) {
-        memcpy(r->intr_buf_virt, data, len);
+    if (data && len > 0 && r->intr_buf_dma.cpu) {
+        memcpy(r->intr_buf_dma.cpu, data, len);
     }
     uint32_t residual = (r->max_packet_size >= len) ? (r->max_packet_size - len) : 0U;
     uint32_t st = ((cc & 0xFFU) << 24) | (residual & 0xFFFFFFU);
     uint32_t ctl = ((uint32_t)slot << 24) | ((uint32_t)dci << 16) |
                    (XHCI_TRB_TYPE_TRANSFER_EVT << 10);
-    hw_push_event(hw, r->intr_pending_trb_phys, st, ctl);
+    hw_push_event(hw, r->intr_pending_trb_bus, st, ctl);
 }
 
 void mock_xhci_write32(volatile void *addr, uint32_t val)
@@ -260,10 +260,10 @@ void mock_xhci_write32(volatile void *addr, uint32_t val)
                 s_hub_ep0_writes++;
             }
             struct xhci_slot *s = c->slots[slot];
-            if (s && s->ep0_ring_virt) {
+            if (s && s->ep0_ring_dma.cpu) {
                 uint32_t status_idx = (s->ep0_ring_enqueue == 0) ? (XHCI_TRB_RING_SIZE - 2) : (s->ep0_ring_enqueue - 1);
                 uint32_t setup_idx = (status_idx == 0) ? (XHCI_TRB_RING_SIZE - 2) : (status_idx - 1);
-                struct xhci_trb *setup_trb = &s->ep0_ring_virt[setup_idx];
+                struct xhci_trb *setup_trb = &((struct xhci_trb *)s->ep0_ring_dma.cpu)[setup_idx];
                 uint64_t p = setup_trb->parameter;
                 uint8_t rtype = (uint8_t)(p & 0xFFU);
                 uint8_t req = (uint8_t)((p >> 8) & 0xFFU);
@@ -286,7 +286,7 @@ void mock_xhci_write32(volatile void *addr, uint32_t val)
                 if (slot == s_stall_slot && widx == s_stall_iface) {
                     cc = XHCI_COMP_STALL;
                 }
-                uint64_t status_phys = s->ep0_ring_phys + (uint64_t)status_idx * sizeof(struct xhci_trb);
+                uint64_t status_phys = s->ep0_ring_dma.bus + (uint64_t)status_idx * sizeof(struct xhci_trb);
                 hw_push_event(hw, status_phys, (cc << 24),
                               (slot << 24) | (1U << 16) | (XHCI_TRB_TYPE_TRANSFER_EVT << 10));
             }
@@ -332,11 +332,11 @@ static void init_mock_hw(struct mock_hw *hw, uint8_t bus, uint8_t dev, uint8_t f
 
     struct xhci_controller *c = &hw->ctrl;
     c->pdev = &hw->pdev;
-    c->cmd_ring_virt = (struct xhci_trb *)hw->cmd_ring;
-    c->cmd_ring_phys = (uint64_t)(uintptr_t)hw->cmd_ring;
+    c->cmd_ring_dma.cpu = (struct xhci_trb *)hw->cmd_ring;
+    c->cmd_ring_dma.bus = (uint64_t)(uintptr_t)hw->cmd_ring;
     c->cmd_ring_cycle = 1;
-    c->event_ring_virt = (struct xhci_trb *)hw->event_ring;
-    c->event_ring_phys = (uint64_t)(uintptr_t)hw->event_ring;
+    c->event_ring_dma.cpu = (struct xhci_trb *)hw->event_ring;
+    c->event_ring_dma.bus = (uint64_t)(uintptr_t)hw->event_ring;
     c->event_ring_cycle = 1;
     c->db_regs = (volatile uint8_t *)hw->db_regs;
     c->rt_regs = (volatile uint8_t *)hw->rt_regs;
@@ -382,15 +382,15 @@ static struct xhci_slot *setup_mock_slot(struct mock_hw *hw, uint8_t slot_id, ui
     s->configured = true;
     s->ctx_published = true;
     s->max_packet_size = 8;
-    s->ep0_ring_virt = (struct xhci_trb *)hw->ep0_rings[slot_id];
-    s->ep0_ring_phys = (uint64_t)(uintptr_t)hw->ep0_rings[slot_id];
+    s->ep0_ring_dma.cpu = (struct xhci_trb *)hw->ep0_rings[slot_id];
+    s->ep0_ring_dma.bus = (uint64_t)(uintptr_t)hw->ep0_rings[slot_id];
     s->ep0_ring_cycle = 1;
-    s->dma_buf_virt = hw->dma_bufs[slot_id];
-    s->dma_buf_phys = (uint64_t)(uintptr_t)hw->dma_bufs[slot_id];
-    s->dev_ctx_virt = hw->dev_ctxs[slot_id];
-    s->dev_ctx_phys = (uint64_t)(uintptr_t)hw->dev_ctxs[slot_id];
-    s->input_ctx_virt = hw->in_ctxs[slot_id];
-    s->input_ctx_phys = (uint64_t)(uintptr_t)hw->in_ctxs[slot_id];
+    s->data_dma.cpu = hw->dma_bufs[slot_id];
+    s->data_dma.bus = (uint64_t)(uintptr_t)hw->dma_bufs[slot_id];
+    s->dev_ctx_dma.cpu = hw->dev_ctxs[slot_id];
+    s->dev_ctx_dma.bus = (uint64_t)(uintptr_t)hw->dev_ctxs[slot_id];
+    s->input_ctx_dma.cpu = hw->in_ctxs[slot_id];
+    s->input_ctx_dma.bus = (uint64_t)(uintptr_t)hw->in_ctxs[slot_id];
     s->ep_rings = hw->ep_rings_storage[slot_id];
     s->max_dci = 15;
     hw->ctrl.slots[slot_id] = s;
@@ -404,8 +404,8 @@ static void setup_intr_ep(struct mock_hw *hw, uint8_t slot_id, uint8_t dci, uint
     memset(r, 0, sizeof(*r));
     hw->intr_rings[slot_id][dci] = aligned_alloc(4096, 4096);
     memset(hw->intr_rings[slot_id][dci], 0, 4096);
-    r->ring_virt = (struct xhci_trb *)hw->intr_rings[slot_id][dci];
-    r->ring_phys = (uint64_t)(uintptr_t)hw->intr_rings[slot_id][dci];
+    r->ring_dma.cpu = (struct xhci_trb *)hw->intr_rings[slot_id][dci];
+    r->ring_dma.bus = (uint64_t)(uintptr_t)hw->intr_rings[slot_id][dci];
     r->cycle = 1;
     r->dci = dci;
     r->ep_type = XHCI_EP_TYPE_INTR_IN;
@@ -425,9 +425,9 @@ static void free_mock_hw(struct mock_hw *hw)
         free(hw->in_ctxs[s]);
         for (int d = 0; d < 16; d++) {
             free(hw->intr_rings[s][d]);
-            if (hw->rings[s][d].intr_buf_phys) {
-                free_4k_page(hw->rings[s][d].intr_buf_phys);
-                hw->rings[s][d].intr_buf_phys = 0;
+            if (hw->rings[s][d].intr_buf_dma.bus) {
+                free_4k_page(hw->rings[s][d].intr_buf_dma.bus);
+                hw->rings[s][d].intr_buf_dma.bus = 0;
             }
         }
     }

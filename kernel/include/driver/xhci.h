@@ -7,6 +7,7 @@
 #include <stddef.h>
 #include <bus/pci/pci.h>
 #include <bus/pci/driver.h>
+#include <driver/xhci_dma.h>
 #include <driver/xhci_hid.h>
 #include <sync/mutex.h>
 
@@ -269,8 +270,7 @@ struct usb_ss_ep_companion_descriptor {
 
 /* Per-endpoint transfer ring instance (dynamically allocated per DCI) */
 struct xhci_ep_ring {
-    uint64_t ring_phys;             /* 4KB DMA page physical address */
-    struct xhci_trb *ring_virt;     /* Virtual address */
+    struct xhci_dma_buf ring_dma;   /* 4KB DMA page for transfer ring */
     uint32_t enqueue;               /* Enqueue index (0..254) */
     uint8_t cycle;                  /* Producer cycle state */
     uint8_t dci;                    /* Device Context Index (2..31) */
@@ -289,9 +289,8 @@ struct xhci_ep_ring {
     bool intr_retired;
     bool intr_pending;
     bool intr_result_valid;
-    uint64_t intr_buf_phys;
-    void *intr_buf_virt;
-    uint64_t intr_pending_trb_phys;
+    struct xhci_dma_buf intr_buf_dma;
+    uint64_t intr_pending_trb_bus;
     struct xhci_intr_in_result intr_result;
 };
 
@@ -401,33 +400,26 @@ struct xhci_slot {
     uint8_t hub_ttt;
 
     /* DMA Allocations (each 4KB page) */
-    uint64_t input_ctx_phys;
-    void *input_ctx_virt;
-
-    uint64_t dev_ctx_phys;
-    void *dev_ctx_virt;
+    struct xhci_dma_buf input_ctx_dma;
+    struct xhci_dma_buf dev_ctx_dma;
 
     /* EP0 Transfer Ring (single 4KB page) */
-    uint64_t ep0_ring_phys;
-    struct xhci_trb *ep0_ring_virt;
+    struct xhci_dma_buf ep0_ring_dma;
     uint32_t ep0_ring_enqueue;
     uint8_t ep0_ring_cycle;
 
     /* Dedicated 4KB DMA Data Buffer for Control Transfers */
-    uint64_t dma_buf_phys;
-    void *dma_buf_virt;
+    struct xhci_dma_buf data_dma;
 
     /* Lazy 64 KiB DMA staging window for Bulk Transfers */
-    uint64_t bulk_staging_phys;
-    void *bulk_staging_virt;
-    void *bulk_staging_page;
+    struct xhci_dma_buf bulk_staging_dma;
 
     bool ctx_published;
     bool disabled;
     bool poisoned;
     bool dma_retained;
     uint8_t pending_bulk_dci;
-    uint64_t pending_bulk_trb_phys;
+    uint64_t pending_bulk_trb_bus;
 
     /* Dynamically allocated endpoint ring table: array of pointers sized
      * (max_dci + 1).  Index 0 is unused, index 1 is EP0 (handled by the
@@ -496,31 +488,30 @@ struct xhci_controller {
     uint32_t rtsoff;
     uint8_t csz;                 /* context size: 0 = 32B, 1 = 64B */
 
+    /* DMA Backend Ops (NULL = default coherent allocator) */
+    const struct xhci_dma_ops *dma_ops;
+    void *dma_ctx;
+
     /* DCBAA */
-    uint64_t dcbaa_phys;
-    uint64_t *dcbaa_virt;
+    struct xhci_dma_buf dcbaa_dma;
 
     /* Scratchpad Buffers */
-    uint64_t scratchpad_array_phys;
-    uint64_t *scratchpad_array_virt;
-    uint64_t *scratchpad_pages_phys;
+    struct xhci_dma_buf scratchpad_array_dma;
+    struct xhci_dma_buf *scratchpad_bufs;
     uint32_t scratchpad_count;
 
     /* Command Ring */
-    uint64_t cmd_ring_phys;
-    struct xhci_trb *cmd_ring_virt;
+    struct xhci_dma_buf cmd_ring_dma;
     uint32_t cmd_ring_enqueue;
     uint8_t cmd_ring_cycle;
 
     /* Event Ring */
-    uint64_t event_ring_phys;
-    struct xhci_trb *event_ring_virt;
+    struct xhci_dma_buf event_ring_dma;
     uint32_t event_ring_dequeue;
     uint8_t event_ring_cycle;
 
     /* ERST */
-    uint64_t erst_phys;
-    struct xhci_erst_entry *erst_virt;
+    struct xhci_dma_buf erst_dma;
 
     /* Managed device slots, indexed by 1-based slot_id */
     struct xhci_slot *slots[XHCI_MAX_MANAGED_SLOTS + 1];
@@ -586,6 +577,7 @@ static inline void xhci_write64(volatile void *addr, uint64_t val)
 
 /* PCI Driver Callbacks & Public APIs */
 int xhci_probe(struct pci_device *pdev, const struct pci_device_id *id);
+int xhci_pci_probe_aarch64(struct pci_device *pdev);
 void xhci_remove(struct pci_device *pdev);
 int xhci_parse_capabilities(struct xhci_controller *ctrl);
 int xhci_claim_legacy(struct xhci_controller *c);

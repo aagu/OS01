@@ -68,8 +68,9 @@ uint64_t alloc_4k_page(void)
         return 0;
     }
     if (s_mock_page_count >= MAX_MOCK_PAGES) return 0;
-    void *p = calloc(1, 4096);
+    void *p = aligned_alloc(4096, 4096);
     if (!p) return 0;
+    memset(p, 0, 4096);
     s_mock_page_ptrs[s_mock_page_count++] = p;
     return (uint64_t)(uintptr_t)p;
 }
@@ -216,29 +217,29 @@ static void test_xhci_scratchpad_buffers(void)
 
     rc = xhci_alloc_dma(&ctrl);
     assert_eq(0, rc);
-    assert_true(ctrl.scratchpad_array_phys != 0);
-    assert_true(ctrl.scratchpad_array_virt != NULL);
-    assert_true(ctrl.scratchpad_pages_phys != NULL);
+    assert_true(ctrl.scratchpad_array_dma.bus != 0);
+    assert_true(ctrl.scratchpad_array_dma.cpu != NULL);
+    assert_true(ctrl.scratchpad_bufs != NULL);
     assert_eq(4, ctrl.scratchpad_count);
-    assert_eq(ctrl.scratchpad_array_phys, ctrl.dcbaa_virt[0]);
+    assert_eq(ctrl.scratchpad_array_dma.bus, ((uint64_t *)ctrl.dcbaa_dma.cpu)[0]);
     for (uint32_t i = 0; i < 4; i++) {
-        assert_true(ctrl.scratchpad_pages_phys[i] != 0);
-        assert_eq(ctrl.scratchpad_pages_phys[i], ctrl.scratchpad_array_virt[i]);
+        assert_true(ctrl.scratchpad_bufs[i].bus != 0);
+        assert_eq(ctrl.scratchpad_bufs[i].bus, ((uint64_t *)ctrl.scratchpad_array_dma.cpu)[i]);
     }
 
     /* Retain scratchpads when dma_retained && !halted_confirmed */
     ctrl.halted_confirmed = false;
     ctrl.dma_retained = true;
     xhci_free_dma(&ctrl);
-    assert_true(ctrl.scratchpad_array_phys != 0);
+    assert_true(ctrl.scratchpad_array_dma.bus != 0);
     assert_eq(4, ctrl.scratchpad_count);
     assert_eq(9, s_mock_page_count); /* dcbaa + array + 4 buffers + cmd + event + erst */
 
     ctrl.halted_confirmed = true;
     xhci_free_dma(&ctrl);
-    assert_eq(0, ctrl.scratchpad_array_phys);
+    assert_eq(0, ctrl.scratchpad_array_dma.bus);
     assert_eq(0, ctrl.scratchpad_count);
-    assert_true(ctrl.scratchpad_pages_phys == NULL);
+    assert_true(ctrl.scratchpad_bufs == NULL);
     assert_eq(0, s_mock_page_count);
 
     /* Partial-allocation rollback (dcbaa=1, array=2, buf0=3, buf1=4, fail at 5) */
@@ -250,9 +251,9 @@ static void test_xhci_scratchpad_buffers(void)
     ctrl.ac64_valid = true;
     assert_eq(0, xhci_parse_capabilities(&ctrl));
     assert_eq(-ENOMEM, xhci_alloc_dma(&ctrl));
-    assert_eq(0, ctrl.scratchpad_array_phys);
+    assert_eq(0, ctrl.scratchpad_array_dma.bus);
     assert_eq(0, ctrl.scratchpad_count);
-    assert_true(ctrl.scratchpad_pages_phys == NULL);
+    assert_true(ctrl.scratchpad_bufs == NULL);
     ctrl.halted_confirmed = true;
     xhci_free_dma(&ctrl);
     assert_eq(0, s_mock_page_count);
@@ -374,10 +375,10 @@ static void test_xhci_dma_alloc_and_link_trb(void)
 
     int rc = xhci_alloc_dma(&ctrl);
     assert_eq(0, rc);
-    assert_true(ctrl.dcbaa_phys != 0);
-    assert_true(ctrl.cmd_ring_phys != 0);
-    assert_true(ctrl.event_ring_phys != 0);
-    assert_true(ctrl.erst_phys != 0);
+    assert_true(ctrl.dcbaa_dma.bus != 0);
+    assert_true(ctrl.cmd_ring_dma.bus != 0);
+    assert_true(ctrl.event_ring_dma.bus != 0);
+    assert_true(ctrl.erst_dma.bus != 0);
 
     assert_eq(0, ctrl.cmd_ring_enqueue);
     assert_eq(1, ctrl.cmd_ring_cycle);
@@ -385,21 +386,21 @@ static void test_xhci_dma_alloc_and_link_trb(void)
     assert_eq(1, ctrl.event_ring_cycle);
 
     /* Check TRB 255 (Link TRB) */
-    struct xhci_trb *link = &ctrl.cmd_ring_virt[255];
-    assert_eq(ctrl.cmd_ring_phys, link->parameter);
+    struct xhci_trb *link = &((struct xhci_trb *)ctrl.cmd_ring_dma.cpu)[255];
+    assert_eq(ctrl.cmd_ring_dma.bus, link->parameter);
     uint32_t type = (link->control >> 10) & 0x3F;
     assert_eq(XHCI_TRB_TYPE_LINK, type);
     assert_true((link->control & XHCI_TRB_LINK_TC) != 0);
 
     /* Check ERST entry 0 */
-    assert_eq(ctrl.event_ring_phys, ctrl.erst_virt[0].ring_segment_base_address);
-    assert_eq(XHCI_TRB_RING_SIZE, ctrl.erst_virt[0].ring_segment_size);
+    assert_eq(ctrl.event_ring_dma.bus, ((struct xhci_erst_entry *)ctrl.erst_dma.cpu)[0].ring_segment_base_address);
+    assert_eq(XHCI_TRB_RING_SIZE, ((struct xhci_erst_entry *)ctrl.erst_dma.cpu)[0].ring_segment_size);
 
     /* Cleanup mock pages */
-    free_4k_page(ctrl.dcbaa_phys);
-    free_4k_page(ctrl.cmd_ring_phys);
-    free_4k_page(ctrl.event_ring_phys);
-    free_4k_page(ctrl.erst_phys);
+    free_4k_page(ctrl.dcbaa_dma.bus);
+    free_4k_page(ctrl.cmd_ring_dma.bus);
+    free_4k_page(ctrl.event_ring_dma.bus);
+    free_4k_page(ctrl.erst_dma.bus);
 }
 
 static void test_xhci_command_ring_enqueue_and_wrap(void)
@@ -427,8 +428,8 @@ static void test_xhci_command_ring_enqueue_and_wrap(void)
         assert_eq(i + 1, ctrl.cmd_ring_enqueue);
         assert_eq(1, ctrl.cmd_ring_cycle);
         /* Check TRB parameter and cycle bit */
-        assert_eq(0x1000 + i, ctrl.cmd_ring_virt[i].parameter);
-        assert_true((ctrl.cmd_ring_virt[i].control & XHCI_TRB_CYCLE_BIT) != 0);
+        assert_eq(0x1000 + i, ((struct xhci_trb *)ctrl.cmd_ring_dma.cpu)[i].parameter);
+        assert_true((((struct xhci_trb *)ctrl.cmd_ring_dma.cpu)[i].control & XHCI_TRB_CYCLE_BIT) != 0);
     }
 
     /* Enqueue 255th command (index 254) -> should wrap! */
@@ -437,11 +438,11 @@ static void test_xhci_command_ring_enqueue_and_wrap(void)
     assert_eq(0, rc);
 
     /* Command was placed at index 254 with cycle bit 1 */
-    assert_eq(0x9999, ctrl.cmd_ring_virt[254].parameter);
-    assert_true((ctrl.cmd_ring_virt[254].control & XHCI_TRB_CYCLE_BIT) != 0);
+    assert_eq(0x9999, ((struct xhci_trb *)ctrl.cmd_ring_dma.cpu)[254].parameter);
+    assert_true((((struct xhci_trb *)ctrl.cmd_ring_dma.cpu)[254].control & XHCI_TRB_CYCLE_BIT) != 0);
 
     /* Link TRB at index 255 had its cycle bit updated to 1 */
-    assert_true((ctrl.cmd_ring_virt[255].control & XHCI_TRB_CYCLE_BIT) != 0);
+    assert_true((((struct xhci_trb *)ctrl.cmd_ring_dma.cpu)[255].control & XHCI_TRB_CYCLE_BIT) != 0);
 
     /* Enqueue index wrapped to 0, cycle flipped to 0! */
     assert_eq(0, ctrl.cmd_ring_enqueue);
@@ -453,14 +454,14 @@ static void test_xhci_command_ring_enqueue_and_wrap(void)
     assert_eq(0, rc);
     assert_eq(1, ctrl.cmd_ring_enqueue);
     assert_eq(0, ctrl.cmd_ring_cycle);
-    assert_eq(0xAAAA, ctrl.cmd_ring_virt[0].parameter);
-    assert_true((ctrl.cmd_ring_virt[0].control & XHCI_TRB_CYCLE_BIT) == 0);
+    assert_eq(0xAAAA, ((struct xhci_trb *)ctrl.cmd_ring_dma.cpu)[0].parameter);
+    assert_true((((struct xhci_trb *)ctrl.cmd_ring_dma.cpu)[0].control & XHCI_TRB_CYCLE_BIT) == 0);
 
     /* Cleanup mock pages */
-    free_4k_page(ctrl.dcbaa_phys);
-    free_4k_page(ctrl.cmd_ring_phys);
-    free_4k_page(ctrl.event_ring_phys);
-    free_4k_page(ctrl.erst_phys);
+    free_4k_page(ctrl.dcbaa_dma.bus);
+    free_4k_page(ctrl.cmd_ring_dma.bus);
+    free_4k_page(ctrl.event_ring_dma.bus);
+    free_4k_page(ctrl.erst_dma.bus);
 }
 
 static void test_xhci_probe_full_success(void)
@@ -494,10 +495,10 @@ static void test_xhci_probe_full_success(void)
     assert_eq(16, config & 0xFF); /* MaxSlotsEn clamped to 16 */
 
     uint64_t dcbaap = *(uint64_t *)(ctrl->op_regs + XHCI_OP_DCBAAP);
-    assert_eq(ctrl->dcbaa_phys, dcbaap);
+    assert_eq(ctrl->dcbaa_dma.bus, dcbaap);
 
     uint64_t crcr = *(uint64_t *)(ctrl->op_regs + XHCI_OP_CRCR);
-    assert_eq(ctrl->cmd_ring_phys | 1, crcr);
+    assert_eq(ctrl->cmd_ring_dma.bus | 1, crcr);
 
     uint32_t usbcmd = *(uint32_t *)(ctrl->op_regs + XHCI_OP_USBCMD);
     assert_true((usbcmd & XHCI_CMD_RS) != 0);
@@ -561,15 +562,15 @@ static void test_xhci_erst_and_interrupter(void)
     uint32_t iman = *(volatile uint32_t *)(ir0 + XHCI_INTR_IMAN);
 
     assert_eq(1, erstsz);
-    assert_eq(ctrl.erst_phys, erstba);
-    assert_eq(ctrl.event_ring_phys | XHCI_ERDP_EHB, erdp);
+    assert_eq(ctrl.erst_dma.bus, erstba);
+    assert_eq(ctrl.event_ring_dma.bus | XHCI_ERDP_EHB, erdp);
     assert_true((iman & XHCI_IMAN_IE) == 0);
 
     /* Cleanup mock pages */
-    free_4k_page(ctrl.dcbaa_phys);
-    free_4k_page(ctrl.cmd_ring_phys);
-    free_4k_page(ctrl.event_ring_phys);
-    free_4k_page(ctrl.erst_phys);
+    free_4k_page(ctrl.dcbaa_dma.bus);
+    free_4k_page(ctrl.cmd_ring_dma.bus);
+    free_4k_page(ctrl.event_ring_dma.bus);
+    free_4k_page(ctrl.erst_dma.bus);
 }
 
 static void test_program_rings_keeps_controller_stopped(void)
@@ -597,10 +598,10 @@ static void test_program_rings_keeps_controller_stopped(void)
     volatile uint8_t *ir0 = ctrl.rt_regs + 0x20;
     uint32_t erstsz = *(volatile uint32_t *)(ir0 + XHCI_INTR_ERSTSZ);
     uint64_t erstba = *(volatile uint64_t *)(ir0 + XHCI_INTR_ERSTBA);
-    assert_eq(ctrl.dcbaa_phys, dcbaap);
-    assert_eq(ctrl.cmd_ring_phys | 1, crcr);
+    assert_eq(ctrl.dcbaa_dma.bus, dcbaap);
+    assert_eq(ctrl.cmd_ring_dma.bus | 1, crcr);
     assert_eq(1, erstsz);
-    assert_eq(ctrl.erst_phys, erstba);
+    assert_eq(ctrl.erst_dma.bus, erstba);
 
     rc = xhci_run(&ctrl);
     assert_eq(0, rc);

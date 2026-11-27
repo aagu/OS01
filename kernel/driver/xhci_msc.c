@@ -153,13 +153,19 @@ static int xhci_msc_init(void)
     return 0;
 }
 
+#ifdef __aarch64__
+static const char *const xhci_msc_requires[] = { "rp1-xhci", "virtio-blk", "device-boot" };
+#define XHCI_MSC_NUM_REQUIRES 3U
+#else
 static const char *const xhci_msc_requires[] = { "device-boot" };
+#define XHCI_MSC_NUM_REQUIRES 1U
+#endif
 
 static int xhci_msc_register(void)
 {
     return register_subsys_deps("usb-msc", xhci_msc_init,
                                 SUBSYS_PHASE_STORAGE, SUBSYS_FLAG_OPTIONAL,
-                                xhci_msc_requires, 1);
+                                xhci_msc_requires, XHCI_MSC_NUM_REQUIRES);
 }
 SUBSYS_INITCALL(xhci_msc_register);
 #endif

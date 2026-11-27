@@ -375,6 +375,7 @@ $(TEST_BLD)/test_xhci_init.o: $(TEST_CASES)/test_xhci_init.c
 
 $(TEST_BLD)/test_xhci_init.elf: $(TEST_BLD)/test_xhci_init.o \
     $(TEST_BLD)/xhci_production.o \
+    $(TEST_BLD)/xhci_dma_production.o \
     $(TEST_BLD)/xhci_pci_production.o \
     $(TEST_BLD)/xhci_hub_production.o \
     $(TEST_BLD)/xhci_hid_desc_production.o \
@@ -395,6 +396,7 @@ $(TEST_BLD)/test_xhci_phase2.o: $(TEST_CASES)/test_xhci_phase2.c
 
 $(TEST_BLD)/test_xhci_phase2.elf: $(TEST_BLD)/test_xhci_phase2.o \
     $(TEST_BLD)/xhci_production.o \
+    $(TEST_BLD)/xhci_dma_production.o \
     $(TEST_BLD)/xhci_pci_production.o \
     $(TEST_BLD)/xhci_hub_production.o \
     $(TEST_BLD)/xhci_hid_desc_production.o \
@@ -419,6 +421,7 @@ $(TEST_BLD)/test_xhci_phase3.o: $(TEST_CASES)/test_xhci_phase3.c
 
 $(TEST_BLD)/test_xhci_phase3.elf: $(TEST_BLD)/test_xhci_phase3.o \
     $(TEST_BLD)/xhci_production.o \
+    $(TEST_BLD)/xhci_dma_production.o \
     $(TEST_BLD)/xhci_pci_production.o \
     $(TEST_BLD)/xhci_hub_production.o \
     $(TEST_BLD)/xhci_hid_desc_production.o \
@@ -453,6 +456,7 @@ $(TEST_BLD)/test_usb_devfs.elf: $(TEST_BLD)/test_usb_devfs.o \
     $(TEST_BLD)/usb_devfs_production.o \
     $(TEST_BLD)/lsusb_production.o \
     $(TEST_BLD)/xhci_production.o \
+    $(TEST_BLD)/xhci_dma_production.o \
     $(TEST_BLD)/xhci_pci_production.o \
     $(TEST_BLD)/xhci_hub_production.o \
     $(TEST_BLD)/xhci_hid_desc_production.o \
@@ -534,6 +538,7 @@ test-usb-hid-report test_usb_hid_report: $(TEST_BLD)/test_usb_hid_report.elf
 LINK_CFLAGS_xhci-hid-desc = $(XHCI_HOST_CFLAGS)
 LINK_GROUP_xhci-hid-desc := \
     $(TEST_BLD)/xhci_production.o \
+    $(TEST_BLD)/xhci_dma_production.o \
     $(TEST_BLD)/xhci_pci_production.o \
     $(TEST_BLD)/xhci_hub_production.o \
     $(TEST_BLD)/xhci_hid_desc_production.o \
@@ -551,6 +556,7 @@ test-xhci-hid-desc test_xhci_hid_desc: $(TEST_BLD)/test_xhci_hid_desc.elf
 LINK_CFLAGS_xhci-intr-in = $(XHCI_HOST_CFLAGS)
 LINK_GROUP_xhci-intr-in := \
     $(TEST_BLD)/xhci_production.o \
+    $(TEST_BLD)/xhci_dma_production.o \
     $(TEST_BLD)/xhci_pci_production.o \
     $(TEST_BLD)/xhci_hub_production.o \
     $(TEST_BLD)/xhci_hid_desc_production.o \
@@ -572,6 +578,7 @@ $(TEST_BLD)/xhci_hid_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/xhci_h
 LINK_CFLAGS_xhci-hid-service = $(XHCI_HOST_CFLAGS)
 LINK_GROUP_xhci-hid-service := \
     $(TEST_BLD)/xhci_production.o \
+    $(TEST_BLD)/xhci_dma_production.o \
     $(TEST_BLD)/xhci_pci_production.o \
     $(TEST_BLD)/xhci_hub_production.o \
     $(TEST_BLD)/xhci_hid_desc_production.o \
@@ -586,6 +593,26 @@ LINK_GROUP_xhci-hid-service := \
 .PHONY: test-xhci-hid-service test_xhci_hid_service
 test-xhci-hid-service test_xhci_hid_service: $(TEST_BLD)/test_xhci_hid_service.elf
 	$<
+
+# xHCI DMA ops, non-identity bus addressing, cache sync ordering & aarch64 PCI probe
+$(TEST_BLD)/xhci_dma_production.o: $(TESTS_DIR)/kernel/driver/xhci_dma.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
+
+LINK_CFLAGS_xhci-dma = $(XHCI_HOST_CFLAGS)
+LINK_GROUP_xhci-dma := \
+    $(TEST_BLD)/xhci_dma_production.o \
+    $(TEST_BLD)/xhci_production.o \
+    $(TEST_BLD)/xhci_dma_production.o \
+    $(TEST_BLD)/xhci_pci_production.o \
+    $(TEST_BLD)/xhci_hub_production.o \
+    $(TEST_BLD)/xhci_hid_desc_production.o \
+    $(TEST_BLD)/xhci_msc_production.o \
+    $(TEST_BLD)/device_core_production.o \
+    $(TEST_BLD)/pci_core_production.o \
+    $(TEST_BLD)/pci_match_production.o \
+    $(TEST_BLD)/pci_platform_production.o \
+    $(LIBC_OBJS)
 
 
 

@@ -233,6 +233,9 @@ static void case_ram_pa_limit_and_partial_conflict(void)
     mock_topo.roots[2].reg_size = 0x400000ULL;
 
     /* Root 3: clean 2 MiB root at 0x28000000 -> remains enabled */
+    assert_true(mmap((void *)(uintptr_t)(ARCH_PAGE_OFFSET + 0x28000000ULL),
+                     0x200000ULL, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != MAP_FAILED);
     mock_topo.roots[3].valid = true;
     mock_topo.roots[3].kind = AARCH64_PCIE_CTRL_ECAM_GENERIC;
     mock_topo.roots[3].domain = 3;
@@ -432,6 +435,13 @@ static void case_ecam_mmio_window_bounds_and_isolation(void)
     };
     setup_fixture(&ctx, descs, 2u);
 
+    assert_true(mmap((void *)(uintptr_t)(ARCH_PAGE_OFFSET + 0x10000000ULL),
+                     0x200000ULL, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != MAP_FAILED);
+    assert_true(mmap((void *)(uintptr_t)(ARCH_PAGE_OFFSET + 0x18000000ULL),
+                     0x200000ULL, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != MAP_FAILED);
+
     mock_topo.root_count = 2;
 
     /* Root 0: domain=0, ECAM at 0x10000000 (2 MiB)
@@ -513,6 +523,9 @@ static void case_ecam_gicv2m_msix(void)
     setup_fixture(&ctx, descs, 1u);
 
     /* Map fake GICv2m frame at ARCH_PAGE_OFFSET + 0x08020000 (inside 0x08000000 2 MiB block) */
+    assert_true(mmap((void *)(uintptr_t)(ARCH_PAGE_OFFSET + 0x10000000ULL),
+                     0x200000ULL, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0) != MAP_FAILED);
     const uint64_t v2m_blk_pa = 0x08000000ULL;
     uint8_t *v2m_arena = mmap((void *)(uintptr_t)(ARCH_PAGE_OFFSET + v2m_blk_pa),
                               0x200000ULL, PROT_READ | PROT_WRITE,
@@ -622,6 +635,111 @@ static void case_scratch_probe_va_outside_pcie_device_windows(void)
     assert_true(rc != AARCH64_PT_OK || desc == 0);
 }
 
+static void case_ecam_xhci_high_bar0_mapping(void)
+{
+    struct boot_context ctx;
+    struct test_efi_desc descs[1] = {
+        { .type = AARCH64_UEFI_MEM_CONVENTIONAL, .phys_start = 0x40000000u, .num_pages = 0x1000u }
+    };
+    setup_fixture(&ctx, descs, 1u);
+
+    ecam_arena = mmap((void *)(uintptr_t)(ARCH_PAGE_OFFSET + 0x10000000ULL),
+                      0x200000ULL, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    assert_true(ecam_arena != MAP_FAILED);
+    memset(ecam_arena, 0xFF, 0x200000ULL);
+
+    /* Place qemu-xhci (1b36:000d, class 0c0330) at bus=0, slot=1, fn=0 with 64-bit BAR0 @ 0x8000000000 */
+    uintptr_t cfg_off = (1ULL << 15);
+    *(volatile uint32_t *)(ecam_arena + cfg_off + 0x00) = 0x000d1b36U;
+    *(volatile uint32_t *)(ecam_arena + cfg_off + 0x08) = (0x0c0330U << 8);
+    *(volatile uint32_t *)(ecam_arena + cfg_off + 0x10) = 0x00000004U;
+    *(volatile uint32_t *)(ecam_arena + cfg_off + 0x14) = 0x00000080U;
+
+    mock_topo.root_count = 1;
+    mock_topo.roots[0].valid = true;
+    mock_topo.roots[0].kind = AARCH64_PCIE_CTRL_ECAM_GENERIC;
+    mock_topo.roots[0].domain = 0;
+    mock_topo.roots[0].bus_start = 0;
+    mock_topo.roots[0].bus_end = 1;
+    mock_topo.roots[0].reg_cpu_base = 0x10000000ULL;
+    mock_topo.roots[0].reg_size = 0x200000ULL;
+    mock_topo.roots[0].range_count = 1;
+    mock_topo.roots[0].ranges[0] = (struct aarch64_pcie_range){
+        .space = PCI_SPACE_MMIO64,
+        .pci_base = 0x8000000000ULL,
+        .cpu_base = 0x8000000000ULL,
+        .size = 0x10000000ULL,
+    };
+
+    assert_eq(0, aarch64_pcie_prepare(&ctx));
+
+    struct pci_device pdev;
+    memset(&pdev, 0, sizeof(pdev));
+    pdev.domain = 0;
+    pdev.bus = 0;
+    pdev.slot = 1;
+    pdev.fn = 0;
+    pdev.vendor = 0x1b36;
+    pdev.device = 0x000d;
+    pdev.class_code = 0x0c0330U;
+    pdev.bars[0].valid = true;
+    pdev.bars[0].kind = PCI_BAR_MMIO64;
+    pdev.bars[0].address = 0x8000000000ULL;
+
+    /* Full MMIO64 window must NOT be marked mapped */
+    const struct pci_backend *be = arch_pci_backend();
+    assert_true(be != NULL && be->map_mmio != NULL);
+    void *va = NULL;
+    assert_eq(0, be->map_mmio(0, 0x8000000000ULL, 0x4000ULL, &va));
+    assert_eq((uintptr_t)(ARCH_PAGE_OFFSET + 0x8000000000ULL), (uintptr_t)va);
+    assert_eq(-ENOENT, be->map_mmio(0, 0x8000000000ULL, 0x4001ULL, &va));
+    assert_eq(-ENOENT, be->map_mmio(0, 0x8000004000ULL, 0x1000ULL, &va));
+    assert_true(aarch64_pcie_xhci_bar0_ready(&pdev));
+
+    /* BAR relocation rejected */
+    *(volatile uint32_t *)(ecam_arena + cfg_off + 0x10) = 0x00010004U;
+    assert_true(!aarch64_pcie_xhci_bar0_ready(&pdev));
+
+    /* Unmatched PCI ID rejected */
+    *(volatile uint32_t *)(ecam_arena + cfg_off + 0x10) = 0x00000004U;
+    *(volatile uint32_t *)(ecam_arena + cfg_off + 0x00) = 0x12345678U;
+    assert_eq(0, aarch64_pcie_prepare(&ctx));
+    assert_true(!aarch64_pcie_xhci_bar0_ready(&pdev));
+    assert_eq(-ENOENT, be->map_mmio(0, 0x8000000000ULL, 0x4000ULL, &va));
+
+    /* Insufficient MMIO64 range (< 16 KiB) rejected */
+    *(volatile uint32_t *)(ecam_arena + cfg_off + 0x00) = 0x000d1b36U;
+    mock_topo.roots[0].ranges[0].size = 0x2000ULL;
+    assert_eq(0, aarch64_pcie_prepare(&ctx));
+    assert_true(!aarch64_pcie_xhci_bar0_ready(&pdev));
+
+    /* Overlap with RAM rejected */
+    struct test_efi_desc ram_overlap[2] = {
+        { .type = AARCH64_UEFI_MEM_CONVENTIONAL, .phys_start = 0x40000000u, .num_pages = 0x1000u },
+        { .type = AARCH64_UEFI_MEM_CONVENTIONAL, .phys_start = 0x8000000000ULL, .num_pages = 0x10u },
+    };
+    setup_fixture(&ctx, ram_overlap, 2u);
+    mock_topo.root_count = 1;
+    mock_topo.roots[0].valid = true;
+    mock_topo.roots[0].kind = AARCH64_PCIE_CTRL_ECAM_GENERIC;
+    mock_topo.roots[0].domain = 0;
+    mock_topo.roots[0].bus_start = 0;
+    mock_topo.roots[0].bus_end = 1;
+    mock_topo.roots[0].reg_cpu_base = 0x10000000ULL;
+    mock_topo.roots[0].reg_size = 0x200000ULL;
+    mock_topo.roots[0].range_count = 1;
+    mock_topo.roots[0].ranges[0] = (struct aarch64_pcie_range){
+        .space = PCI_SPACE_MMIO64,
+        .pci_base = 0x8000000000ULL,
+        .cpu_base = 0x8000000000ULL,
+        .size = 0x10000000ULL,
+    };
+    assert_eq(0, aarch64_pcie_prepare(&ctx));
+    assert_true(!aarch64_pcie_xhci_bar0_ready(&pdev));
+>>>>>>> 8bfcfa31 (feat(aarch64): boot USB mass storage on QEMU PCI xHCI)
+}
+
 int main(void)
 {
     TEST_SUITE("aarch64_pcie_ecam");
@@ -633,6 +751,7 @@ int main(void)
     run_isolated(case_ecam_mmio_window_bounds_and_isolation);
     run_isolated(case_ecam_gicv2m_msix);
     run_isolated(case_scratch_probe_va_outside_pcie_device_windows);
+    run_isolated(case_ecam_xhci_high_bar0_mapping);
     TEST_RESULTS();
     return __test_stats.failed ? 1 : 0;
 }
