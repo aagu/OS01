@@ -21,10 +21,11 @@ struct aarch64_virtio_mmio_slot {
 };
 struct aarch64_platform_info {
     struct aarch64_topology topology;
-    uint64_t gicd_base, gicc_base, pl011_base;
+    uint64_t gicd_base, gicc_base, gicr_base, pl011_base;
     uint32_t cntp_ppi;
     uint32_t pl011_spi;    /* PL011 RX GIC SPI INTID (QEMU virt: 33) */
     uint32_t pl011_clock;  /* PL011 uartclk in Hz (0 if unspecified in DTB) */
+    uint8_t gic_version;   /* 0/2 = GICv2, 3 = GICv3 */
     /* Optional virtio-mmio transport slots (QEMU virt: 0x0a000000 + i*0x200,
      * SPI 48 + i).  Collected, not validated against fixed constants: the
      * consumer probes MAGIC/VERSION/DEVICEID at runtime. */
@@ -48,6 +49,8 @@ uint64_t dtb_mpidr(uint32_t i);
 uint32_t mpidr_to_logical_id(uint64_t mpidr);
 uint64_t dtb_gicd_base(void);
 uint64_t dtb_gicc_base(void);
+uint64_t dtb_gicr_base(void);
+uint8_t dtb_gic_version(void);
 uint64_t dtb_pl011_base(void);
 uint32_t dtb_pl011_spi(void);
 uint32_t dtb_pl011_clock(void);

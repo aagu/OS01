@@ -1,4 +1,5 @@
 /* UEFI-only DTB handoff wrapper. Pure parsing lives in dtb_parse.c. */
+#include <arch/aarch64/acpi.h>
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/pcie.h>
 #include <arch/aarch64/device_window.h>
@@ -25,6 +26,8 @@ const struct aarch64_topology *dtb_topology(void) { return &platform.topology; }
 uint32_t dtb_cpu_count(void) { return platform.topology.cpu_count; }
 uint64_t dtb_gicd_base(void) { return platform.gicd_base; }
 uint64_t dtb_gicc_base(void) { return platform.gicc_base; }
+uint64_t dtb_gicr_base(void) { return platform.gicr_base; }
+uint8_t dtb_gic_version(void) { return platform.gic_version; }
 uint64_t dtb_pl011_base(void) { return platform.pl011_base; }
 uint32_t dtb_pl011_spi(void) { return platform.pl011_spi; }
 uint32_t dtb_pl011_clock(void) { return platform.pl011_clock; }
@@ -64,6 +67,66 @@ static __attribute__((noreturn)) void dtb_fatal(const char *reason)
     for (;;) __asm__ __volatile__("wfi" ::: "memory");
 }
 
+static void acpi_init_platform(const struct boot_context *handoff)
+{
+    struct aarch64_acpi_info acpi;
+    if (aarch64_acpi_parse(handoff->firmware.acpi_rsdp,
+                           (uint64_t)AARCH64_BOOT_MAP_END, &acpi) != 0)
+        dtb_fatal("ACPI tables invalid or outside UEFI handoff copy");
+
+    struct aarch64_platform_info parsed;
+    for (uint32_t i = 0; i < sizeof(parsed); ++i)
+        ((uint8_t *)&parsed)[i] = 0;
+    parsed.topology.conduit = PSCI_CONDUIT_SMC;
+    parsed.topology.psci_compatible = true;
+    parsed.topology.cpu_count = acpi.cpu_count <= AARCH64_BOOT_MAX_CPUS
+        ? acpi.cpu_count : AARCH64_BOOT_MAX_CPUS;
+    for (uint32_t i = 0; i < parsed.topology.cpu_count; ++i)
+        parsed.topology.mpidr[i] = acpi.cpu_mpidr[i] & AARCH64_MPIDR_AFFINITY_MASK;
+    parsed.gicd_base = acpi.gicd_base;
+    parsed.gicc_base = acpi.gicc_base;
+    parsed.gicr_base = acpi.gicr_base;
+    parsed.gic_version = acpi.gic_version;
+    parsed.pl011_base = acpi.spcr_base;
+    parsed.cntp_ppi = (acpi.cntp_ppi >= 16u && acpi.cntp_ppi < 32u)
+        ? acpi.cntp_ppi : 30u;
+
+    if (parsed.topology.cpu_count == 0 || parsed.gicd_base == 0)
+        dtb_fatal("ACPI missing CPUs or GICD");
+
+    uint64_t bsp;
+    __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(bsp));
+    bsp &= AARCH64_MPIDR_AFFINITY_MASK;
+    for (uint32_t i = 1; i < parsed.topology.cpu_count; ++i) {
+        if (parsed.topology.mpidr[i] == bsp) {
+            parsed.topology.mpidr[i] = parsed.topology.mpidr[0];
+            parsed.topology.mpidr[0] = bsp;
+            break;
+        }
+    }
+
+    for (uint32_t i = 0; i < sizeof(platform); ++i)
+        ((volatile uint8_t *)&platform)[i] = ((uint8_t *)&parsed)[i];
+
+    kputs("[acpi] /cpus: ");
+    kputu(platform.topology.cpu_count);
+    kputs(" CPUs, BSP MPIDR=0x");
+    kputx(platform.topology.mpidr[0]);
+    kputs("\n");
+    kputs("[smp] topology source=uefi-acpi cpus=");
+    kputu(platform.topology.cpu_count);
+    kputs("\n");
+    kputs("[acpi] uart=0x");
+    kputx(platform.pl011_base);
+    kputs(" gicd=0x");
+    kputx(platform.gicd_base);
+    kputs(" gicr=0x");
+    kputx(platform.gicr_base);
+    kputs(" ver=");
+    kputu(platform.gic_version);
+    kputs("\n");
+}
+
 void dtb_init(const struct boot_context *handoff)
 {
     /* Validate the dynamically allocated DTB buffer: must be 8-byte
@@ -72,8 +135,15 @@ void dtb_init(const struct boot_context *handoff)
     const uint64_t map_end = (uint64_t)AARCH64_BOOT_MAP_END;
     const uint64_t b_start = (uint64_t)AARCH64_BOOT_BLOCK_BASE;
     const uint64_t b_end = (uint64_t)AARCH64_BOOT_BLOCK_END;
-    if (!boot_context_valid(handoff) || !(handoff->flags & BOOT_CONTEXT_HAS_DTB))
+    if (!boot_context_valid(handoff))
+        dtb_fatal("UEFI handoff invalid");
+    if (!(handoff->flags & BOOT_CONTEXT_HAS_DTB)) {
+        if (handoff->flags & BOOT_CONTEXT_HAS_ACPI) {
+            acpi_init_platform(handoff);
+            return;
+        }
         dtb_fatal("UEFI handoff has no DTB");
+    }
     uint64_t addr = handoff->firmware.dtb;
     if (addr == 0 || addr >= map_end || 40 > map_end - addr || (addr & 7))
         dtb_fatal("DTB header outside UEFI handoff copy");

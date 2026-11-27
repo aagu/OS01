@@ -51,6 +51,7 @@
 #include <arch/aarch64/mmu.h>          /* arch_get_page_table (root read) */
 
 void pl011_init(void);
+#include <arch/aarch64/uart.h>
 extern char exception_vectors[];
 
 /* Forward declarations for boot_log helpers + GIC dispatch probes
@@ -463,6 +464,7 @@ extern uint64_t aarch64_boot_observed_entry(void);
 void arch_early_init(const struct boot_context *bootctx)
 {
     arch_local_irq_disable();
+    aarch64_uart_select_from_handoff(bootctx);
     pl011_init();
     uint64_t vbar = (uint64_t)(uintptr_t)exception_vectors;
     __asm__ __volatile__("msr vbar_el1, %0\n\tisb" :: "r"(vbar) : "memory");

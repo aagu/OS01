@@ -25,11 +25,35 @@
  * TTBR0_EL1: the bootstrap high alias and the M1 tree both cover this Device
  * PA, while the low identity map belongs to TTBR0 and disappears with the user
  * root. */
+#include <arch/aarch64/acpi.h>
+#include <arch/aarch64/boot_layout.h>
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/device_window.h>
+#include <arch/aarch64/uart.h>
 #include <arch/mmu.h>
+#include <core/bootinfo.h>
 #define PL011_DEFAULT_CLK_HZ    16000000U
 #define PL011_BAUD_RATE         115200U
+
+static enum aarch64_uart_type s_uart_type = AARCH64_UART_PL011;
+
+void aarch64_uart_select_from_handoff(const struct boot_context *bootctx)
+{
+    struct aarch64_acpi_info acpi;
+
+    if (!bootctx || !(bootctx->flags & BOOT_CONTEXT_HAS_ACPI) ||
+        (bootctx->flags & BOOT_CONTEXT_HAS_DTB)) {
+        s_uart_type = AARCH64_UART_PL011;
+        return;
+    }
+    if (aarch64_acpi_parse(bootctx->firmware.acpi_rsdp,
+                           (uint64_t)AARCH64_BOOT_MAP_END, &acpi) == 0 &&
+        acpi.spcr_iface == AARCH64_ACPI_SPCR_IFACE_QCOM_GENI) {
+        s_uart_type = AARCH64_UART_QCOM_GENI;
+    } else {
+        s_uart_type = AARCH64_UART_PL011;
+    }
+}
 
 static inline volatile uint32_t *pl011_base(void)
 {
@@ -86,7 +110,7 @@ static void pl011_calc_divisors(uint32_t clk_hz, uint32_t baud,
  * settings established by the firmware. */
 void pl011_init(void)
 {
-    if (!pl011_base())
+    if (!pl011_base() || s_uart_type == AARCH64_UART_QCOM_GENI)
         return;
 
     /* Disable UART while we configure. */
@@ -119,7 +143,7 @@ void pl011_init(void)
  * before EOI for level-triggered interrupts (spec §2.3). */
 uint32_t pl011_dr_read(void)
 {
-    if (!pl011_base())
+    if (!pl011_base() || s_uart_type == AARCH64_UART_QCOM_GENI)
         return 0;
     return pl011_r32(PL011_DR);
 }
@@ -128,7 +152,7 @@ uint32_t pl011_dr_read(void)
  * sources stay masked. */
 void pl011_irq_rx_enable(void)
 {
-    if (!pl011_base())
+    if (!pl011_base() || s_uart_type == AARCH64_UART_QCOM_GENI)
         return;
     pl011_w32(PL011_IMSC, 1U << 4);
 }
@@ -136,7 +160,7 @@ void pl011_irq_rx_enable(void)
 /* Clear all asserted PL011 interrupts (write-1-to-clear). */
 void pl011_clear_ints(void)
 {
-    if (!pl011_base())
+    if (!pl011_base() || s_uart_type == AARCH64_UART_QCOM_GENI)
         return;
     pl011_w32(PL011_ICR, 0x7FF);
 }
@@ -147,7 +171,7 @@ void pl011_clear_ints(void)
  * private to this TU. */
 bool pl011_rx_pending(void)
 {
-    if (!pl011_base())
+    if (!pl011_base() || s_uart_type == AARCH64_UART_QCOM_GENI)
         return false;
     return (pl011_r32(PL011_FR) & PL011_FR_RXFE) == 0;
 }
@@ -155,8 +179,15 @@ bool pl011_rx_pending(void)
 /* Write a single byte.  Waits until the TX FIFO has room. */
 void pl011_putc(char c)
 {
-    if (!pl011_base())
+    volatile uint32_t *base = pl011_base();
+    if (!base)
         return;
+    if (s_uart_type == AARCH64_UART_QCOM_GENI) {
+        aarch64_geni_uart_putc(base, c);
+        if (c == '\n')
+            aarch64_geni_uart_putc(base, '\r');
+        return;
+    }
     /* FR.TXFF set ⇒ transmit FIFO is full; spin. */
     while (pl011_r32(PL011_FR) & PL011_FR_TXFF) {
         arch_nop();
