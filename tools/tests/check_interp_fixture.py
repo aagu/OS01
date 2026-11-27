@@ -27,6 +27,7 @@ construct it inspects.
 from __future__ import annotations
 
 import argparse
+import re
 import subprocess
 import sys
 
@@ -61,7 +62,7 @@ def parse_program_headers(text: str, path: str) -> list[dict[str, str]]:
     """Parse `readelf -l` program-header rows into dicts."""
     rows: list[dict[str, str]] = []
     for line in text.splitlines():
-        m = __import__("re").match(
+        m = re.match(
             r"\s*(\w+)\s+(0x[0-9a-f]+)\s+(0x[0-9a-f]+)\s+(0x[0-9a-f]+)\s+"
             r"(0x[0-9a-f]+)\s+(0x[0-9a-f]+)\s+([RWE ]+)\s+(0x[0-9a-f]+)\s*$",
             line,
@@ -76,18 +77,31 @@ def parse_program_headers(text: str, path: str) -> list[dict[str, str]]:
     return rows
 
 
-def parse_dynamic_tags(text: str) -> list[str]:
-    """Collect tag names from `readelf -d` (name column)."""
+def parse_dynamic_tags(text: str, path: str) -> list[str]:
+    """Parse every `readelf -d` entry row strictly and return the tag
+    names from the parenthesised name column (e.g. "(FLAGS_1)" —
+    llvm-readelf and GNU readelf print the same shape).
+
+    An entry row is any line opening with the entry's hex tag.  A row
+    without a parenthesised name, or with a name that is not a plain
+    identifier (e.g. llvm-readelf's "(<unknown:>0x…)" for a tag the
+    tool does not know), is a failure — silently skipping unknown or
+    unparseable rows is exactly how the whitelist below would turn
+    into a vacuous pass."""
     tags: list[str] = []
     for line in text.splitlines():
-        m = __import__("re").search(r"\( (\w+) \)\s", line)
-        if m:
-            tags.append(m.group(1))
+        if not re.match(r"^\s+0x[0-9a-f]+\s+\(", line):
+            continue
+        m = re.search(r"\(([^)]*)\)", line)
+        if not m or not re.fullmatch(r"[A-Za-z0-9_]+", m.group(1)):
+            raise Fail(f"{path}: unparseable dynamic entry row: "
+                       f"{line.strip()}")
+        tags.append(m.group(1))
     return tags
 
 
 def flags_1_has_pie(text: str, path: str) -> None:
-    m = __import__("re").search(r"\(FLAGS_1\)\s+(.*)", text)
+    m = re.search(r"\(FLAGS_1\)\s+(.*)", text)
     require(m is not None, f"{path}: DT_FLAGS_1 missing")
     require("PIE" in m.group(1), f"{path}: DT_FLAGS_1 lacks DF_1_PIE")
 
@@ -114,7 +128,11 @@ def check_common_pie(path: str, rows: list[dict[str, str]],
 
     flags_1_has_pie(dyn_text, path)
 
-    for tag in parse_dynamic_tags(dyn_text):
+    tags = parse_dynamic_tags(dyn_text, path)
+    # A vacuous pass is the failure mode this gate exists to prevent:
+    # if nothing parsed, the whitelist below would never reject.
+    require(len(tags) > 0, f"{path}: no dynamic entries parsed from readelf -d")
+    for tag in tags:
         require(tag in DT_WHITELIST, f"{path}: dynamic tag {tag} is not "
                                      f"in the loader whitelist")
 
@@ -125,11 +143,11 @@ def check_relocations(readelf_bin: str, path: str, allow_none: bool) -> None:
         require(allow_none, f"{path}: unexpected zero-relocation image")
         return
     for line in text.splitlines():
-        m = __import__("re").search(r"R_X86_64_(\w+)", line)
+        m = re.search(r"R_X86_64_(\w+)", line)
         if m:
             require(m.group(1) == "RELATIVE",
                     f"{path}: non-RELATIVE relocation R_X86_64_{m.group(1)}")
-        elif __import__("re").search(r"^\s*[0-9a-f]+\s+", line) and \
+        elif re.search(r"^\s*[0-9a-f]+\s+", line) and \
                 "__" not in line:
             # reloc row without an R_X86_64 type token: unknown kind
             require(False, f"{path}: unrecognised relocation row: {line}")

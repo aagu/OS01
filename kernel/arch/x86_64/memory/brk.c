@@ -167,11 +167,12 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
          * (X86_USER_HEAP_LIMIT - start_brk) / 4 KiB ≈ 4096 leaves, and a
          * fixed cap here would wrongly fail legitimate grows with
          * -ENOMEM (e.g. one large malloc).  Only successfully
-         * installed leaves are recorded — pages already committed
-         * by an earlier grow are skipped and never enter the log,
-         * and a map failure's just-allocated PA is returned
-         * separately below, so the log is always exactly the set
-         * of leaves this call owns. */
+         * installed leaves are recorded — any occupied page in the
+         * growth range is foreign and fails the whole grow (see the
+         * loop below), so every leaf this call commits is newly
+         * mapped and enters the log; a map failure's just-allocated
+         * PA is returned separately below, so the log is always
+         * exactly the set of leaves this call owns. */
         uint64_t grow_pages = (aligned_new - aligned_old) / PAGE_4K_SIZE;
         uint64_t *log_va =
             (uint64_t *)kmalloc(grow_pages * sizeof(uint64_t));
@@ -182,14 +183,22 @@ int mm_set_brk(mm_t *mm, uint64_t requested, uint64_t *result)
         }
 
         for (uint64_t va = aligned_old; va < aligned_new; va += PAGE_4K_SIZE) {
-            /* Skip if a PTE is already committed (grow within an
-             * already-mapped region). */
+            /* A leaf this call does not own occupies the growth
+             * range — brk only ever commits what it mapped, so an
+             * occupied page beyond aligned_old is foreign: an image
+             * the ELF loader (e.g. the PT_INTERP interpreter) placed
+             * inside the heap window.  Reject the whole grow BEFORE
+             * any commit: the break stays put, the heap VMA never
+             * covers the foreign pages, and a later shrink can never
+             * withdraw and free them.  Silently skipping the page
+             * would commit a boundary that spans the image — a
+             * subsequent shrink then unmaps and releases the
+             * interpreter's leaves (corrupting it through an
+             * ordinary heap operation). */
             uint64_t *existing = vmm_pt_walk(pgd, va, 0, 0);
             if (existing && (*existing & PAGE_VALID)) {
-                /* This page is already committed from an earlier
-                 * grow; do not remap (would overwrite a valid
-                 * PTE and lose the previous phys). */
-                continue;
+                rc = -ENOMEM;
+                break;
             }
             uint64_t phys = alloc_4k_page();
             if (!phys) { rc = -ENOMEM; break; }

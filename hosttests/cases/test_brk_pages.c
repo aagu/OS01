@@ -257,6 +257,66 @@ static void test_brk_multipage_growth_each_page_zeroed(void)
     assert_eq(mock_calls("kmalloc") - ok0, mock_calls("kfree") - fr0);
 }
 
+/* ── PT_INTERP contract: heap growth must not swallow a foreign
+ * leaf (the ELF loader may place an interpreter inside the heap
+ * window).  Regression for the review round: grow used to SKIP an
+ * occupied page and still commit the boundary, after which a later
+ * shrink withdrew and freed the interpreter's page. */
+static void test_brk_grow_rejects_foreign_page(void)
+{
+    TEST_SUITE("mm_set_brk — grow over a foreign leaf → -ENOMEM");
+
+    setup_mm(USER_CODE_ADDR + 0x1000);
+
+    /* Commit two ordinary heap pages first. */
+    uint64_t base = fixture_mm.start_brk;
+    uint64_t two_pages = base + 2 * PAGE_4K_SIZE;
+    uint64_t result = 0;
+    assert_eq(0, mm_set_brk(&fixture_mm, two_pages, &result));
+    assert_eq(two_pages, fixture_mm.end_brk);
+    assert_eq(2, count_mapped_pages(base, 8));
+    int maps_before = brk_state.total_maps;
+
+    /* A foreign leaf three pages past the committed range — the
+     * shape of an interpreter image inside the heap window.  Its
+     * backing byte marks it so any withdraw/free would be visible. */
+    uint64_t foreign_va = base + 5 * PAGE_4K_SIZE;
+    uint64_t foreign_phys = alloc_4k_page();
+    assert_true(foreign_phys != 0);
+    memset((void *)(uintptr_t)foreign_phys, 0x5A, PAGE_4K_SIZE);
+    assert_eq(0, x86_vmm_map_4k(fixture_mm.pgdir, foreign_phys, foreign_va,
+                                PAGE_USER | PAGE_WRITE | PAGE_VALID |
+                                PAGE_NO_EXEC));
+
+    /* Growing the heap across the foreign leaf must fail before any
+     * commit: boundary, VMA end, and the foreign leaf (identity and
+     * content) keep their pre-call values. */
+    result = 0xDEADBEEF;
+    assert_eq(-ENOMEM,
+              mm_set_brk(&fixture_mm, base + 8 * PAGE_4K_SIZE, &result));
+    assert_eq((uint64_t)0xDEADBEEF, result);
+    assert_eq(two_pages, fixture_mm.end_brk);
+    assert_eq(heap_vma->vm_end, fixture_mm.end_brk);
+    /* The staged leaves this call rolled back are unmapped again —
+     * count_mapped_pages below proves the committed extent is still
+     * exactly the two owned pages. */
+    brk_pte_record_t *rec = brk_find_mapping(foreign_va);
+    assert_not_null(rec);
+    assert_eq(foreign_phys, rec->phys);
+    assert_eq(0x5A, (int)((unsigned char *)(uintptr_t)foreign_phys)[0]);
+    /* The owned heap pages survive the rejected grow. */
+    assert_eq(2, count_mapped_pages(base, 8));
+
+    /* A later shrink over the SAME range must stay consistent and
+     * leave the foreign leaf intact. */
+    assert_eq(0, mm_set_brk(&fixture_mm, base + PAGE_4K_SIZE, &result));
+    assert_eq(base + PAGE_4K_SIZE, fixture_mm.end_brk);
+    rec = brk_find_mapping(foreign_va);
+    assert_not_null(rec);
+    assert_eq(foreign_phys, rec->phys);
+    assert_eq(0x5A, (int)((unsigned char *)(uintptr_t)foreign_phys)[0]);
+}
+
 static void test_brk_multipage_growth_flushes_tlb(void)
 {
     TEST_SUITE("mm_set_brk — multi-page growth flushes TLB");
@@ -1022,6 +1082,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY_EX(test_brk_upper_bound_returns_enomem, mock_reset_all, NULL),
     TEST_ENTRY_EX(test_brk_same_page_growth_no_new_pte, mock_reset_all, NULL),
     TEST_ENTRY_EX(test_brk_multipage_growth_each_page_zeroed, mock_reset_all, NULL),
+    TEST_ENTRY_EX(test_brk_grow_rejects_foreign_page, mock_reset_all, NULL),
     TEST_ENTRY_EX(test_brk_multipage_growth_flushes_tlb, mock_reset_all, NULL),
     TEST_ENTRY_EX(test_brk_shrink_release_after_flush, mock_reset_all, NULL),
     TEST_ENTRY_EX(test_brk_shrink_tail_ref_until_sync, mock_reset_all, NULL),

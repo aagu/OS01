@@ -35,6 +35,15 @@
 #define AT_BASE   7UL
 #define AT_ENTRY  9UL
 
+/* Handshake written by the interpreter into the alignment pad after
+ * the AT_NULL pair.  The main image requires it before success: if
+ * the kernel ever routed the initial RIP straight to the main entry
+ * (skipping the interpreter), AT_BASE/AT_PHDR would still look right
+ * but the magic pair would be missing.  Values are arbitrary fixed
+ * constants owned by the two fixtures. */
+#define OS01_INTERP_TAG    0x4F5331UL
+#define OS01_INTERP_MAGIC  0x4C44534FUL
+
 /* Minimal ELF64 program header (the only structure the probes read). */
 typedef struct {
     uint32_t p_type;
@@ -72,9 +81,9 @@ static void exit_raw(long code)
         ;
 }
 
-/* Walk the SysV initial stack: argc | argv[] | NULL | envp[] | NULL |
- * auxv pairs | AT_NULL.  Returns the requested a_val, or fallback. */
-static uint64_t auxv_get(const uint64_t *sp, uint64_t tag, uint64_t fallback)
+/* Address of the AT_NULL tag slot (NULL if the walk runs off — the
+ * builder always emits AT_NULL, so a miss means a foreign stack). */
+static const uint64_t *auxv_null_slot(const uint64_t *sp)
 {
     const uint64_t *p = sp;
     uint64_t argc = *p++;
@@ -83,7 +92,19 @@ static uint64_t auxv_get(const uint64_t *sp, uint64_t tag, uint64_t fallback)
     while (*p != 0)            /* skip envp[] */
         p++;
     p += 1;                    /* envp NULL */
-    for (; p[0] != 0; p += 2) {
+    for (unsigned i = 0; i < 32; i++, p += 2) {
+        if (p[0] == 0)
+            return p;
+    }
+    return NULL;
+}
+
+/* Walk the SysV initial stack: argc | argv[] | NULL | envp[] | NULL |
+ * auxv pairs | AT_NULL.  Returns the requested a_val, or fallback. */
+static uint64_t auxv_get(const uint64_t *sp, uint64_t tag, uint64_t fallback)
+{
+    const uint64_t *p = auxv_null_slot(sp);
+    for (; p != NULL && p[0] != 0; p += 2) {
         if (p[0] == tag)
             return p[1];
     }
@@ -110,6 +131,18 @@ void interp_probe_main(uint64_t orig_rsp)
      * would loop forever — report the role and exit. */
     if (base == 0 || entry == 0)
         exit_raw(91);
+
+    /* Handshake for the main image: mark the pad after AT_NULL so
+     * the main can prove its control flow really passed through
+     * here.  The pad is at least 16 bytes (builder contract). */
+    {
+        const uint64_t *at_null = auxv_null_slot(sp);
+        if (at_null == NULL)
+            exit_raw(91);
+        uint64_t *pad = (uint64_t *)(uintptr_t)at_null;
+        pad[2] = OS01_INTERP_TAG;
+        pad[3] = OS01_INTERP_MAGIC;
+    }
 
     put_line(ldso_marker, sizeof(ldso_marker) - 1);
 
@@ -139,6 +172,18 @@ void interp_probe_main(uint64_t orig_rsp)
 
     if (base == 0)
         exit_raw(92);            /* no interpreter bias: T1 not honoured */
+
+    /* The interpreter must have executed on THIS stack: it signs the
+     * pad after AT_NULL.  Correct AT_BASE/AT_PHDR alone cannot
+     * distinguish "kernel loaded + handed off" from "kernel published
+     * the auxv but routed the RIP straight here". */
+    {
+        const uint64_t *at_null = auxv_null_slot(sp);
+        if (at_null == NULL ||
+            at_null[2] != OS01_INTERP_TAG ||
+            at_null[3] != OS01_INTERP_MAGIC)
+            exit_raw(94);        /* interpreter never ran */
+    }
 
     /* AT_PHDR must address a program-header table that still contains
      * this image's own PT_INTERP — i.e. it describes the main image,

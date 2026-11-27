@@ -11,6 +11,11 @@
   - **内核**（`kernel/arch/x86_64/fs/elf.c`、`elf_pie.c`、`elf_image.h`、`sched/exec.c`）：ET_DYN 主程序带 `PT_INTERP` 时，`elf_load` 读路径（≤256 B、NUL 结尾、`/` 开头）→ VFS 打开 → 按既有静态 PIE 形约束校验 → 以独立 ASLR-B bias 装载为第二镜像（PIE 占页冲突改报 `-EEXIST` 驱动 bias 重采样 ≤16 次，耗尽报 `-ENOMEM`）；auxv `AT_BASE` 发布 interp bias（静态 PIE 保持 0，auxv 字节不变），`AT_ENTRY`/`AT_PHDR` 仍指主程序；初始 RIP 归解释器，骨架经 `AT_ENTRY` 跳回主程序。ET_EXEC 带 `PT_INTERP` 由静默忽略改为显式拒绝；`mm->start_code/end_code` 仍归主镜像所有（解释器装载不触碰，堆放置不变）。主程序 T1 仍为 RELATIVE-only 链接、内核自应用重定位。
   - **用户态**：systest 夹具 `interp_probe.c` 双形态——`ldso.elf`（`/lib/ld.so` 骨架：走 auxv、打 marker、恢复初 rsp 后 `jmp *AT_ENTRY`；被直接 exec 时 `AT_BASE==0` 退出 91 不自跳）与 `dyn_exec.elf`（带 `PT_INTERP` 的 ET_DYN 主程序：校验 `AT_BASE`/`AT_PHDR` 描述的是被解释的主镜像后 exit 0）；安装为镜像内 `/lib/ld.so` 与 `/bin/dyn_exec`，形状门 `tools/tests/check_interp_fixture.py` 钉死 PT_INTERP 串/DT 白名单/`DF_1_PIE`/RELATIVE-only。
   - **验收**：systest 新用例 `exec_interp` 全绿（fork/exec `/bin/dyn_exec` → 串口 `OS01_LDSO` → `OS01_DYNMAIN` → waitpid rc=0，套件 `PASS: all 134 syscall tests passed`）；宿主 `test_elf_load_4k` 新增 6 个 PT_INTERP 用例（装载发布/冲突重采样/耗尽/缺 interp `-ENOENT`/坏路径/ET_EXEC 拒绝）25085 断言全过，`test_process_image_lifecycle`（663）、`test_x86_aslr_exec`（174）、`test_boot_spawn_failure`（12）全绿。
+  - **评审轮修复**（`3bb255a7..821b343c` 评审意见 2×P1 + 2×P2）：
+    - brk 堆增长遇装载器外页（如解释器落在堆窗内）由「跳过占用页后照常提交边界」改为整体 `-ENOMEM` 拒绝——旧路径会让后续收缩解除并释放解释器叶；新增 `test_brk_grow_rejects_foreign_page` 断言拒绝后边界、堆 VMA 端点与解释器页内容保持原值。
+    - 解释器专用校验：被装载为解释器的镜像强制 ET_DYN（ET_EXEC 固定地址装载会覆写权限兼容的主镜像叶），自身 PT_INTERP（嵌套）与 PT_TLS 一律 `-ENOEXEC`，均在解释器映射开始前判定；`test_elf_load_4k` 增至 9 个 PT_INTERP 用例（+ET_EXEC 解释器/+嵌套 PT_INTERP/+PT_TLS 解释器）。
+    - systest 控制流证明：解释器骨架在跳转前于 auxv `AT_NULL` 后写入固定握手对，主程序成功路径校验之——RIP 被直送主入口而 auxv 正确时用例必败。
+    - `check_interp_fixture.py` 动态标签解析修复：原正则要求括号内空格导致零解析、白名单检查空转；改为逐条严格解析（未知标签行判 FAIL）并以篡改 d_tag 的负向用例验证。
   - **剩余**（roadmap 行已更新）：T2 ld.so 符号重定位（GLOB_DAT/JUMP_SLOT、DT_NEEDED、hash 查找、mmap 窗口放置）、T3 共享 libc、T4 aarch64 对齐。
 
 ## 2026-11-27

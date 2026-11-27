@@ -1664,21 +1664,27 @@ static size_t build_pie_interp_image(const void *path_bytes, size_t path_len)
     return (size_t)(rw_off + rw_filesz);
 }
 
-/* Install a second fixture node backed by interp_buf as the vfs_lookup
- * result: an ldso-shaped static PIE the existing PIE path accepts.
- * NOTE: building it clobbers the shared elf_buf, so callers must run
- * this BEFORE build_pie_interp_image() re-arms the main fixture. */
+/* Install arbitrary bytes as the vfs_lookup result for the
+ * interpreter node.  NOTE: the caller builds them into the shared
+ * elf_buf first, and build_pie_interp_image() re-arms the main
+ * fixture afterwards. */
+static void install_interp_image(const void *bytes, size_t sz)
+{
+    memcpy(interp_buf, bytes, sz);
+    memset(&interp_fixture_node, 0, sizeof(interp_fixture_node));
+    interp_fixture_node.name = (char *)interp_buf;
+    interp_fixture_node.size = sz;
+    interp_fixture_node.type = VFS_FILE;
+}
+
+/* The accepted interpreter shape: an ldso-shaped static PIE the
+ * existing PIE path accepts. */
 static void install_interp_node(void)
 {
     elf64_dyn_t dyns[] = { { DT_FLAGS_1, DF_1_PIE }, { DT_NULL, 0 } };
     size_t isz = build_pie_image(0x40, 0x100, 0x1000, 0x100, 0x1000,
                                  dyns, 2, NULL, 0, NULL, NULL);
-    memcpy(interp_buf, elf_buf, isz);
-
-    memset(&interp_fixture_node, 0, sizeof(interp_fixture_node));
-    interp_fixture_node.name = (char *)interp_buf;
-    interp_fixture_node.size = isz;
-    interp_fixture_node.type = VFS_FILE;
+    install_interp_image(elf_buf, isz);
 }
 
 TEST_FUNC(test_pie_interp_accepted_and_published)
@@ -1736,6 +1742,87 @@ TEST_FUNC(test_pie_interp_collision_resamples)
     assert_eq(0, elf_load(&fixture_node, &fixture_mm, &img));
     assert_eq(0x103ff000ULL, img.interp_base);
     assert_eq(3, elf_load_state.total_rng_calls);
+    teardown_fixture();
+}
+
+/* ── Interpreter-specific validation (review P1-2): the interpreter
+ * load must not reuse the main image's rules.  All three reject
+ * BEFORE the interpreter bias is drawn (rng_calls == 1 = main only). */
+
+TEST_FUNC(test_pie_interp_rejects_etexec_interpreter)
+{
+    /* An ET_EXEC "interpreter" would load at fixed VAs and, where its
+     * permissions happen to be compatible, write its file bytes into
+     * the already-loaded main image's leaves. */
+    segment_spec_t segs[1] = { { .flags = PF_R | PF_X, .vaddr = 0x400000,
+                                 .filesz = 0x100, .memsz = 0x1000,
+                                 .data = NULL } };
+    size_t isz = build_elf_image(0x400010, segs, 1);
+    install_interp_image(elf_buf, isz);
+
+    size_t sz = build_pie_interp_image("/lib/ld.so", 11);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_lookup_node = &interp_fixture_node;   /* after stubs_reset() */
+
+    stubs_rng_push(true, 0ULL);          /* main bias */
+    stubs_rng_push(true, 0xffffULL);     /* interp draw (rejected after) */
+    x86_elf_image_t img;
+    memset(&img, 0xAA, sizeof(img));
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(2, elf_load_state.total_rng_calls);
+    assert_not_null(stubs_find_mapping(0x400000ULL));
+    teardown_fixture();
+}
+
+TEST_FUNC(test_pie_interp_rejects_nested_interp)
+{
+    /* The interpreter itself carries PT_INTERP: the loader admits at
+     * most one level of indirection. */
+    install_interp_image(elf_buf,
+                         build_pie_interp_image("/lib/ld.so", 11));
+    size_t sz = build_pie_interp_image("/lib/ld.so", 11);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_lookup_node = &interp_fixture_node;   /* after stubs_reset() */
+
+    stubs_rng_push(true, 0ULL);          /* main bias */
+    stubs_rng_push(true, 0ULL);          /* interp draw (rejected after) */
+    x86_elf_image_t img;
+    memset(&img, 0xAA, sizeof(img));
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(2, elf_load_state.total_rng_calls);
+    teardown_fixture();
+}
+
+TEST_FUNC(test_pie_interp_rejects_tls_interpreter)
+{
+    /* An interpreter with PT_TLS is rejected: only the main image's
+     * TLS window is installed and published, so interpreter TLS would
+     * be dead weight colliding with the main image's span. */
+    elf64_dyn_t dyns[] = { { DT_FLAGS_1, DF_1_PIE }, { DT_NULL, 0 } };
+    size_t isz = build_pie_image(0x40, 0x100, 0x1000, 0x2000, 0x2000,
+                                 dyns, 2, NULL, 0, NULL, NULL);
+    /* Fourth PHDR: PT_TLS, template in the RW load (same shape as
+     * test_tls_pie_relative_template). */
+    elf64_ehdr_t *e = (elf64_ehdr_t *)elf_buf;
+    e->e_phnum = 4;
+    elf64_phdr_t *ph = (elf64_phdr_t *)(elf_buf + sizeof(elf64_ehdr_t));
+    ph[0].p_filesz = 0x120;
+    ph[3] = (elf64_phdr_t){ .p_type = PT_TLS, .p_flags = PF_R,
+                            .p_offset = 0x2000,
+                            .p_vaddr = 0x2000,
+                            .p_filesz = 8, .p_memsz = 16, .p_align = 8 };
+    install_interp_image(elf_buf, isz);
+
+    size_t sz = build_pie_interp_image("/lib/ld.so", 11);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_lookup_node = &interp_fixture_node;   /* after stubs_reset() */
+
+    stubs_rng_push(true, 0ULL);          /* main bias */
+    stubs_rng_push(true, 0xffffULL);     /* interp draw (rejected after) */
+    x86_elf_image_t img;
+    memset(&img, 0xAA, sizeof(img));
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(2, elf_load_state.total_rng_calls);
     teardown_fixture();
 }
 
@@ -2524,6 +2611,9 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_pie_interp_missing_file_enoent),
     TEST_ENTRY(test_pie_interp_bad_path_rejected),
     TEST_ENTRY(test_etexec_interp_rejected),
+    TEST_ENTRY(test_pie_interp_rejects_etexec_interpreter),
+    TEST_ENTRY(test_pie_interp_rejects_nested_interp),
+    TEST_ENTRY(test_pie_interp_rejects_tls_interpreter),
     TEST_ENTRY(test_tls_etexec_variant_ii),
     TEST_ENTRY(test_tls_align_zero_and_one),
     TEST_ENTRY(test_tls_pure_tbss_tinygo_shape),

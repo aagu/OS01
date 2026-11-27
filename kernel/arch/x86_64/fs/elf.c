@@ -441,6 +441,13 @@ undo:
  *                    (the main image owns them; an interpreter load
  *                    must not disturb them — heap placement reads
  *                    end_code after elf_load returns).
+ *   interp_mode       the image IS the interpreter: it must be
+ *                    ET_DYN and may carry neither its own PT_INTERP
+ *                    (nested interpreters are not a thing) nor
+ *                    PT_TLS (the caller only publishes the main
+ *                    image's thread pointer, so an interpreter TLS
+ *                    span would be dead weight at best and collide
+ *                    with the main image's TLS window at worst).
  *
  * Returns 0 on success, -ENOEXEC/-ENOENT/-ENOMEM/-EAGAIN on failure
  * (format/placement/resource), or -EEXIST when a PIE page collided
@@ -448,7 +455,8 @@ undo:
  * elf_load maps any residual to -ENOEXEC).  *out_image is only
  * written on success. */
 static int elf_load_at(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image,
-                       const uint64_t *forced_bias, bool publish_mm_bounds)
+                       const uint64_t *forced_bias, bool publish_mm_bounds,
+                       bool interp_mode)
 {
     if (!out_image)
         return -EINVAL;
@@ -464,6 +472,17 @@ static int elf_load_at(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image,
 
     if (ehdr.e_phentsize != sizeof(elf64_phdr_t)) {
         debug_fs("elf_load: bad phentsize (%u)\n", ehdr.e_phentsize);
+        return -ENOEXEC;
+    }
+
+    /* The interpreter loads at a bias of our choosing: an ET_EXEC
+     * interpreter would take the fixed-address branch and, where its
+     * page permissions happen to be compatible with the already
+     * loaded main image, write its file bytes straight into the
+     * main image's leaves.  Reject before anything is mapped. */
+    if (interp_mode && ehdr.e_type != ET_DYN) {
+        debug_fs("elf_load: interpreter must be ET_DYN (got %u)\n",
+                 (unsigned)ehdr.e_type);
         return -ENOEXEC;
     }
 
@@ -518,13 +537,24 @@ static int elf_load_at(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image,
 
     if (ehdr.e_type == ET_DYN) {
         /* ET_DYN mains may carry PT_INTERP (T1 exec contract); the
-         * interpreter image itself must not (it is loaded by this
-         * same path with allow_interp == false). */
+         * interpreter image itself must not (nested interpreters are
+         * meaningless and its own PT_TLS is likewise rejected
+         * above-prepare: only the main image's TLS window is
+         * installed and published). */
         int prc = x86_elf_pie_prepare(node, &ehdr, phdrs, file_size,
-                                      true, &pie);
+                                      !interp_mode, &pie);
         if (prc != 0) {
             kfree(phdrs);
             return prc;
+        }
+        if (interp_mode) {
+            for (uint16_t i = 0; i < phnum; i++) {
+                if (phdrs[i].p_type == PT_TLS) {
+                    debug_fs("elf_load: interpreter with PT_TLS rejected\n");
+                    kfree(phdrs);
+                    return -ENOEXEC;
+                }
+            }
         }
         is_pie = true;
     } else {
@@ -828,7 +858,7 @@ static int elf_load_interp(mm_t *mm, x86_elf_image_t *out_image)
         rc = x86_aslr_get_pie_bias(&bias);
         if (rc != 0)
             break;
-        rc = elf_load_at(interp_node, mm, &interp_img, &bias, false);
+        rc = elf_load_at(interp_node, mm, &interp_img, &bias, false, true);
         if (rc != -EEXIST)
             break;
     }
@@ -852,7 +882,7 @@ static int elf_load_interp(mm_t *mm, x86_elf_image_t *out_image)
 
 int elf_load(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image)
 {
-    int rc = elf_load_at(node, mm, out_image, NULL, true);
+    int rc = elf_load_at(node, mm, out_image, NULL, true, false);
     if (rc == -EEXIST)
         rc = -ENOEXEC;      /* a sampled main bias can never collide */
     if (rc != 0 || !out_image->has_interp)

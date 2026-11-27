@@ -28,8 +28,9 @@ roadmap P5「动态链接器」的第一片:内核 exec 通路识别 `PT_INTERP`
 2. 主镜像 RELATIVE 重定位仍由内核装载期自应用(T1 不移交);测试主程序以 `-nostdlib` 全局部符号链接,保证零符号重定位。
 3. auxv:`AT_BASE` = interp 装载 bias(无 interp 保持 0,静态 PIE auxv 字节不变);`AT_ENTRY`/`AT_PHDR`/`AT_PHNUM` 仍指主程序。入口:`regs->rip` = interp 入口(无 interp 维持主入口)。
 4. `x86_elf_pie_prepare` 增加 allow-interp 形态:仅放行 `PT_INTERP` 段(记录 p_offset/p_filesz),DT tag 白名单、`DF_1_PIE` 等约束不变(实测 lld `--dynamic-linker` 链接产物后以宿主契约测试钉住,若 `DF_1_PIE` 缺失再放行「有 PT_INTERP 时不强制」,在 plan 中裁决)。
-5. PT_TLS:interp 声明 PT_TLS → 拒绝(T1 骨架无 TLS);主程序静态 TLS 流程不变。
-6. 已知限制(记录,不处理):interp bias 落在堆增长窗内时,brk 顶到 interp 已占用页返回 `-ENOMEM`(malloc 失败而非破坏);mmap 窗口放置留 T2。
+5. PT_TLS:interp 声明 PT_TLS → 拒绝(T1 骨架无 TLS);主程序静态 TLS 流程不变。解释器专用校验(评审 P1-2):被装载为解释器的镜像必须 ET_DYN(ET_EXEC 固定地址装载会在权限兼容时**覆写**主镜像叶),自身 PT_INTERP(嵌套)与 PT_TLS 一律 `-ENOEXEC`,均在解释器映射开始前判定。
+6. brk 与解释器窗口(评审 P1-1):堆增长遇装载器放置的外页(如解释器)整体拒绝 `-ENOMEM`——不再跳过占用页后照常提交边界(旧路径会让后续收缩解除并释放解释器叶)。拒绝后堆边界、堆 VMA 端点与解释器页内容保持原值;`test_brk_grow_rejects_foreign_page` 回归钉住。
+7. 控制流证明(评审 P2-1):解释器骨架在跳转前于 auxv `AT_NULL` 之后的对齐垫写入固定握手对(TAG/MAGIC),主程序在成功路径校验该对——仅有正确 AT_BASE/AT_PHDR 而 RIP 被直送主入口时用例必失败。
 
 ## ld.so 骨架与测试主程序
 
