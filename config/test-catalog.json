@@ -1256,6 +1256,19 @@
       }
     },
     {
+      "id": "test_aarch64_pcie",
+      "layer": "harness",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [
+        "drivers.pci.ecam_virt_lspci",
+        "drivers.pci.no_ecam_graceful_fallback"
+      ],
+      "source": "qemutests/test_aarch64_pcie.py"
+    },
+    {
       "id": "test_aarch64_pcie_ecam",
       "layer": "host",
       "subsystem": "memory",

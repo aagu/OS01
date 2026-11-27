@@ -2752,6 +2752,70 @@
    }
   },
   {
+   "id": "drivers.pci.ecam_virt_lspci",
+   "owner": "qemu_e2e",
+   "component": "drivers",
+   "behavior": "pci",
+   "trigger": "make PROFILE=aarch64-clang test-aarch64-pcie",
+   "assertions": [
+    "QEMU virt boots with virtio-rng-pci, device-boot succeeds, /dev/pci exposes 0000:00:00.0 and 0000:00:01.0, and lspci / -n / -v / -x exit 0"
+   ],
+   "failure_modes": [
+    "ECAM mapping or enumeration failure, kernel panic, missing /dev/pci nodes, or lspci error exit"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/aarch64_pcie_test.py",
+    "selector": "ecam-virt",
+    "evidence": "QEMU_PASS"
+   },
+   "supporting": [
+    {
+     "layer": "harness",
+     "source": "qemutests/test_aarch64_pcie.py",
+     "selector": "test_aarch64_pcie",
+     "evidence": "UNITTEST_PASS",
+     "distinct_risk": "Verifies QEMU command assembly and ECAM serial output parser deterministically without booting QEMU"
+    }
+   ],
+   "overlap_decision": {
+    "action": "retain",
+    "reason": "Harness unittest validates runner command/parser logic while QEMU E2E exercises real EDK2/ECAM/devfs/lspci integration"
+   }
+  },
+  {
+   "id": "drivers.pci.no_ecam_graceful_fallback",
+   "owner": "qemu_e2e",
+   "component": "drivers",
+   "behavior": "pci",
+   "trigger": "make PROFILE=aarch64-clang test-aarch64-pcie",
+   "assertions": [
+    "Diagnostic DTB replacing pci-host-ecam-generic with brcm,bcm2712-pcie boots without FATAL/PANIC, passes device-boot, reaches shell, and lspci exits 1"
+   ],
+   "failure_modes": [
+    "Kernel panic or fatal device-boot failure when ECAM host bridge is absent"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/aarch64_pcie_test.py",
+    "selector": "no-ecam",
+    "evidence": "QEMU_PASS"
+   },
+   "supporting": [
+    {
+     "layer": "harness",
+     "source": "qemutests/test_aarch64_pcie.py",
+     "selector": "test_aarch64_pcie",
+     "evidence": "UNITTEST_PASS",
+     "distinct_risk": "Verifies DTS ECAM-to-BCM2712 transformation and negative fallback parser deterministically without booting QEMU"
+    }
+   ],
+   "overlap_decision": {
+    "action": "retain",
+    "reason": "Harness unittest validates DTS transformation and negative parser while QEMU E2E verifies full AArch64 boot without ECAM"
+   }
+  },
+  {
    "id": "sched.percpu.layout",
    "owner": "host",
    "component": "sched",

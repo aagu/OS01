@@ -128,7 +128,10 @@ static const struct { uint16_t vendor, device; const char *name; } kDeviceNames[
     { 0x1af4, 0x1005, "Virtio RNG device" },
     { 0x1af4, 0x1041, "Virtio console" },
     { 0x1af4, 0x1042, "Virtio modern block device" },
+    { 0x1af4, 0x1044, "Virtio modern RNG device" },
     { 0x1af4, 0x1100, "Virtio GPU" },
+    { 0x1b36, 0x0008, "QEMU PCIe Host bridge" },
+    { 0x1b36, 0x000c, "QEMU PCIe Root Port" },
 };
 
 static const struct { uint16_t id; const char *name; } kVendorNames[] = {
@@ -284,10 +287,14 @@ static void print_device(const char *bdf, bool numeric, bool verbose, bool hexdu
     char config[CONFIG_BUF_MAX];
     int config_len = read_attr(bdf, "config", config, sizeof(config));
 
-    // "0000:00:1f.2" -> "00:1f.2" (the domain is dropped, like Linux lspci)
+    // "0000:00:1f.2" -> "00:1f.2" (domain 0000 dropped like Linux lspci;
+    // non-zero domains keep full "dddd:bb:ss.f").
     char slot[32];
-    const char *colon = strchr(bdf, ':');
-    snprintf(slot, sizeof(slot), "%s", colon ? colon + 1 : bdf);
+    if (strncmp(bdf, "0000:", 5) == 0) {
+        snprintf(slot, sizeof(slot), "%s", bdf + 5);
+    } else {
+        snprintf(slot, sizeof(slot), "%s", bdf);
+    }
 
     char class_buf[64];
     if (have_class) {

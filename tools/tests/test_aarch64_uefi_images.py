@@ -102,6 +102,7 @@ def main() -> None:
         ["run-aarch64-uefi"],
         ["test-aarch64"],
         ["test-aarch64-boot-logo"],
+        ["test-aarch64-pcie"],
         ["test-aarch64", "MODE=boot-contract"],
     ):
         r = run_make_n(build_root, ["AARCH64_PLATFORM=rpi5", *target])
