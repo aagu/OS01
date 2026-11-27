@@ -701,7 +701,13 @@ class CompilerLauncherContractTests(unittest.TestCase):
             timeout=30,
         )
         self.assertEqual(res.returncode, 0, f"make -n user failed: {res.stderr}")
-        self.assertIn("COMPILER_LAUNCHER=test-ccache-probe", res.stdout)
+        # The controlled sub-make boundary shell-quotes every whitelisted
+        # override (commit 11d41818) so a toolchain path containing a space
+        # survives as ONE argument.  The launcher therefore reaches the
+        # sub-make as COMPILER_LAUNCHER=value or COMPILER_LAUNCHER="value".
+        # What the contract requires is that the NAME and its VALUE arrive
+        # together; a dropped launcher must still fail the test.
+        self.assertRegex(res.stdout, r'COMPILER_LAUNCHER="?test-ccache-probe"?')
 
 
 class AssemblyAndHeaderDepContractTests(unittest.TestCase):
