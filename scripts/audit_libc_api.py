@@ -223,6 +223,7 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
     "errno.h": [],
     "fcntl.h": [
         "fcntl",
+        "openat",
     ],
     "float.h": [],
     "getopt.h": [
@@ -537,6 +538,10 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "times",
     ],
     "sys/types.h": [],
+    "sys/uio.h": [
+        "readv",
+        "writev",
+    ],
     "sys/un.h": [],
     "sys/utsname.h": [
         "uname",
@@ -591,16 +596,19 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "setsid",
         "getsid",
         "open",
+        "openat",
         "close",
         "read",
         "write",
         "dup",
         "dup2",
+        "dup3",
         "fork",
         "waitpid",
         "chdir",
         "getcwd",
         "pipe",
+        "pipe2",
         "execve",
         "execv",
         "execvp",
