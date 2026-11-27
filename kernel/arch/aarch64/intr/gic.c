@@ -74,19 +74,25 @@ void gic_init(void)
 {
     uintptr_t gicd = dtb_gicd_base();
     uintptr_t gicc = dtb_gicc_base();
+    uintptr_t gicr = dtb_gicr_base();
+    bool is_v3 = (dtb_gic_version() == 3u && gicr != 0u);
     /* QEMU virt Device window, also mapped in TTBR1 by M1.  The high
      * alias is the only alias that survives a private user root in
      * TTBR0_EL1: the low identity map belongs to TTBR0 and disappears
      * with the user root. */
     gicd += ARCH_PAGE_OFFSET;
     gicc += ARCH_PAGE_OFFSET;
-    if (gic_dev_init(&g_gic, (volatile uint32_t *)gicd,
-                     (volatile uint32_t *)gicc) != 0) {
+    gicr += ARCH_PAGE_OFFSET;
+    int init_rc = is_v3
+        ? gic_dev_init_v3(&g_gic, (volatile uint32_t *)gicd, (volatile uint32_t *)gicr)
+        : gic_dev_init(&g_gic, (volatile uint32_t *)gicd, (volatile uint32_t *)gicc);
+    if (init_rc != 0) {
         log_err("[gic] FATAL: GICD IIDR=0\n");
         for (;;) __asm__ __volatile__("wfi" ::: "memory");
     }
     gic_driver_set_unexpected(log_unexpected);        /* R1-3 */
     gic_driver_set_cpu_index(k_cpu_index);            /* R2-6: per-CPU IAR trace */
+    gic_driver_set_mpidr_lookup(dtb_mpidr);
     gic_dev_dist_enable(&g_gic);
     gic_cpu_init();
     gic_target_bit_init(0);
@@ -107,11 +113,11 @@ void gic_init(void)
     }
     /* R2-3: intids marker 独占一行（harness 的 --expect-gic 全行 regex
      * 要求 `^\[gic\] GICv2 driver: intids=\d+$`），CPU interface 另起一行。 */
-    kputs("[gic] GICv2 driver: intids=");
+    kputs(is_v3 ? "[gic] GICv3 driver: intids=" : "[gic] GICv2 driver: intids=");
     kputu(g_gic.nr_intids);
     kputs("\n");
     kputs("[gic] CPU interface @ 0x");
-    kputx(dtb_gicc_base());
+    kputx(is_v3 ? dtb_gicr_base() : dtb_gicc_base());
     kputs("\n");
     }
 

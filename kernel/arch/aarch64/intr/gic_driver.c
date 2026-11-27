@@ -29,6 +29,15 @@
 #define GICC_PMR        0x004u
 #define GICC_IAR        0x00Cu
 #define GICC_EOIR       0x010u
+#define GICR_TYPER      0x008u
+#define GICR_WAKER      0x014u
+#define GICR_SGI_OFF    0x10000u
+#define GICR_IGROUPR0   0x080u
+#define GICR_ISENABLER0 0x100u
+#define GICR_ICENABLER0 0x180u
+#define GICR_IPRIORITYR 0x400u
+#define GICR_IGRPMODR0  0xD00u
+#define GICR_STRIDE     0x20000u
 
 static inline void w32(volatile uint32_t *m, uint32_t off, uint32_t v)
 {
@@ -68,7 +77,8 @@ static uint32_t g_nr_intids;
 int gic_dev_init(struct gic_dev *dev, volatile uint32_t *gicd, volatile uint32_t *gicc)
 {
     if (!dev || !gicd || !gicc) return -1;
-    dev->gicd = gicd; dev->gicc = gicc; dev->dbg_last_iar = 0;
+    dev->gicd = gicd; dev->gicc = gicc; dev->gicr = 0;
+    dev->is_v3 = false; dev->dbg_last_iar = 0;
     if (r32(gicd, GICD_IIDR) == 0) return -1;         /* 镜像 gic.c:30-33 的门 */
     uint32_t typer = r32(gicd, GICD_TYPER);
     uint32_t lines = (typer & 0x1fu) + 1u;
@@ -80,9 +90,53 @@ int gic_dev_init(struct gic_dev *dev, volatile uint32_t *gicd, volatile uint32_t
     return 0;
 }
 
+int gic_dev_init_v3(struct gic_dev *dev, volatile uint32_t *gicd, volatile uint32_t *gicr)
+{
+    if (!dev || !gicd || !gicr) return -1;
+    dev->gicd = gicd; dev->gicc = 0; dev->gicr = gicr;
+    dev->is_v3 = true; dev->dbg_last_iar = 0;
+    if (r32(gicd, GICD_IIDR) == 0) return -1;
+    uint32_t typer = r32(gicd, GICD_TYPER);
+    uint32_t lines = (typer & 0x1fu) + 1u;
+    dev->nr_intids = lines * 32u;
+    if (dev->nr_intids > GIC_HANDLER_MAX) dev->nr_intids = GIC_HANDLER_MAX;
+    dev->security_extn = ((typer >> 10) & 1u) != 0u;
+    dev->nr_cpu_interfaces = 8u;
+    g_nr_intids = dev->nr_intids;
+    return 0;
+}
+
+#if defined(__aarch64__) && !defined(OS01_HOST_TEST)
+static volatile uint32_t *gicr_find_self(const struct gic_dev *dev)
+{
+    uint64_t mpidr = 0;
+    __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr));
+    uint32_t aff = (uint32_t)(((mpidr >> 8) & 0xff000000ULL) | (mpidr & 0x00ffffffULL));
+    volatile uint32_t *rd = dev->gicr;
+    for (uint32_t i = 0; i < 64u; ++i) {
+        uint32_t typer_lo = r32(rd, GICR_TYPER);
+        uint32_t typer_hi = r32(rd, GICR_TYPER + 4u);
+        if (typer_hi == aff)
+            return rd;
+        if (typer_lo & (1u << 4))
+            break;
+        rd += GICR_STRIDE / 4u;
+    }
+    return 0;
+}
+#endif
+
 void gic_dev_dist_enable(struct gic_dev *dev)
 {
     if (!dev) return;
+    if (dev->is_v3) {
+        w32(dev->gicd, GICD_CTLR, (1u << 4) | (1u << 1)); /* ARE_NS | EnableGrp1NS */
+        for (uint32_t i = 0; i < 100000u; ++i) {
+            if ((r32(dev->gicd, GICD_CTLR) & (1u << 31)) == 0u)
+                break;
+        }
+        return;
+    }
     w32(dev->gicd, GICD_CTLR, 1u);
 }
 
@@ -109,6 +163,30 @@ int gic_irq_config(struct gic_dev *dev, uint32_t intid, bool enable,
                    uint8_t prio, uint8_t targets)
 {
     if (!dev || !intid_ok(dev, intid)) return -1;
+    if (dev->is_v3) {
+        uint32_t pr_off = GICR_IPRIORITYR + (intid / 4u) * 4u;
+        uint32_t shift = (intid % 4u) * 8u;
+        if (intid < 32u) {
+#if defined(__aarch64__) && !defined(OS01_HOST_TEST)
+            volatile uint32_t *rd = gicr_find_self(dev);
+            if (!rd) return -1;
+            volatile uint32_t *sgi = rd + (GICR_SGI_OFF / 4u);
+            w32(sgi, GICR_IGROUPR0, r32(sgi, GICR_IGROUPR0) | (1u << intid));
+            w32(sgi, pr_off, (r32(sgi, pr_off) & ~(0xffu << shift)) | ((uint32_t)prio << shift));
+            if (enable) w32(sgi, GICR_ISENABLER0, 1u << intid);
+            else        w32(sgi, GICR_ICENABLER0, 1u << intid);
+#endif
+            return 0;
+        }
+        volatile uint32_t *g = dev->gicd;
+        uint32_t grp_off = GICD_IGROUPR + (intid / 32u) * 4u;
+        w32(g, grp_off, r32(g, grp_off) | (1u << (intid % 32u)));
+        w32(g, GICD_IPRIORITYR + (intid / 4u) * 4u,
+            (r32(g, GICD_IPRIORITYR + (intid / 4u) * 4u) & ~(0xffu << shift)) | ((uint32_t)prio << shift));
+        if (enable) w32(g, GICD_ISENABLER + (intid / 32u) * 4u, 1u << (intid % 32u));
+        else        w32(g, GICD_ICENABLER + (intid / 32u) * 4u, 1u << (intid % 32u));
+        return 0;
+    }
     volatile uint32_t *g = dev->gicd;
     /* 无 Security Extensions 时配置 Group 0；有 Security Extensions 时
      * Non-secure EL1 由固件提供 Group 1，跳过 IGROUPR 访问。 */
@@ -144,7 +222,32 @@ int gic_irq_disable(struct gic_dev *dev, uint32_t intid)
 
 int gic_dev_cpu_enable(struct gic_dev *dev)
 {
-    if (!dev || !dev->gicc) return -1;
+    if (!dev) return -1;
+    if (dev->is_v3) {
+#if defined(__aarch64__) && !defined(OS01_HOST_TEST)
+        volatile uint32_t *rd = gicr_find_self(dev);
+        if (!rd) return -1;
+        uint32_t waker = r32(rd, GICR_WAKER);
+        w32(rd, GICR_WAKER, waker & ~(1u << 1));
+        for (uint32_t i = 0; i < 100000u; ++i) {
+            if ((r32(rd, GICR_WAKER) & (1u << 2)) == 0u)
+                break;
+        }
+        volatile uint32_t *sgi = rd + (GICR_SGI_OFF / 4u);
+        w32(sgi, GICR_IGROUPR0, 0xffffffffu);
+        w32(sgi, GICR_IGRPMODR0, 0u);
+        uint64_t sre = 0;
+        __asm__ __volatile__("mrs %0, S3_0_C12_C12_5" : "=r"(sre));
+        sre |= 1ULL;
+        __asm__ __volatile__("msr S3_0_C12_C12_5, %0\n\tisb" :: "r"(sre));
+        __asm__ __volatile__("msr S3_0_C4_C6_0, %0\n\t"
+                             "msr S3_0_C12_C12_3, %1\n\t"
+                             "msr S3_0_C12_C12_7, %2\n\tisb"
+                             :: "r"(UINT64_C(0xff)), "r"(UINT64_C(0)), "r"(UINT64_C(1)));
+#endif
+        return 0;
+    }
+    if (!dev->gicc) return -1;
     w32(dev->gicc, GICC_PMR, 0xffu);
     if ((r32(dev->gicc, GICC_PMR) & 0xffu) == 0u) {
         return -1;
@@ -183,17 +286,30 @@ uint8_t gic_cpu_target_mask(const struct gic_dev *dev, bool single_cpu_topology)
  * 读到的必是本核最近一次 ack（同核 dispatch 串行 + IRQ masked, 无嵌套），
  * AP 的 ack 写各自槽，互不覆写。hosttest 用 mock hook 覆盖。 */
 static uint32_t (*cpu_index_fn)(void);
+static uint64_t (*mpidr_lookup_fn)(uint32_t);
 static volatile uint32_t trace_iar[GIC_TRACE_CPUS];
 
 void gic_driver_set_cpu_index(uint32_t (*fn)(void))
 { cpu_index_fn = fn; }
+
+void gic_driver_set_mpidr_lookup(uint64_t (*fn)(uint32_t cpu))
+{ mpidr_lookup_fn = fn; }
 
 uint32_t gic_driver_trace_get(uint32_t cpu)
 { return cpu < GIC_TRACE_CPUS ? trace_iar[cpu] : 0u; }
 
 uint32_t gic_ack(struct gic_dev *dev)
 {
-    uint32_t iar = r32(dev->gicc, GICC_IAR);
+    uint32_t iar = 1023u;
+    if (dev->is_v3) {
+#if defined(__aarch64__) && !defined(OS01_HOST_TEST)
+        uint64_t v = 0;
+        __asm__ __volatile__("mrs %0, S3_0_C12_C12_0" : "=r"(v));
+        iar = (uint32_t)v;
+#endif
+    } else {
+        iar = r32(dev->gicc, GICC_IAR);
+    }
     dev->dbg_last_iar = iar;                /* 单槽 trace（hosttest 默认路径） */
     if (cpu_index_fn) {
         uint32_t c = cpu_index_fn();
@@ -203,10 +319,54 @@ uint32_t gic_ack(struct gic_dev *dev)
 }
 
 void gic_eoi(struct gic_dev *dev, uint32_t iar)
-{ w32(dev->gicc, GICC_EOIR, iar); }        /* 完整 IAR 原样写回 — D7 修复 */
+{
+    if (dev->is_v3) {
+#if defined(__aarch64__) && !defined(OS01_HOST_TEST)
+        __asm__ __volatile__("msr S3_0_C12_C12_1, %0\n\tisb" :: "r"((uint64_t)iar));
+#endif
+        return;
+    }
+    w32(dev->gicc, GICC_EOIR, iar);         /* 完整 IAR 原样写回 — D7 修复 */
+}
+
+#if defined(__aarch64__) && !defined(OS01_HOST_TEST)
+static void gicv3_write_sgi1r(uint32_t sgi, uint64_t mpidr)
+{
+    uint64_t aff3 = (mpidr >> 32) & 0xffULL;
+    uint64_t aff2 = (mpidr >> 16) & 0xffULL;
+    uint64_t aff1 = (mpidr >> 8) & 0xffULL;
+    uint64_t aff0 = mpidr & 0xfULL;
+    uint64_t val = (aff3 << 48) | (aff2 << 32) | (((uint64_t)(sgi & 0xfu)) << 24) |
+                   (aff1 << 16) | (UINT64_C(1) << aff0);
+    __asm__ __volatile__("msr S3_0_C12_C11_5, %0\n\tisb" :: "r"(val));
+}
+#endif
 
 void gic_send_sgi(struct gic_dev *dev, uint32_t sgi, uint8_t targets, uint8_t filter)
 {
+    if (dev->is_v3) {
+#if defined(__aarch64__) && !defined(OS01_HOST_TEST)
+        if (filter == GICD_SGIR_FILTER_OTHERS) {
+            uint64_t val = (UINT64_C(1) << 40) | (((uint64_t)(sgi & 0xfu)) << 24);
+            __asm__ __volatile__("msr S3_0_C12_C11_5, %0\n\tisb" :: "r"(val));
+            return;
+        }
+        if (filter == GICD_SGIR_FILTER_SELF) {
+            uint64_t mpidr = 0;
+            __asm__ __volatile__("mrs %0, mpidr_el1" : "=r"(mpidr));
+            gicv3_write_sgi1r(sgi, mpidr);
+            return;
+        }
+        for (uint32_t cpu = 0; cpu < 8u; ++cpu) {
+            if ((targets & (1u << cpu)) == 0u)
+                continue;
+            uint64_t mpidr = mpidr_lookup_fn ? mpidr_lookup_fn(cpu) : (uint64_t)cpu;
+            if (mpidr != UINT64_MAX)
+                gicv3_write_sgi1r(sgi, mpidr);
+        }
+#endif
+        return;
+    }
     w32(dev->gicd, GICD_SGIR,
         ((uint32_t)(filter & 3u) << 24) | ((uint32_t)targets << 16) | (sgi & 0xfu));
 }

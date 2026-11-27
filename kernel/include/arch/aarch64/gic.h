@@ -19,8 +19,10 @@ enum gic_irq_type { GIC_IRQ_INVALID = 0, GIC_IRQ_SGI, GIC_IRQ_PPI, GIC_IRQ_SPI }
 struct gic_dev {
     volatile uint32_t *gicd;                 /* Device-nGnRnE mapping */
     volatile uint32_t *gicc;
+    volatile uint32_t *gicr;                 /* GICv3 redistributor base */
     uint32_t nr_intids;                      /* (TYPER.ITLinesNumber+1)*32, cap 1020 */
     bool security_extn;                      /* TYPER.SecurityExtn (bit 10) */
+    bool is_v3;
     uint8_t nr_cpu_interfaces;               /* TYPER.CPUNumber[7:5] + 1 */
     volatile uint32_t dbg_last_iar;          /* 单槽 trace（hosttest 默认路径）;
                                               内核配 set_cpu_index 后另写 per-CPU 槽 */
@@ -28,6 +30,7 @@ struct gic_dev {
 
 /* hw 层 —— 全部经 dev 指针；返回 0 成功 / 非 0 失败；不打印 */
 int  gic_dev_init(struct gic_dev *dev, volatile uint32_t *gicd, volatile uint32_t *gicc);
+int  gic_dev_init_v3(struct gic_dev *dev, volatile uint32_t *gicd, volatile uint32_t *gicr);
 void gic_dev_dist_enable(struct gic_dev *dev);    /* GICD_CTLR = 1 */
 void gic_dev_dist_disable(struct gic_dev *dev);
 int  gic_dev_cpu_enable(struct gic_dev *dev);     /* PMR=0xff + 读回校验 + GICC_CTLR=1 */
@@ -54,6 +57,7 @@ void gic_driver_set_unexpected(void (*cb)(uint32_t intid));
  * gic_driver_trace_get(cpu) 读指定槽。 */
 #define GIC_TRACE_CPUS 8
 void gic_driver_set_cpu_index(uint32_t (*fn)(void));
+void gic_driver_set_mpidr_lookup(uint64_t (*fn)(uint32_t cpu));
 uint32_t gic_driver_trace_get(uint32_t cpu);
 
 /* handler 注册表 —— 模块级全局（Phase 1 非 per-CPU, spec §4.1） */

@@ -84,7 +84,9 @@ void gic_target_bit_init(uint32_t cpu_id)
         return;
     }
     const struct gic_dev *dev = gic_dev_current();
-    uint8_t mask = gic_cpu_target_mask(dev, dtb_cpu_count() == 1u);
+    uint8_t mask = (dev && dev->is_v3)
+        ? (uint8_t)(1u << (cpu_id & 7u))
+        : gic_cpu_target_mask(dev, dtb_cpu_count() == 1u);
     if (mask == 0u) {
         ipi_fatal_itargets(cpu_id, 0);
         return; /* unreachable: hook does not return */
