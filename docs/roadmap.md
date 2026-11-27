@@ -18,6 +18,7 @@
 | **P3** | GUI | 7 | GUI-4/5/6 + 优化与验证 4 |
 | **P4** | 硬件适配 | 5 | USB 2 · NVMe · HPET · ACPI S3 |
 | **P5** | ABI 扩展 / 兼容性 | 12 | syscall 与 libc 缺口（`readv/writev`、`openat/dup3/pipe2` 已于 2026-11-26 闭环） |
+| **横跨 P0–P5** | [其他 OS 设计借鉴](#其他-os-设计借鉴) | 5 | 独立计数，优先试做 ext2 宿主集成测试与 init 重启限流 |
 
 推进顺序：**P0 → P1 → P2 → P3 / P4 → P5**；P3 GUI 与 P4 硬件可并行。
 
@@ -124,6 +125,20 @@
 | AF_UNIX/socketpair | 本地 socket IPC | socket ✅；**现状**：`socketpair()` 是 `ENOSYS` 桩（`libc/unistd/net_stubs.c:45-48`）；内核 `socket_alloc()` **不校验 `domain`**（`kernel/net/socket.c:64` 的 `socket_alloc(domain, type, protocol)`，`:67-71` 的 switch 只按 `SOCK_STREAM`/`SOCK_DGRAM` 映射 TCP/UDP，`domain` 仅在 `:81` 被原样存入 `s->domain`），请求 `AF_UNIX` 会拿到 TCP/UDP socket 而不是报错——这是正确性缺口，不只是缺功能 | |
 | BusyBox applet 悬空软链 | ⚠️ **`config/busybox.config.in` 在 grep/sed/awk/xargs/tar/dmesg 这六个中只启用了 find**（`CONFIG_FIND=y`，`:451`；其余六个均为 `# CONFIG_* is not set`：grep `:483`/sed `:426`/awk `:417`/xargs `:487`/tar `:186`/dmesg `:609`）——生成的 `applet_tables.h` 里也没有这些 applet。**连带缺陷**：`config/rootfs.mk:15` 仍创建 `/bin/grep`、`/bin/sed`、`/bin/awk`、`/bin/xargs`、`/bin/tar`、`/bin/dmesg` 等软链，执行时得到 "applet not found"（悬空软链）→ **待决：启用这些 applet 还是撤掉对应软链**。libc 侧 POSIX 正则引擎未实现（`libc/include/regex.h` 为桩头，`regcomp`/`regexec` 全空转），`glob` 为返回 `GLOB_NOMATCH` 的桩（`libc/stdlib/glob.c:5-12`；libc-completion T16 正则/glob：2026-11-09 用户决定推迟到后续周期）；`fnmatch` 已实现（`*`/`?`/`[]`），**仅 `FNM_NOESCAPE` 被消费，其余 flags 全忽略**（`libc/string/fnmatch.c:12` 的 `(void)flags;` 注释，消费点在 `:55` 的 `*p == '\\' && !(flags & FNM_NOESCAPE)`） | libc | |
 | Alpine apk/musl | musl 二进制包兼容路线 | 动态链接器 | cavOS |
+
+## 其他 OS 设计借鉴
+
+| 建议优先级 | 新任务与首版范围 | 完成条件 | 设计来源 |
+|---|---|---|---|
+| P0 | **在宿主运行完整的 ext2 文件操作链**。沿用现有 RAM 盘夹具，把真实 VFS、ext2 与块缓存接到同一份测试镜像，补上单测之间的接缝。 | 从宿主创建文件、写过直接块边界、同步、卸载，再用全新的缓存重新挂载并逐字节校验。另在指定块读操作注入一次 I/O 错误，调用方收到错误，解除注入后可重新挂载读取。纳入 `make test-host`。 | NetBSD rump 把内核组件链接进用户态程序运行。[rump(3)](https://man.netbsd.org/rump.3) |
+| P2 | **给 PID 1 的服务重启加上限流与恢复策略**。现有 `inittab` 已支持 `respawn`；按服务记录连续短命退出，对该服务逐次延长重启间隔，稳定运行后恢复初始间隔。 | QEMU 中同时启动立即退出的测试服务和正常服务。记录前者的重启时间，验证退避生效且有上限；后者持续响应，PID 1 仍能回收子进程。让测试服务稳定运行一轮，再验证退避复位。 | MINIX 3 由独立监督者跟踪服务并处理故障恢复。[设计论文](https://www.minix3.org/doc/reliable-os.pdf) |
+| P2 | **输出可查询的根设备诊断快照**。沿 PCI 枚举、块设备注册、根分区匹配三步记录设备来源、候选数和最近错误。挂载失败时从早期串口导出，启动成功后从只读 procfs 节点读取相同字段。 | 用 QEMU 准备无块设备、有盘但根 GUID 不匹配、正常挂载三种配置。前两种仅凭串口即可区分停在哪一步；成功配置可从 shell 查到选中的块设备和分区。 | Fuchsia Inspect 让组件发布可按层次读取的当前状态。[Inspect](https://fuchsia.dev/fuchsia-src/development/diagnostics/inspect) |
+| P1 | **让用户程序主动收紧系统调用权限**。借鉴单向收紧原则，首版允许程序在打开输入后放弃后续路径打开权限；原生和兼容入口共用策略，限制随 fork/exec 继承。 | 两架构 systest 证明：已打开的 FD 仍可读，`open` 和 `openat` 均被拒绝，子进程和替换后的程序维持限制，再次调用也无法恢复权限。兼容入口在支持它的 profile 上覆盖。 | OpenBSD 允许进程逐步放弃一组操作。[pledge(2)](https://man.openbsd.org/pledge.2) |
+| P5 | **为用户态事件循环提供持久订阅**。在现有 poll 就绪判定上试做 BSD 风格的事件队列，首版只接管道可读和单调时钟定时器，供终端或桌面循环一次等待两类事件。 | systest 覆盖先写后订阅、先订阅后写、定时器到期和删除订阅；关闭管道再复用同一 FD 编号时，新管道不得收到旧订阅的通知。aarch64 SMP 验收前先关闭上文的 poll 偶发挂起问题。 | BSD kqueue 的注册、就绪检查与批量取回机制。[kqueue(2)](https://man.openbsd.org/kqueue.2) |
+
+建议先并行推进 ext2 宿主集成测试与 PID 1 重启限流，两项都有现成测试入口。根设备诊断可随两块 ARM 板的 rootfs 联调推进，首次验收可在 QEMU 完成。权限收紧和事件队列涉及新用户态 ABI，各自先用一个调用方验证语义，再扩大覆盖范围。
+
+---
 
 ## Parked（未闭环 follow-on，随时可拾起）
 
