@@ -545,7 +545,15 @@ struct xhci_controller {
     struct xhci_proto_cap proto_caps[XHCI_MAX_PROTO_CAPS];
     uint8_t num_proto_caps;
     uint8_t port_cap_idx[256];
+    char loc_desc[32];
 };
+
+static inline const char *xhci_ctrl_loc(const struct xhci_controller *ctrl)
+{
+    if (ctrl && ctrl->loc_desc[0] != '\0')
+        return ctrl->loc_desc;
+    return "bdf=00:00.0";
+}
 
 /* xHCI MMIO read/write accessors */
 #ifndef xhci_read32
@@ -580,11 +588,17 @@ static inline void xhci_write64(volatile void *addr, uint64_t val)
 int xhci_probe(struct pci_device *pdev, const struct pci_device_id *id);
 void xhci_remove(struct pci_device *pdev);
 int xhci_parse_capabilities(struct xhci_controller *ctrl);
+int xhci_claim_legacy(struct xhci_controller *c);
 int xhci_reset(struct xhci_controller *ctrl);
 int xhci_alloc_dma(struct xhci_controller *ctrl);
 void xhci_free_dma(struct xhci_controller *ctrl);
 void xhci_setup_interrupter0(struct xhci_controller *ctrl);
+int xhci_program_rings(struct xhci_controller *ctrl);
+int xhci_run(struct xhci_controller *ctrl);
+int xhci_stop(struct xhci_controller *ctrl);
 int xhci_start(struct xhci_controller *ctrl);
+int xhci_publish_controller(struct xhci_controller *ctrl);
+void xhci_unpublish_controller(struct xhci_controller *ctrl);
 int xhci_cmd_ring_enqueue(struct xhci_controller *ctrl, const struct xhci_trb *trb);
 int xhci_poll_event_filtered(struct xhci_controller *ctrl, uint32_t target_type,
                              struct xhci_trb *out_evt, uint32_t timeout_loops);

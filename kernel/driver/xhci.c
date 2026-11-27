@@ -10,11 +10,9 @@
 #include <bus/pci/driver.h>
 #include <errno.h>
 #include <string.h>
-#include <arch/x86_64/vmm.h>
+#include <arch/cpu.h>
 
 #ifndef OS01_HOST_TEST
-#include <arch/x86_64/pte.h>
-#include <memory/vmm.h>
 #include <fs/vfs.h>
 #else
 __attribute__((weak)) uint64_t arch_clocksource_read_ns(void) { return 0; }
@@ -281,7 +279,7 @@ int xhci_parse_ext_caps(struct xhci_controller *ctrl, uint32_t hccparams1)
     return 0;
 }
 
-static int xhci_claim_legacy(struct xhci_controller *c)
+int xhci_claim_legacy(struct xhci_controller *c)
 {
     if (!c || !c->mmio_virt) return -EINVAL;
     if (!c->has_legsup) return 0;
@@ -665,7 +663,7 @@ static int xhci_poll_event_internal(struct xhci_controller *ctrl, uint32_t targe
         struct xhci_trb evt;
         if (!xhci_event_pop_locked(ctrl, &evt)) {
             if (i >= 1000)
-                __asm__ volatile("pause");
+                arch_cpu_pause();
             continue;
         }
 
@@ -1004,7 +1002,7 @@ int xhci_wait_min_ns(uint64_t duration_ns, uint64_t deadline_ns)
         } else {
             frozen_loops = 0;
         }
-        __asm__ volatile("pause");
+        arch_cpu_pause();
     }
 }
 
@@ -1332,7 +1330,7 @@ static int xhci_stop_ep_and_wait_locked(struct xhci_controller *ctrl, uint8_t sl
         struct xhci_trb evt;
         if (!xhci_event_pop_locked(ctrl, &evt)) {
             if (i >= 1000)
-                __asm__ volatile("pause");
+                arch_cpu_pause();
             continue;
         }
 
@@ -1818,11 +1816,8 @@ static void xhci_log_ctrl_in_timeout(const struct xhci_controller *ctrl,
     uint32_t evt_ctrl = ctrl->event_ring_virt
         ? *(volatile uint32_t *)&ctrl->event_ring_virt[ctrl->event_ring_dequeue].control
         : 0;
-    uint8_t bus = ctrl->pdev ? ctrl->pdev->bus : 0;
-    uint8_t dev = ctrl->pdev ? ctrl->pdev->slot : 0;
-    uint8_t fn = ctrl->pdev ? ctrl->pdev->fn : 0;
-    log_warn("[xhci] ctrl-in timeout bdf=%02x:%02x.%u slot=%u stage=%s sts=0x%x sst=%u ep0=%u ev=(%u,c=%u,w=0x%x) now_ms=%llu dl_ms=%llu\n",
-             (unsigned)bus, (unsigned)dev, (unsigned)fn, (unsigned)slot->slot_id, stage,
+    log_warn("[xhci] ctrl-in timeout %s slot=%u stage=%s sts=0x%x sst=%u ep0=%u ev=(%u,c=%u,w=0x%x) now_ms=%llu dl_ms=%llu\n",
+             xhci_ctrl_loc(ctrl), (unsigned)slot->slot_id, stage,
              sts, slot_st, ep0_st, (unsigned)ctrl->event_ring_dequeue,
              (unsigned)ctrl->event_ring_cycle, evt_ctrl,
              (unsigned long long)(arch_clocksource_read_ns() / 1000000ULL),
@@ -3465,9 +3460,9 @@ void xhci_free_dma(struct xhci_controller *ctrl)
     }
 }
 
-int xhci_start(struct xhci_controller *ctrl)
+int xhci_program_rings(struct xhci_controller *ctrl)
 {
-    if (!ctrl || !ctrl->op_regs) return -EINVAL;
+    if (!ctrl || !ctrl->op_regs || !ctrl->rt_regs) return -EINVAL;
 
     volatile uint8_t *op = ctrl->op_regs;
 
@@ -3483,13 +3478,25 @@ int xhci_start(struct xhci_controller *ctrl)
     /* 3. Program CRCR with initial RCS = 1 */
     xhci_write64(op + XHCI_OP_CRCR, ctrl->cmd_ring_phys | 1);
 
-    /* 4. Start controller: write USBCMD.RS = 1 */
+    /* 4. Program Interrupter 0 (ERSTSZ, ERSTBA, ERDP, IMAN) */
+    xhci_setup_interrupter0(ctrl);
+
+    return 0;
+}
+
+int xhci_run(struct xhci_controller *ctrl)
+{
+    if (!ctrl || !ctrl->op_regs) return -EINVAL;
+
+    volatile uint8_t *op = ctrl->op_regs;
+
+    /* Start controller: write USBCMD.RS = 1 */
     uint32_t cmd = xhci_read32(op + XHCI_OP_USBCMD);
     cmd |= XHCI_CMD_RS;
     cmd &= ~XHCI_CMD_INTE; /* Ensure interrupts masked in polling mode */
     xhci_write32(op + XHCI_OP_USBCMD, cmd);
 
-    /* 5. Wait for USBSTS.HCH == 0 */
+    /* Wait for USBSTS.HCH == 0 */
     int rc = xhci_wait_bit(op + XHCI_OP_USBSTS, XHCI_STS_HCH, false, op);
     if (rc != 0) {
         log_err("[xhci] start error: controller did not run (%d)\n", rc);
@@ -3509,169 +3516,54 @@ int xhci_start(struct xhci_controller *ctrl)
     return 0;
 }
 
-int xhci_probe(struct pci_device *pdev, const struct pci_device_id *id)
+int xhci_stop(struct xhci_controller *ctrl)
 {
-    (void)id;
-    if (!pdev) return -EINVAL;
+    if (!ctrl) return -EINVAL;
 
-    /* 1. Enable Bus Master & MMIO decode */
-    int rc = pci_set_bus_master(pdev, true);
-    if (rc != 0) {
-        log_err("[xhci] failed to enable PCI bus master (%d)\n", rc);
-        return rc;
-    }
-
-    rc = pci_set_decode(pdev, false, true);
-    if (rc != 0) {
-        log_err("[xhci] failed to enable PCI memory decode (%d)\n", rc);
-        pci_set_bus_master(pdev, false);
-        return rc;
-    }
-
-    /* 2. Query BAR0 window (try MMIO32, fallback to MMIO64) */
-    uint64_t mmio_phys = 0;
-    rc = pci_bar_window(pdev, 0, PCI_BAR_MMIO32, 0, 0x1000, &mmio_phys);
-    if (rc != 0) {
-        rc = pci_bar_window(pdev, 0, PCI_BAR_MMIO64, 0, 0x1000, &mmio_phys);
-    }
-    if (rc != 0) {
-        log_err("[xhci] failed to query BAR0 MMIO window (%d)\n", rc);
-        pci_set_decode(pdev, false, false);
-        pci_set_bus_master(pdev, false);
-        return rc;
-    }
-
-    struct xhci_controller *ctrl = (struct xhci_controller *)kmalloc(sizeof(struct xhci_controller));
-    if (!ctrl) {
-        pci_set_decode(pdev, false, false);
-        pci_set_bus_master(pdev, false);
-        return -ENOMEM;
-    }
-    memset(ctrl, 0, sizeof(*ctrl));
-
-    mutex_init(&ctrl->io_lock);
-    ctrl->io_lock_init = true;
-
-    ctrl->pdev = pdev;
-    ctrl->mmio_phys = mmio_phys;
-
-#ifndef OS01_HOST_TEST
-    uint64_t bar_page = mmio_phys & PAGE_2M_MASK;
-    x86_vmm_map_2m(kernel_map, bar_page, (uintptr_t)Phy_To_Virt(bar_page), PAGE_KERNEL_PMD_NOCACHE);
-    flush_tlb();
-    ctrl->mmio_len = (bar_page + 0x200000ULL) - mmio_phys;
-#else
-    ctrl->mmio_len = 0x10000;
-#endif
-
-    ctrl->mmio_virt = (volatile uint8_t *)Phy_To_Virt(mmio_phys);
-
-    /* 3. Parse capabilities */
-    rc = xhci_parse_capabilities(ctrl);
-    if (rc != 0) {
-        kfree(ctrl);
-        pci_set_decode(pdev, false, false);
-        pci_set_bus_master(pdev, false);
-        return rc;
-    }
-
-    /* 3b. Claim BIOS/OS legacy ownership before HCRST */
-    rc = xhci_claim_legacy(ctrl);
-    if (rc != 0) {
-        kfree(ctrl);
-        pci_set_decode(pdev, false, false);
-        pci_set_bus_master(pdev, false);
-        return rc;
-    }
-
-    /* 4. Reset controller */
-    rc = xhci_reset(ctrl);
-    if (rc != 0) {
-        kfree(ctrl);
-        pci_set_decode(pdev, false, false);
-        pci_set_bus_master(pdev, false);
-        return rc;
-    }
-
-    /* 5. Allocate DMA rings */
-    rc = xhci_alloc_dma(ctrl);
-    if (rc != 0) {
-        xhci_free_dma(ctrl);
-        kfree(ctrl);
-        pci_set_decode(pdev, false, false);
-        pci_set_bus_master(pdev, false);
-        return rc;
-    }
-
-    /* 6. Setup Interrupter 0 */
-    xhci_setup_interrupter0(ctrl);
-
-    /* 7. Start controller */
-    rc = xhci_start(ctrl);
-    if (rc != 0) {
-        if (!ctrl->dma_retained) {
-            xhci_free_dma(ctrl);
-            kfree(ctrl);
-        }
-        pci_set_decode(pdev, false, false);
-        pci_set_bus_master(pdev, false);
-        return rc;
-    }
-
-    pdev->driver_data = ctrl;
-    if (s_xhci_controller_count < XHCI_MAX_CONTROLLERS) {
-        s_xhci_controllers[s_xhci_controller_count++] = ctrl;
-    } else {
-        log_warn("[xhci] controller limit (%u) reached\n", XHCI_MAX_CONTROLLERS);
-    }
-    log_info("[xhci] controller bdf=%02x:%02x.%u initialized and running (slots=%u, ports=%u, csz=%u)\n",
-             pdev->bus, pdev->slot, pdev->fn,
-             ctrl->max_slots, ctrl->max_ports, (unsigned)ctrl->csz);
-
-    xhci_probe_ports(ctrl);
-
-    return 0;
-}
-
-#ifdef OS01_HOST_TEST
-__attribute__((weak)) void xhci_hid_detach_controller(struct xhci_controller *ctrl)
-{
-    (void)ctrl;
-}
-#endif
-
-void xhci_remove(struct pci_device *pdev)
-{
-    if (!pdev || !pdev->driver_data) return;
-
-    struct xhci_controller *ctrl = (struct xhci_controller *)pdev->driver_data;
-
-    /* Detach any bound USB HID service state before halting/freeing controller. */
-    xhci_hid_detach_controller(ctrl);
-
-    /* Stop controller */
     bool halt_ok = false;
+    int rc = 0;
     if (ctrl->op_regs) {
         uint32_t cmd = xhci_read32(ctrl->op_regs + XHCI_OP_USBCMD);
         xhci_write32(ctrl->op_regs + XHCI_OP_USBCMD, cmd & ~XHCI_CMD_RS);
-        halt_ok = (xhci_wait_bit(ctrl->op_regs + XHCI_OP_USBSTS, XHCI_STS_HCH, true, ctrl->op_regs) == 0);
+        rc = xhci_wait_bit(ctrl->op_regs + XHCI_OP_USBSTS, XHCI_STS_HCH, true, ctrl->op_regs);
+        halt_ok = (rc == 0);
     }
     ctrl->running = false;
     ctrl->halted_confirmed = halt_ok;
     if (!halt_ok) {
         ctrl->poisoned = true;
         ctrl->dma_retained = true;
+        return rc != 0 ? rc : -ETIMEDOUT;
     }
+    return 0;
+}
 
-    /* Tear down any enumerated device slots */
-    for (uint8_t s = 1; s <= XHCI_MAX_MANAGED_SLOTS; s++) {
-        xhci_free_slot(ctrl, s);
+int xhci_start(struct xhci_controller *ctrl)
+{
+    int rc = xhci_program_rings(ctrl);
+    if (rc != 0) return rc;
+    return xhci_run(ctrl);
+}
+
+int xhci_publish_controller(struct xhci_controller *ctrl)
+{
+    if (!ctrl) return -EINVAL;
+    for (uint8_t i = 0; i < s_xhci_controller_count; i++) {
+        if (s_xhci_controllers[i] == ctrl) return 0;
     }
+    if (s_xhci_controller_count >= XHCI_MAX_CONTROLLERS) {
+        return -ENOSPC;
+    }
+    s_xhci_controllers[s_xhci_controller_count++] = ctrl;
+    return 0;
+}
 
-    /* Free all DMA buffers (no-op if halt_ok is false and dma_retained is true) */
-    xhci_free_dma(ctrl);
-
-    /* Unregister controller from global tracking */
+void xhci_unpublish_controller(struct xhci_controller *ctrl)
+{
+    if (!ctrl) return;
+    if (ctrl->running || !ctrl->halted_confirmed) {
+        (void)xhci_stop(ctrl);
+    }
     for (uint8_t i = 0; i < s_xhci_controller_count; i++) {
         if (s_xhci_controllers[i] == ctrl) {
             for (uint8_t j = i; j + 1 < s_xhci_controller_count; j++) {
@@ -3681,27 +3573,7 @@ void xhci_remove(struct pci_device *pdev)
             break;
         }
     }
-
-    /* Restore PCI configuration */
-    pci_set_decode(pdev, false, false);
-    pci_set_bus_master(pdev, false);
-
-    if (halt_ok) {
-        kfree(ctrl);
-    }
-    pdev->driver_data = NULL;
 }
-
-static const struct pci_device_id xhci_ids[] = {
-    {
-        .vendor = PCI_ID_ANY,
-        .device = PCI_ID_ANY,
-        .subvendor = PCI_ID_ANY,
-        .subdevice = PCI_ID_ANY,
-        .class_value = (0x0C << 16) | (0x03 << 8) | 0x30,
-        .class_mask  = 0xFFFFFF,
-    },
-};
 
 static int xhci_raw_disable_slot_locked(struct xhci_controller *ctrl, uint8_t slot_id,
                                         uint64_t cleanup_deadline_ns,
@@ -3765,7 +3637,7 @@ int xhci_usb2_root_isolate(struct xhci_controller *ctrl, uint8_t port_num,
             return -ETIMEDOUT;
         if (now == start && ++frozen >= 10000U)
             return -ETIMEDOUT;
-        __asm__ volatile("pause");
+        arch_cpu_pause();
         portsc = xhci_read32(port_reg);
         if (!(portsc & XHCI_PORTSC_CCS))
             return 0;
@@ -3783,7 +3655,7 @@ int xhci_usb2_root_isolate(struct xhci_controller *ctrl, uint8_t port_num,
             if (cleanup_deadline_ns != 0 &&
                 (int64_t)(arch_clocksource_read_ns() - cleanup_deadline_ns) >= 0)
                 return -ETIMEDOUT;
-            __asm__ volatile("pause");
+            arch_cpu_pause();
         }
         return -ETIMEDOUT;
     }
@@ -4262,12 +4134,4 @@ unsigned xhci_intr_in_pump_locked(struct xhci_controller *ctrl, unsigned budget)
     return processed;
 }
 
-const struct pci_driver xhci_pci_driver = {
-    .name     = "xhci",
-    .id_table = xhci_ids,
-    .id_count = sizeof(xhci_ids) / sizeof(xhci_ids[0]),
-    .probe    = xhci_probe,
-    .remove   = xhci_remove,
-};
-
-PCI_DRIVER_DECLARE(xhci_pci_driver);
+/* Driver declaration lives in kernel/driver/xhci_pci.c */

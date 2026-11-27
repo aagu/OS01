@@ -536,15 +536,12 @@ int xhci_hub_isolate_usb2(struct xhci_controller *ctrl, uint8_t slot,
 static void hub_log_device(const struct xhci_controller *ctrl,
                            const struct xhci_slot *slot)
 {
-    uint8_t bus = ctrl->pdev ? ctrl->pdev->bus : 0;
-    uint8_t dev = ctrl->pdev ? ctrl->pdev->slot : 0;
-    uint8_t fn = ctrl->pdev ? ctrl->pdev->fn : 0;
     uint8_t ic = slot->msc_iface.active ? 0x08 : slot->iface.class_code;
     uint8_t isc = slot->msc_iface.active ? 0x06 : slot->iface.subclass_code;
     uint8_t ip = slot->msc_iface.active ? 0x50 : slot->iface.protocol;
-    (void)bus; (void)dev; (void)fn; (void)ic; (void)isc; (void)ip;
-    log_info("[xhci] device bdf=%02x:%02x.%u root=%u route=0x%05x slot=%u parent=%u port=%u speed=%u speed_id=%u iface=%02x:%02x:%02x\n",
-             (unsigned)bus, (unsigned)dev, (unsigned)fn,
+    (void)ic; (void)isc; (void)ip;
+    log_info("[xhci] device %s root=%u route=0x%05x slot=%u parent=%u port=%u speed=%u speed_id=%u iface=%02x:%02x:%02x\n",
+             xhci_ctrl_loc(ctrl),
              (unsigned)slot->loc.root_port, (unsigned)slot->loc.route,
              (unsigned)slot->slot_id, (unsigned)slot->loc.parent_slot,
              (unsigned)slot->loc.parent_port, (unsigned)slot->loc.speed_class,
@@ -742,12 +739,8 @@ static int hub_probe_location(struct xhci_controller *ctrl,
             }
         }
 
-        uint8_t bus = ctrl->pdev ? ctrl->pdev->bus : 0;
-        uint8_t dev = ctrl->pdev ? ctrl->pdev->slot : 0;
-        uint8_t fn = ctrl->pdev ? ctrl->pdev->fn : 0;
-        (void)bus; (void)dev; (void)fn;
-        log_info("[xhci-hub] ready bdf=%02x:%02x.%u root=%u route=0x%05x slot=%u protocol=%s ports=%u ttt=%u\n",
-                 (unsigned)bus, (unsigned)dev, (unsigned)fn,
+        log_info("[xhci-hub] ready %s root=%u route=0x%05x slot=%u protocol=%s ports=%u ttt=%u\n",
+                 xhci_ctrl_loc(ctrl),
                  (unsigned)slot->loc.root_port, (unsigned)slot->loc.route,
                  (unsigned)slot->slot_id, hub_info.superspeed ? "usb3" : "usb2",
                  (unsigned)hub_info.nports, (unsigned)hub_info.ttt);

@@ -176,6 +176,7 @@ static void test_xhci_cap_parsing(void)
     struct xhci_controller ctrl;
     memset(&ctrl, 0, sizeof(ctrl));
     ctrl.mmio_virt = s_mock_mmio;
+    ctrl.mmio_len = sizeof(s_mock_mmio);
 
     int rc = xhci_parse_capabilities(&ctrl);
     assert_eq(0, rc);
@@ -300,6 +301,7 @@ static void test_xhci_reset_success(void)
     struct xhci_controller ctrl;
     memset(&ctrl, 0, sizeof(ctrl));
     ctrl.mmio_virt = s_mock_mmio;
+    ctrl.mmio_len = sizeof(s_mock_mmio);
     assert_eq(0, xhci_parse_capabilities(&ctrl));
 
     int rc = xhci_reset(&ctrl);
@@ -321,6 +323,7 @@ static void test_xhci_reset_running_controller(void)
     struct xhci_controller ctrl;
     memset(&ctrl, 0, sizeof(ctrl));
     ctrl.mmio_virt = s_mock_mmio;
+    ctrl.mmio_len = sizeof(s_mock_mmio);
     assert_eq(0, xhci_parse_capabilities(&ctrl));
 
     /* Simulate controller initially running: RS=1, HCH=0 */
@@ -342,6 +345,7 @@ static void test_xhci_reset_timeout_and_hse(void)
     struct xhci_controller ctrl;
     memset(&ctrl, 0, sizeof(ctrl));
     ctrl.mmio_virt = s_mock_mmio;
+    ctrl.mmio_len = sizeof(s_mock_mmio);
     assert_eq(0, xhci_parse_capabilities(&ctrl));
 
     /* Inject HCRST hang (stuck at 1) */
@@ -365,6 +369,7 @@ static void test_xhci_dma_alloc_and_link_trb(void)
     struct xhci_controller ctrl;
     memset(&ctrl, 0, sizeof(ctrl));
     ctrl.mmio_virt = s_mock_mmio;
+    ctrl.mmio_len = sizeof(s_mock_mmio);
     assert_eq(0, xhci_parse_capabilities(&ctrl));
 
     int rc = xhci_alloc_dma(&ctrl);
@@ -406,6 +411,7 @@ static void test_xhci_command_ring_enqueue_and_wrap(void)
     struct xhci_controller ctrl;
     memset(&ctrl, 0, sizeof(ctrl));
     ctrl.mmio_virt = s_mock_mmio;
+    ctrl.mmio_len = sizeof(s_mock_mmio);
     assert_eq(0, xhci_parse_capabilities(&ctrl));
     assert_eq(0, xhci_alloc_dma(&ctrl));
 
@@ -542,6 +548,7 @@ static void test_xhci_erst_and_interrupter(void)
     struct xhci_controller ctrl;
     memset(&ctrl, 0, sizeof(ctrl));
     ctrl.mmio_virt = s_mock_mmio;
+    ctrl.mmio_len = sizeof(s_mock_mmio);
     assert_eq(0, xhci_parse_capabilities(&ctrl));
     assert_eq(0, xhci_alloc_dma(&ctrl));
 
@@ -563,6 +570,47 @@ static void test_xhci_erst_and_interrupter(void)
     free_4k_page(ctrl.cmd_ring_phys);
     free_4k_page(ctrl.event_ring_phys);
     free_4k_page(ctrl.erst_phys);
+}
+
+static void test_program_rings_keeps_controller_stopped(void)
+{
+    TEST_CASE("xhci_program_rings keeps controller stopped until xhci_run");
+    init_mock_mmio_defaults();
+    reset_mock_pages();
+
+    struct xhci_controller ctrl;
+    memset(&ctrl, 0, sizeof(ctrl));
+    ctrl.mmio_virt = s_mock_mmio;
+    ctrl.mmio_len = sizeof(s_mock_mmio);
+    assert_eq(0, xhci_parse_capabilities(&ctrl));
+    assert_eq(0, xhci_alloc_dma(&ctrl));
+
+    int rc = xhci_program_rings(&ctrl);
+    assert_eq(0, rc);
+
+    uint32_t usbcmd = *(volatile uint32_t *)(ctrl.op_regs + XHCI_OP_USBCMD);
+    assert_true((usbcmd & XHCI_CMD_RS) == 0);
+    assert_true(!ctrl.running);
+
+    uint64_t dcbaap = *(volatile uint64_t *)(ctrl.op_regs + XHCI_OP_DCBAAP);
+    uint64_t crcr = *(volatile uint64_t *)(ctrl.op_regs + XHCI_OP_CRCR);
+    volatile uint8_t *ir0 = ctrl.rt_regs + 0x20;
+    uint32_t erstsz = *(volatile uint32_t *)(ir0 + XHCI_INTR_ERSTSZ);
+    uint64_t erstba = *(volatile uint64_t *)(ir0 + XHCI_INTR_ERSTBA);
+    assert_eq(ctrl.dcbaa_phys, dcbaap);
+    assert_eq(ctrl.cmd_ring_phys | 1, crcr);
+    assert_eq(1, erstsz);
+    assert_eq(ctrl.erst_phys, erstba);
+
+    rc = xhci_run(&ctrl);
+    assert_eq(0, rc);
+    usbcmd = *(volatile uint32_t *)(ctrl.op_regs + XHCI_OP_USBCMD);
+    assert_true((usbcmd & XHCI_CMD_RS) != 0);
+    assert_true(ctrl.running);
+
+    assert_eq(0, xhci_stop(&ctrl));
+    xhci_free_dma(&ctrl);
+    assert_eq(0, s_mock_page_count);
 }
 
 static void test_xhci_driver_registration(void)
@@ -589,6 +637,7 @@ int main(void)
     test_xhci_dma_alloc_and_link_trb();
     test_xhci_command_ring_enqueue_and_wrap();
     test_xhci_erst_and_interrupter();
+    test_program_rings_keeps_controller_stopped();
     test_xhci_probe_full_success();
     test_xhci_probe_dma_cleanup_on_error();
 
