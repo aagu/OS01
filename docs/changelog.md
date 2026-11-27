@@ -16,6 +16,7 @@
     - 解释器专用校验：被装载为解释器的镜像强制 ET_DYN（ET_EXEC 固定地址装载会覆写权限兼容的主镜像叶），自身 PT_INTERP（嵌套）与 PT_TLS 一律 `-ENOEXEC`，均在解释器映射开始前判定；`test_elf_load_4k` 增至 9 个 PT_INTERP 用例（+ET_EXEC 解释器/+嵌套 PT_INTERP/+PT_TLS 解释器）。
     - systest 控制流证明：解释器骨架在跳转前于 auxv `AT_NULL` 后写入固定握手对，主程序成功路径校验之——RIP 被直送主入口而 auxv 正确时用例必败。
     - `check_interp_fixture.py` 动态标签解析修复：原正则要求括号内空格导致零解析、白名单检查空转；改为逐条严格解析（未知标签行判 FAIL）并以篡改 d_tag 的负向用例验证。
+    - **rebase 后 QEMU 追验抓出两个连带缺陷**：① 夹具 `auxv_get` 重构把标签扫描起点错放到 AT_NULL 槽（`p[0] != 0` 恒假、全部 auxv 读取回落 fallback），链路退化为 ld.so base==0 退出 91——经串口裸栈转储定位（argc/argv/envp 完好、AT_PHDR 在 +32），扫描起点改回首个 auxv 对；② `image.mk` 的 `ROOTFS_MANIFEST_DEPS` 漏列新夹具，重发布的 `ldso.elf`/`dyn_exec.elf` 不触发重新 staging，QEMU 一直引导上一轮镜像——补列后与其它镜像输入同权。
   - **剩余**（roadmap 行已更新）：T2 ld.so 符号重定位（GLOB_DAT/JUMP_SLOT、DT_NEEDED、hash 查找、mmap 窗口放置）、T3 共享 libc、T4 aarch64 对齐。
 
 ## 2026-11-27

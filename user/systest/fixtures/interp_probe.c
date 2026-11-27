@@ -100,11 +100,20 @@ static const uint64_t *auxv_null_slot(const uint64_t *sp)
 }
 
 /* Walk the SysV initial stack: argc | argv[] | NULL | envp[] | NULL |
- * auxv pairs | AT_NULL.  Returns the requested a_val, or fallback. */
+ * auxv pairs | AT_NULL.  Returns the requested a_val, or fallback.
+ * The pair scan starts at the FIRST auxv pair — starting it anywhere
+ * else (e.g. at the AT_NULL slot auxv_null_slot() returns) makes the
+ * `p[0] != 0` loop a no-op and every lookup silently falls back. */
 static uint64_t auxv_get(const uint64_t *sp, uint64_t tag, uint64_t fallback)
 {
-    const uint64_t *p = auxv_null_slot(sp);
-    for (; p != NULL && p[0] != 0; p += 2) {
+    const uint64_t *p = sp;
+    uint64_t argc = *p++;
+    p += argc;                 /* skip argv[] */
+    p += 1;                    /* argv NULL */
+    while (*p != 0)            /* skip envp[] */
+        p++;
+    p += 1;                    /* envp NULL */
+    for (; p[0] != 0; p += 2) {
         if (p[0] == tag)
             return p[1];
     }
