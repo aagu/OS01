@@ -351,7 +351,7 @@ virtio-mmio 块设备驱动，通过架构门面 `kernel/include/arch/virtio_mmi
 
 ### xHCI USB 主机控制器驱动（ARCH-14）
 
-位于 `kernel/arch/x86_64/driver/xhci.c`，头文件 `kernel/include/driver/xhci.h`：
+位于 `kernel/driver/xhci.c`（共享核心）、`kernel/driver/xhci_pci.c`（PCI 前端）、`kernel/driver/xhci_dma.c`（DMA 抽象），头文件 `kernel/include/driver/xhci.h`、`kernel/include/driver/xhci_dma.h`；aarch64 RPi5 RP1 接入位于 `kernel/arch/aarch64/driver/rp1_xhci.c` 与 `kernel/arch/aarch64/driver/xhci_dma.c`（验收记录见 [aarch64-usb-boot-qualification.md](aarch64-usb-boot-qualification.md)）：
 
 * **驱动模型接入**：基于 ARCH-9 统一驱动框架，定义 `xhci_pci_driver`（`class = 0x0c0330`，串行总线控制器 / USB / xHCI），通过 `PCI_DRIVER_DECLARE()` 写入 `.pci_drivers` 链接段由 PCI 核心自动探测绑定。
 * **MMIO 映射与寄存器解析**：读取 PCI BAR0，映射 MMIO 地址空间；解析 Capability 寄存器（`CAPLENGTH`、`HCIVERSION`、`HCSPARAMS1..3`、`HCCPARAMS1`、`DBOFF`、`RTSOFF`）以及 Operational 寄存器基址。

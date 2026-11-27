@@ -5038,7 +5038,9 @@
     {
      "layer": "harness",
      "source": "qemutests/test_aarch64_usb_boot.py",
-     "selector": "test_aarch64_usb_boot"
+     "selector": "test_aarch64_usb_boot",
+     "evidence": "unittest exit 0",
+     "distinct_risk": "Verifies QEMU argv topology, strict ESP GUID token parser, and negative-case rejection logic against synthetic transcripts"
     }
    ],
    "overlap_decision": {
@@ -5048,7 +5050,7 @@
   },
   {
    "id": "drivers.usb.aarch64.rp1",
-   "owner": "host_unit",
+   "owner": "host",
    "component": "drivers",
    "behavior": "rp1_xhci_handoff",
    "trigger": "host runner invokes test_aarch64_rp1_xhci.elf",

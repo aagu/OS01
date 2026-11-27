@@ -51,7 +51,7 @@
 
 | 问题 | 位置 | 真机影响 | 状态 / 剩余解法 |
 |------|------|----------|----------|
-| **根文件系统无块设备**（RPi5 / Dragon Q8B 当前唯一阻断） | `kernel/fs/boot.c:92` `mount_disk_by_guid()` 在 `block_device_count() <= 0` 时返回 `-ENODEV`；RPi5 无 virtio-mmio，Dragon Q8B 无 NVMe/USB 块驱动 | boot-3 `stage=fs component=root rc=-19`，进不了 rootfs 与用户态 | ❌ **仍开放**：三条候选路线——① loader 阶段把 rootfs / initramfs 搬进 RAM + 内核支持 RAM 根；② 板载存储驱动（RPi5 SDHCI / Dragon Q8B NVMe）；③ loader 阶段用 UEFI Block I/O 一次性读入 rootfs。**附带决策**：无块设备时 `fs_boot_mounts()` 是否应降级为「无 rootfs 启动到 shell」而非 FATAL 停机 |
+| **根文件系统无块设备**（RPi5 / Dragon Q8B 当前唯一阻断） | `kernel/fs/boot.c:92` `mount_disk_by_guid()` 在 `block_device_count() <= 0` 时返回 `-ENODEV`；Dragon Q8B 无 NVMe/USB 块驱动，RPi5 RP1 xHCI + USB MSC 已实现并完成 QEMU `virt` E2E 验收（`test-aarch64-usb-boot`），物理板冷启动取证待实测（[aarch64-usb-boot-qualification.md](driver/aarch64-usb-boot-qualification.md)） | boot-3 `stage=fs component=root rc=-19`，进不了 rootfs 与用户态 | ❌ **仍开放**（QEMU aarch64 USB 引导已闭环，RPi5 真机实测待完成；Dragon Q8B 仍待存储或内存根方案） |
 
 （注：`GICv3 驱动缺失` 已于 2026-11-27 通过 ACPI + `gic_driver.c`/`gic.c`/`ipi.c` 落地并在 Dragon Q8B 实机跑通 `intids=992`；DTB 路径的 `arm,gic-v3` 节点解析与 GICv3 多核 SMP IPI 实测待后续补齐。）
 

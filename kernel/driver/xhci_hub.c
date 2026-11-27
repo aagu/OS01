@@ -540,7 +540,7 @@ static void hub_log_device(const struct xhci_controller *ctrl,
     uint8_t isc = slot->msc_iface.active ? 0x06 : slot->iface.subclass_code;
     uint8_t ip = slot->msc_iface.active ? 0x50 : slot->iface.protocol;
     (void)ic; (void)isc; (void)ip;
-    log_info("[xhci] device %s root=%u route=0x%x slot=%u parent=%u port=%u speed=%u speed_id=%u iface=%02x:%02x:%02x\n",
+    log_info("[xhci] device %s root=%u route=0x%05x slot=%u parent=%u port=%u speed=%u speed_id=%u iface=%02x:%02x:%02x\n",
              xhci_ctrl_loc(ctrl),
              (unsigned)slot->loc.root_port, (unsigned)slot->loc.route,
              (unsigned)slot->slot_id, (unsigned)slot->loc.parent_slot,
@@ -557,7 +557,7 @@ static int hub_probe_location(struct xhci_controller *ctrl,
     uint8_t slot_id = 0;
     int rc = xhci_enumerate_at(ctrl, loc, NULL, deadline_ns, &slot_id);
     if (rc != 0) {
-        log_warn("[xhci-hub] root=%u route=0x%x: enumerate failed (rc=%d)\n",
+        log_warn("[xhci-hub] root=%u route=0x%05x: enumerate failed (rc=%d)\n",
                  (unsigned)loc->root_port, (unsigned)loc->route, rc);
         return rc;
     }
@@ -711,7 +711,7 @@ static int hub_probe_location(struct xhci_controller *ctrl,
             }
             kfree(id_copy);
             if (rc != 0) {
-                log_warn("[xhci-hub] root=%u route=0x%x: hub rebuild failed (rc=%d)\n",
+                log_warn("[xhci-hub] root=%u route=0x%05x: hub rebuild failed (rc=%d)\n",
                          (unsigned)loc->root_port, (unsigned)loc->route, rc);
                 return rc;
             }
@@ -739,7 +739,7 @@ static int hub_probe_location(struct xhci_controller *ctrl,
             }
         }
 
-        log_info("[xhci-hub] ready %s root=%u route=0x%x slot=%u protocol=%s ports=%u ttt=%u\n",
+        log_info("[xhci-hub] ready %s root=%u route=0x%05x slot=%u protocol=%s ports=%u ttt=%u\n",
                  xhci_ctrl_loc(ctrl),
                  (unsigned)slot->loc.root_port, (unsigned)slot->loc.route,
                  (unsigned)slot->slot_id, hub_info.superspeed ? "usb3" : "usb2",
