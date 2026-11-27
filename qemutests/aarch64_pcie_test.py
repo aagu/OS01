@@ -141,6 +141,8 @@ def check_ecam_virt(text: str) -> list[str]:
         failures.append("missing Virtio RNG '1af4:1005'/'1af4:1044' in lspci -n output")
     if "IRQ: none" not in text:
         failures.append("missing 'IRQ: none' in lspci -v output")
+    if "IRQ: 36" not in text:
+        failures.append("missing 'IRQ: 36' in lspci -v output")
     if "Region " not in text or "Memory at 0x" not in text:
         failures.append("missing BAR 'Region ... Memory at 0x...' in lspci -v output")
     if "36 1b 08 00" not in text:
@@ -310,6 +312,7 @@ def self_test() -> None:
         "00:01.0 00ff: 1af4:1044 (rev 01)",
         "__LSPCI_N_RC=0__",
         "\tIRQ: none",
+        "\tIRQ: 36",
         "\tRegion 4: Memory at 0x8000000000",
         "__LSPCI_V_RC=0__",
         "00: 36 1b 08 00 07 00 10 00",
@@ -320,6 +323,7 @@ def self_test() -> None:
     assert check_ecam_virt(good_pos_log) == []
     assert check_ecam_virt(good_pos_log + "\nPANIC: boom") != []
     assert check_ecam_virt(good_pos_log.replace("IRQ: none", "IRQ: 16")) != []
+    assert check_ecam_virt(good_pos_log.replace("IRQ: 36", "IRQ: none")) != []
 
     good_neg_log = "\n\r".join([
         "subsys: init  device-boot ... ok",

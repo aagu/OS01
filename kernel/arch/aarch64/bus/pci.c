@@ -1,5 +1,6 @@
 /* kernel/arch/aarch64/bus/pci.c — AArch64 PCIe ECAM MMIO pre-mapping & PCI backend */
 #include <arch/pci.h>
+#include <bus/pci/pci.h>
 #include <arch/aarch64/pcie.h>
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/boot_direct_map.h>
@@ -123,9 +124,44 @@ static int aarch64_pci_write32(uint16_t domain, uint8_t bus, uint8_t slot, uint8
 
 static int aarch64_pci_route_gsi(const struct pci_device *pdev, uint32_t *out)
 {
-    (void)pdev;
-    (void)out;
-    return -ENOTSUP;
+    if (!pdev || !out) {
+        return -EINVAL;
+    }
+    const struct aarch64_pcie_root_desc *r = find_ready_root(pdev->domain);
+    if (!r) {
+        return -ENODEV;
+    }
+    if (!r->has_int_map || r->int_map_count == 0U) {
+        return -ENOTSUP;
+    }
+
+    enum pci_error_scope scope = PCI_ERROR_FUNCTION;
+    uint32_t reg = 0U;
+    int rc = aarch64_pci_read32(pdev->domain, pdev->bus, pdev->slot, pdev->fn,
+                                0x3C, &reg, &scope);
+    if (rc != 0) {
+        return rc;
+    }
+
+    uint8_t int_pin = (uint8_t)((reg >> 8) & 0xFFU);
+    if (int_pin == 0U || int_pin > 4U) {
+        return -ENOTSUP;
+    }
+
+    uint32_t phys_hi = ((uint32_t)pdev->bus << 16)
+                     | ((uint32_t)pdev->slot << 11)
+                     | ((uint32_t)pdev->fn << 8);
+    uint32_t masked_hi = phys_hi & r->int_map_mask[0];
+    uint32_t masked_pin = (uint32_t)int_pin & r->int_map_mask[3];
+
+    for (uint8_t i = 0U; i < r->int_map_count; i++) {
+        const struct aarch64_pcie_intmap_entry *e = &r->int_map[i];
+        if (e->addr_hi == masked_hi && e->int_pin == masked_pin) {
+            *out = e->gic_intid;
+            return 0;
+        }
+    }
+    return -ENOENT;
 }
 
 static int aarch64_pci_translate_resource(uint16_t domain, uint8_t space,

@@ -354,6 +354,74 @@ static void case_ecam_access_ranges_and_errors(void)
     assert_eq(-EOVERFLOW, be->translate_resource(0, PCI_SPACE_MMIO64, UINT64_MAX - 4ULL, 16ULL, &cpu_pa));
 }
 
+static void case_ecam_interrupt_map_routing(void)
+{
+    struct boot_context ctx;
+    struct test_efi_desc descs[1] = {
+        { .type = AARCH64_UEFI_MEM_CONVENTIONAL, .phys_start = 0x40000000u, .num_pages = 0x1000u }
+    };
+    setup_fixture(&ctx, descs, 1u);
+
+    const uint64_t ecam_pa = 0x10000000ULL;
+    ecam_arena = mmap((void *)(uintptr_t)(ARCH_PAGE_OFFSET + ecam_pa),
+                      0x200000ULL, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+    assert_true(ecam_arena != MAP_FAILED);
+
+    mock_topo.root_count = 1;
+    mock_topo.roots[0].valid = true;
+    mock_topo.roots[0].kind = AARCH64_PCIE_CTRL_ECAM_GENERIC;
+    mock_topo.roots[0].domain = 0;
+    mock_topo.roots[0].bus_start = 0;
+    mock_topo.roots[0].bus_end = 1;
+    mock_topo.roots[0].reg_cpu_base = ecam_pa;
+    mock_topo.roots[0].reg_size = 0x200000ULL;
+    mock_topo.roots[0].has_int_map = true;
+    mock_topo.roots[0].int_map_mask[0] = 0x1800U;
+    mock_topo.roots[0].int_map_mask[3] = 0x7U;
+    mock_topo.roots[0].int_map_count = 2;
+    mock_topo.roots[0].int_map[0] = (struct aarch64_pcie_intmap_entry){
+        .addr_hi = 0x0800U, .int_pin = 1U, .gic_intid = 36U
+    };
+    mock_topo.roots[0].int_map[1] = (struct aarch64_pcie_intmap_entry){
+        .addr_hi = 0x0800U, .int_pin = 2U, .gic_intid = 37U
+    };
+
+    assert_eq(0, aarch64_pcie_prepare(&ctx));
+    const struct pci_backend *be = arch_pci_backend();
+    assert_not_null(be);
+
+    struct pci_device dev;
+    memset(&dev, 0, sizeof(dev));
+    dev.domain = 0;
+    dev.bus = 0;
+    dev.slot = 1;
+    dev.fn = 0;
+
+    uint32_t gsi = 0;
+    /* pin == 0 -> -ENOTSUP */
+    *(volatile uint32_t *)(ecam_arena + (1ULL << 15) + 0x3CU) = 0x00000000U;
+    assert_eq(-ENOTSUP, be->route_gsi(&dev, &gsi));
+
+    /* pin == 1 (INTA) -> INTID 36 */
+    *(volatile uint32_t *)(ecam_arena + (1ULL << 15) + 0x3CU) = 0x00000100U;
+    assert_eq(0, be->route_gsi(&dev, &gsi));
+    assert_eq(36U, gsi);
+
+    /* pin == 2 (INTB) -> INTID 37 */
+    *(volatile uint32_t *)(ecam_arena + (1ULL << 15) + 0x3CU) = 0x00000200U;
+    assert_eq(0, be->route_gsi(&dev, &gsi));
+    assert_eq(37U, gsi);
+
+    /* unmapped pin == 3 -> -ENOENT */
+    *(volatile uint32_t *)(ecam_arena + (1ULL << 15) + 0x3CU) = 0x00000300U;
+    assert_eq(-ENOENT, be->route_gsi(&dev, &gsi));
+
+    /* unknown domain -> -ENODEV */
+    dev.domain = 1;
+    assert_eq(-ENODEV, be->route_gsi(&dev, &gsi));
+}
+
 int main(void)
 {
     TEST_SUITE("aarch64_pcie_ecam");
@@ -361,6 +429,7 @@ int main(void)
     run_isolated(case_m0_memory_map_bounds);
     run_isolated(case_ram_pa_limit_and_partial_conflict);
     run_isolated(case_ecam_access_ranges_and_errors);
+    run_isolated(case_ecam_interrupt_map_routing);
     TEST_RESULTS();
     return __test_stats.failed ? 1 : 0;
 }

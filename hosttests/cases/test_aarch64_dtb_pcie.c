@@ -162,12 +162,34 @@ TEST_FUNC(test_qemu_virt_ecam_dtb)
     fb_prop_u32(&f, "#address-cells", 2);
     fb_prop_u32(&f, "#size-cells", 2);
 
+    fb_begin_node(&f, "intc@8000000");
+    fb_prop_u32(&f, "phandle", 0x8002U);
+    fb_prop_raw(&f, "interrupt-controller", NULL, 0);
+    fb_prop_u32(&f, "#address-cells", 2);
+    fb_prop_u32(&f, "#interrupt-cells", 3);
+    fb_end_node(&f);
+
     fb_begin_node(&f, "pcie@10000000");
     fb_prop_str(&f, "compatible", "pci-host-ecam-generic");
     fb_prop_str(&f, "device_type", "pci");
     fb_prop_u32(&f, "#address-cells", 3);
     fb_prop_u32(&f, "#size-cells", 2);
+    fb_prop_u32(&f, "#interrupt-cells", 1);
     fb_prop_u32(&f, "linux,pci-domain", 0);
+    {
+        uint32_t mask[] = { 0x1800U, 0x0U, 0x0U, 0x7U };
+        fb_prop_cells(&f, "interrupt-map-mask", mask, 4);
+    }
+    {
+        /* Each entry: 4 child cells + 1 phandle + 2 parent addr + 3 parent intr = 10 cells */
+        uint32_t imap[] = {
+            0x0000U, 0U, 0U, 1U, 0x8002U, 0U, 0U, 0U, 3U, 4U,
+            0x0000U, 0U, 0U, 2U, 0x8002U, 0U, 0U, 0U, 4U, 4U,
+            0x0800U, 0U, 0U, 1U, 0x8002U, 0U, 0U, 0U, 4U, 4U,
+            0x0800U, 0U, 0U, 2U, 0x8002U, 0U, 0U, 0U, 5U, 4U,
+        };
+        fb_prop_cells(&f, "interrupt-map", imap, 40);
+    }
     {
         uint32_t br[] = { 0x00, 0xff };
         fb_prop_cells(&f, "bus-range", br, 2);
@@ -225,6 +247,94 @@ TEST_FUNC(test_qemu_virt_ecam_dtb)
     assert_eq(0x8000000000ULL, r->ranges[2].pci_base);
     assert_eq(0x8000000000ULL, r->ranges[2].cpu_base);
     assert_eq(0x8000000000ULL, r->ranges[2].size);
+
+    assert_true(r->has_int_map);
+    assert_eq(4, r->int_map_count);
+    assert_eq(0x1800U, r->int_map_mask[0]);
+    assert_eq(0x7U, r->int_map_mask[3]);
+    assert_eq(0x0000U, r->int_map[0].addr_hi);
+    assert_eq(1U, r->int_map[0].int_pin);
+    assert_eq(35U, r->int_map[0].gic_intid);
+    assert_eq(0x0800U, r->int_map[2].addr_hi);
+    assert_eq(1U, r->int_map[2].int_pin);
+    assert_eq(36U, r->int_map[2].gic_intid);
+    assert_eq(0x0800U, r->int_map[3].addr_hi);
+    assert_eq(2U, r->int_map[3].int_pin);
+    assert_eq(37U, r->int_map[3].gic_intid);
+}
+
+TEST_FUNC(test_interrupt_map_parent_zero_ac_and_bad_phandle)
+{
+    /* 1) intc without #address-cells defaults parent #address-cells to 0 */
+    struct fdt_buf f;
+    fb_init(&f);
+    fb_begin_node(&f, "");
+    fb_prop_u32(&f, "#address-cells", 2);
+    fb_prop_u32(&f, "#size-cells", 2);
+
+    fb_begin_node(&f, "pcie@10000000");
+    fb_prop_str(&f, "compatible", "pci-host-ecam-generic");
+    fb_prop_u32(&f, "#address-cells", 3);
+    fb_prop_u32(&f, "#size-cells", 2);
+    fb_prop_u32(&f, "#interrupt-cells", 1);
+    {
+        uint32_t reg[] = { 0x0, 0x10000000, 0x0, 0x00200000 };
+        fb_prop_cells(&f, "reg", reg, 4);
+    }
+    {
+        uint32_t imap[] = {
+            0x0800U, 0U, 0U, 1U, 0x9001U, 0U, 10U, 4U,
+        };
+        fb_prop_cells(&f, "interrupt-map", imap, 8);
+    }
+    fb_end_node(&f);
+
+    /* intc placed AFTER pcie node, with no #address-cells */
+    fb_begin_node(&f, "intc@8000000");
+    fb_prop_u32(&f, "phandle", 0x9001U);
+    fb_prop_raw(&f, "interrupt-controller", NULL, 0);
+    fb_prop_u32(&f, "#interrupt-cells", 3);
+    fb_end_node(&f);
+
+    fb_end_node(&f);
+    fb_finish(&f);
+
+    struct aarch64_pcie_topology topo;
+    s_warn_count = 0;
+    assert_eq(0, aarch64_dtb_parse_pcie(f.blob, f.blob_len, &topo));
+    assert_eq(0, s_warn_count);
+    assert_eq(1, topo.root_count);
+    assert_true(topo.roots[0].has_int_map);
+    assert_eq(1, topo.roots[0].int_map_count);
+    assert_eq(42U, topo.roots[0].int_map[0].gic_intid);
+
+    /* 2) Unknown phandle disables int_map gracefully without dropping ECAM root */
+    fb_init(&f);
+    fb_begin_node(&f, "");
+    fb_prop_u32(&f, "#address-cells", 2);
+    fb_prop_u32(&f, "#size-cells", 2);
+    fb_begin_node(&f, "pcie@10000000");
+    fb_prop_str(&f, "compatible", "pci-host-ecam-generic");
+    fb_prop_u32(&f, "#address-cells", 3);
+    fb_prop_u32(&f, "#size-cells", 2);
+    {
+        uint32_t reg[] = { 0x0, 0x10000000, 0x0, 0x00200000 };
+        fb_prop_cells(&f, "reg", reg, 4);
+    }
+    {
+        uint32_t imap[] = { 0x0U, 0U, 0U, 1U, 0xDEADU, 0U, 3U, 4U };
+        fb_prop_cells(&f, "interrupt-map", imap, 8);
+    }
+    fb_end_node(&f);
+    fb_end_node(&f);
+    fb_finish(&f);
+
+    s_warn_count = 0;
+    assert_eq(0, aarch64_dtb_parse_pcie(f.blob, f.blob_len, &topo));
+    assert_true(s_warn_count > 0);
+    assert_eq(1, topo.root_count);
+    assert_false(topo.roots[0].has_int_map);
+    assert_eq(0, topo.roots[0].int_map_count);
 }
 
 TEST_FUNC(test_rpi5_and_disabled_ecam_skipped)
@@ -397,6 +507,7 @@ TEST_FUNC(test_bad_node_isolation_and_fdt_errors)
 
 TEST_LIST_BEGIN
     TEST_ENTRY(test_qemu_virt_ecam_dtb),
+    TEST_ENTRY(test_interrupt_map_parent_zero_ac_and_bad_phandle),
     TEST_ENTRY(test_rpi5_and_disabled_ecam_skipped),
     TEST_ENTRY(test_simple_bus_ancestor_translation),
     TEST_ENTRY(test_bad_node_isolation_and_fdt_errors),

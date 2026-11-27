@@ -9,6 +9,7 @@ struct boot_context;
 
 #define AARCH64_PCIE_MAX_ROOTS   4U
 #define AARCH64_PCIE_MAX_RANGES  8U
+#define AARCH64_PCIE_MAX_INTMAP  32U
 
 enum aarch64_pcie_ctrl_kind {
     AARCH64_PCIE_CTRL_NONE = 0,
@@ -24,6 +25,12 @@ struct aarch64_pcie_range {
     uint64_t size;
 };
 
+struct aarch64_pcie_intmap_entry {
+    uint32_t addr_hi;
+    uint32_t int_pin;
+    uint32_t gic_intid;
+};
+
 struct aarch64_pcie_root_desc {
     bool valid;
     enum aarch64_pcie_ctrl_kind kind;
@@ -34,6 +41,10 @@ struct aarch64_pcie_root_desc {
     uint64_t reg_size;
     uint8_t range_count;
     struct aarch64_pcie_range ranges[AARCH64_PCIE_MAX_RANGES];
+    bool has_int_map;
+    uint8_t int_map_count;
+    uint32_t int_map_mask[4];
+    struct aarch64_pcie_intmap_entry int_map[AARCH64_PCIE_MAX_INTMAP];
 };
 
 struct aarch64_pcie_topology {
