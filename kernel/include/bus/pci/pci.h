@@ -82,6 +82,8 @@ struct pci_device *pci_device_lookup(uint16_t domain, uint8_t bus, uint8_t slot,
 const struct pci_device_id *pci_match_id(const struct pci_driver *drv, const struct pci_device *pdev);
 int pci_bar_window(const struct pci_device *pdev, unsigned int index, enum pci_bar_kind required,
                    uint64_t offset, uint64_t length, uint64_t *physical);
+int pci_iomap_range(const struct pci_device *pdev, unsigned int index,
+                    uint64_t offset, uint64_t length, void **out_virt);
 int pci_config_read32(struct pci_device *pdev, uint16_t offset, uint32_t *out);
 int pci_config_write32(struct pci_device *pdev, uint16_t offset, uint32_t value);
 int pci_set_bus_master(struct pci_device *pdev, bool enabled);

@@ -422,6 +422,88 @@ static void case_ecam_interrupt_map_routing(void)
     assert_eq(-ENODEV, be->route_gsi(&dev, &gsi));
 }
 
+static void case_ecam_mmio_window_bounds_and_isolation(void)
+{
+    struct boot_context ctx;
+    /* RAM at 0x40000000..0x42000000 and 0x30000000..0x30200000 (conflict with root 0 range[2]) */
+    struct test_efi_desc descs[2] = {
+        { .type = AARCH64_UEFI_MEM_CONVENTIONAL, .phys_start = 0x40000000u, .num_pages = 0x2000u },
+        { .type = AARCH64_UEFI_MEM_CONVENTIONAL, .phys_start = 0x30000000u, .num_pages = 0x200u },
+    };
+    setup_fixture(&ctx, descs, 2u);
+
+    mock_topo.root_count = 2;
+
+    /* Root 0: domain=0, ECAM at 0x10000000 (2 MiB)
+     * - range[0]: unaligned MMIO32 [0x12000000, 0x12300000) (3 MiB, crosses 0x12200000 2 MiB boundary)
+     * - range[1]: skipped huge MMIO32 [0x14000000, 0x54000001) (> 1 GiB)
+     * - range[2]: RAM-conflicting MMIO32 [0x30000000, 0x30100000) (fails Stage-3 map)
+     */
+    mock_topo.roots[0].valid = true;
+    mock_topo.roots[0].kind = AARCH64_PCIE_CTRL_ECAM_GENERIC;
+    mock_topo.roots[0].domain = 0;
+    mock_topo.roots[0].bus_start = 0;
+    mock_topo.roots[0].bus_end = 1;
+    mock_topo.roots[0].reg_cpu_base = 0x10000000ULL;
+    mock_topo.roots[0].reg_size = 0x200000ULL;
+    mock_topo.roots[0].range_count = 3;
+    mock_topo.roots[0].ranges[0] = (struct aarch64_pcie_range){
+        .space = PCI_SPACE_MMIO32, .pci_base = 0x12000000ULL, .cpu_base = 0x12000000ULL, .size = 0x00300000ULL
+    };
+    mock_topo.roots[0].ranges[1] = (struct aarch64_pcie_range){
+        .space = PCI_SPACE_MMIO32, .pci_base = 0x14000000ULL, .cpu_base = 0x14000000ULL, .size = (1ULL << 30) + 1ULL
+    };
+    mock_topo.roots[0].ranges[2] = (struct aarch64_pcie_range){
+        .space = PCI_SPACE_MMIO32, .pci_base = 0x30000000ULL, .cpu_base = 0x30000000ULL, .size = 0x00100000ULL
+    };
+
+    /* Root 1: domain=1, ECAM at 0x18000000 (2 MiB), MMIO32 [0x20000000, 0x20100000) */
+    mock_topo.roots[1].valid = true;
+    mock_topo.roots[1].kind = AARCH64_PCIE_CTRL_ECAM_GENERIC;
+    mock_topo.roots[1].domain = 1;
+    mock_topo.roots[1].bus_start = 0;
+    mock_topo.roots[1].bus_end = 1;
+    mock_topo.roots[1].reg_cpu_base = 0x18000000ULL;
+    mock_topo.roots[1].reg_size = 0x200000ULL;
+    mock_topo.roots[1].range_count = 1;
+    mock_topo.roots[1].ranges[0] = (struct aarch64_pcie_range){
+        .space = PCI_SPACE_MMIO32, .pci_base = 0x20000000ULL, .cpu_base = 0x20000000ULL, .size = 0x00100000ULL
+    };
+
+    assert_eq(0, aarch64_pcie_prepare(&ctx));
+    const struct pci_backend *be = arch_pci_backend();
+    assert_not_null(be);
+    assert_not_null(be->map_mmio);
+
+    void *va = NULL;
+    /* 1) Crossing 2 MiB boundary inside range[0] ([0x12000000, 0x12300000)) -> succeeds */
+    assert_eq(0, be->map_mmio(0, 0x121FF000ULL, 0x2000ULL, &va));
+    assert_eq((uintptr_t)(ARCH_PAGE_OFFSET + 0x121FF000ULL), (uintptr_t)va);
+
+    /* 2) Request ending exactly at raw window end (0x12300000, while 2 MiB PT covers 0x12400000) -> succeeds */
+    assert_eq(0, be->map_mmio(0, 0x122FF000ULL, 0x1000ULL, &va));
+    assert_eq((uintptr_t)(ARCH_PAGE_OFFSET + 0x122FF000ULL), (uintptr_t)va);
+
+    /* 3) 1 byte past raw window end -> -ENOENT (2 MiB rounding must NOT expand allowed range) */
+    va = (void *)0x1234;
+    assert_eq(-ENOENT, be->map_mmio(0, 0x122FF000ULL, 0x1001ULL, &va));
+    assert_null(va);
+
+    /* 4) Root 1's window [0x20000000, 0x20100000) must NOT satisfy domain 0 */
+    assert_eq(-ENOENT, be->map_mmio(0, 0x20000000ULL, 0x1000ULL, &va));
+    /* But succeeds on domain 1 up to exact raw end */
+    assert_eq(0, be->map_mmio(1, 0x200FF000ULL, 0x1000ULL, &va));
+    assert_eq(-ENOENT, be->map_mmio(1, 0x200FF000ULL, 0x1001ULL, &va));
+
+    /* 5) Skipped (> 1 GiB) and RAM-conflicting windows are NOT queryable */
+    assert_eq(-ENOENT, be->map_mmio(0, 0x14000000ULL, 0x1000ULL, &va));
+    assert_eq(-ENOENT, be->map_mmio(0, 0x30000000ULL, 0x1000ULL, &va));
+
+    /* 6) Invalid length / domain */
+    assert_eq(-EINVAL, be->map_mmio(0, 0x12000000ULL, 0ULL, &va));
+    assert_eq(-ENODEV, be->map_mmio(9, 0x12000000ULL, 0x1000ULL, &va));
+}
+
 int main(void)
 {
     TEST_SUITE("aarch64_pcie_ecam");
@@ -430,6 +512,7 @@ int main(void)
     run_isolated(case_ram_pa_limit_and_partial_conflict);
     run_isolated(case_ecam_access_ranges_and_errors);
     run_isolated(case_ecam_interrupt_map_routing);
+    run_isolated(case_ecam_mmio_window_bounds_and_isolation);
     TEST_RESULTS();
     return __test_stats.failed ? 1 : 0;
 }

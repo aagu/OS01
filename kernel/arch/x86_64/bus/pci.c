@@ -117,11 +117,25 @@ static int x86_pci_route_gsi(const struct pci_device *pdev, uint32_t *out)
     return 0;
 }
 
-int arch_pci_map_mmio_2m(uint64_t phys_addr)
+static int x86_pci_map_mmio(uint16_t domain, uint64_t cpu_phys, uint64_t length, void **out_virt)
 {
-    uint64_t page = phys_addr & PAGE_2M_MASK;
-    x86_vmm_map_2m(kernel_map, page, (uintptr_t)Phy_To_Virt(page), PAGE_KERNEL_PMD_NOCACHE);
+    if (domain != 0 || !out_virt || length == 0) {
+        return -EINVAL;
+    }
+    if (cpu_phys > UINT64_MAX - length) {
+        return -EINVAL;
+    }
+
+    uint64_t first_blk = cpu_phys & PAGE_2M_MASK;
+    uint64_t last_blk = (cpu_phys + length - 1ULL) & PAGE_2M_MASK;
+    for (uint64_t blk = first_blk; ; blk += PAGE_2M_SIZE) {
+        x86_vmm_map_2m(kernel_map, blk, (uintptr_t)Phy_To_Virt(blk), PAGE_KERNEL_PMD_NOCACHE);
+        if (blk == last_blk) {
+            break;
+        }
+    }
     flush_tlb();
+    *out_virt = Phy_To_Virt(cpu_phys);
     return 0;
 }
 
@@ -135,6 +149,7 @@ static const struct pci_backend s_x86_pci_backend = {
     .read32 = x86_pci_read32,
     .write32 = x86_pci_write32,
     .route_gsi = x86_pci_route_gsi,
+    .map_mmio = x86_pci_map_mmio,
 };
 
 const struct pci_backend *x86_pci_backend(void)

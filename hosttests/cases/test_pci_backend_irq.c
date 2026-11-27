@@ -21,6 +21,7 @@ extern int pthread_join(host_pthread_t thread, void **retval);
 /* ── Global mock hooks for backend runtime ───────────────────────── */
 mock_outd_fn g_mock_outd = NULL;
 mock_ind_fn  g_mock_ind  = NULL;
+mock_vmm_map_2m_fn g_mock_vmm_map_2m = NULL;
 
 /* ── Memory allocation hook ──────────────────────────────────────── */
 void *kmalloc(size_t size)
@@ -591,6 +592,68 @@ static void test_pci_wrappers(void)
     assert_eq(10, gsi);
 }
 
+static uint64_t s_mapped_2m_blocks[8];
+static unsigned int s_mapped_2m_count = 0;
+
+static void record_vmm_map_2m(uint64_t paddr)
+{
+    if (s_mapped_2m_count < 8) {
+        s_mapped_2m_blocks[s_mapped_2m_count++] = paddr;
+    }
+}
+
+static void test_pci_iomap_range_and_x86_2m_blocks(void)
+{
+    TEST_CASE("pci_iomap_range validation & x86_64 2 MiB block coverage");
+
+    struct pci_device dev;
+    memset(&dev, 0, sizeof(dev));
+    dev.domain = 0;
+    dev.bars[0].kind = PCI_BAR_IO;
+    dev.bars[0].valid = true;
+    dev.bars[0].address = 0x1000;
+    dev.bars[1].kind = PCI_BAR_MMIO32;
+    dev.bars[1].valid = true;
+    dev.bars[1].address = 0x10000000ULL;
+    dev.bars[2].kind = PCI_BAR_MMIO64;
+    dev.bars[2].valid = true;
+    dev.bars[2].address = 0x2001FF000ULL;
+    dev.bars[3].kind = PCI_BAR_UPPER;
+    dev.bars[3].valid = false;
+    dev.bars[4].kind = PCI_BAR_NONE;
+    dev.bars[4].valid = false;
+
+    void *va = (void *)0x1;
+    assert_eq(-EINVAL, pci_iomap_range(NULL, 1, 0, 0x100, &va));
+    assert_eq(-EINVAL, pci_iomap_range(&dev, 1, 0, 0x100, NULL));
+    assert_eq(-EINVAL, pci_iomap_range(&dev, 1, 0, 0, &va));
+    assert_null(va);
+    assert_eq(-EINVAL, pci_iomap_range(&dev, 6, 0, 0x100, &va));
+    assert_eq(-EINVAL, pci_iomap_range(&dev, 0, 0, 0x100, &va)); /* IO BAR */
+    assert_eq(-EINVAL, pci_iomap_range(&dev, 3, 0, 0x100, &va)); /* UPPER */
+    assert_eq(-EINVAL, pci_iomap_range(&dev, 4, 0, 0x100, &va)); /* NONE */
+    assert_eq(-EOVERFLOW, pci_iomap_range(&dev, 1, 0xF0000000ULL, 0x1000ULL, &va));
+
+    g_mock_vmm_map_2m = record_vmm_map_2m;
+
+    /* 1) Ending right at 2 MiB boundary [0x10000000, 0x10200000) -> 1 block */
+    s_mapped_2m_count = 0;
+    assert_eq(0, pci_iomap_range(&dev, 1, 0, 0x200000ULL, &va));
+    assert_eq((uintptr_t)0x10000000ULL, (uintptr_t)va);
+    assert_eq(1u, s_mapped_2m_count);
+    assert_eq(0x10000000ULL, s_mapped_2m_blocks[0]);
+
+    /* 2) Crossing 2 MiB boundary [0x2001FF000, 0x200201000) -> 2 blocks */
+    s_mapped_2m_count = 0;
+    assert_eq(0, pci_iomap_range(&dev, 2, 0, 0x2000ULL, &va));
+    assert_eq((uintptr_t)0x2001FF000ULL, (uintptr_t)va);
+    assert_eq(2u, s_mapped_2m_count);
+    assert_eq(0x200000000ULL, s_mapped_2m_blocks[0]);
+    assert_eq(0x200200000ULL, s_mapped_2m_blocks[1]);
+
+    g_mock_vmm_map_2m = NULL;
+}
+
 int main(void)
 {
     TEST_SUITE("ARCH-9 PCI Backend, Resource Access & IRQ Ownership");
@@ -602,6 +665,7 @@ int main(void)
     test_capability_cycle();
     test_bar_space_validation();
     test_pci_wrappers();
+    test_pci_iomap_range_and_x86_2m_blocks();
 
     TEST_RESULTS();
     return __test_stats.failed > 0 ? 1 : 0;

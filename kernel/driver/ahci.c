@@ -633,37 +633,18 @@ int ahci_probe(struct pci_device *pdev, const struct pci_device_id *id)
         return ret;
     }
 
-    uint64_t abar_phys = 0;
-    ret = pci_bar_window(pdev, 5, PCI_BAR_MMIO32, 0, sizeof(HBA_MEM), &abar_phys);
-    if (ret != 0) {
-        ret = pci_bar_window(pdev, 5, PCI_BAR_MMIO64, 0, sizeof(HBA_MEM), &abar_phys);
-    }
-    if (ret != 0 && pdev->bars[5].valid) {
-        abar_phys = pdev->bars[5].address;
-        ret = 0;
-    }
-    if (ret != 0) {
+    void *hba_virt = NULL;
+    ret = pci_iomap_range(pdev, 5, 0, sizeof(HBA_MEM), &hba_virt);
+    if (ret != 0 || !hba_virt) {
         pci_set_decode(pdev, false, false);
         pci_set_bus_master(pdev, false);
         pdev->driver_data = NULL;
         kfree(ctrl);
-        return ret;
+        return (ret != 0) ? ret : -EIO;
     }
 
-    ctrl->abar_phys = abar_phys;
-
-#ifndef OS01_HOST_TEST
-    ret = arch_pci_map_mmio_2m(abar_phys);
-    if (ret != 0) {
-        pci_set_decode(pdev, false, false);
-        pci_set_bus_master(pdev, false);
-        pdev->driver_data = NULL;
-        kfree(ctrl);
-        return ret;
-    }
-#endif
-
-    ctrl->hba = (HBA_MEM *)Phy_To_Virt(abar_phys);
+    ctrl->abar_phys = pdev->bars[5].address;
+    ctrl->hba = (HBA_MEM *)hba_virt;
     HBA_MEM *hba = ctrl->hba;
 
     // BIOS/OS handoff

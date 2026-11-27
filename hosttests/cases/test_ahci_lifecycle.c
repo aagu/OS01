@@ -91,10 +91,26 @@ static int mock_route_gsi(const struct pci_device *pdev, uint32_t *out)
     return 0;
 }
 
+static bool s_simulate_map_mmio_fail = false;
+
+static int mock_map_mmio(uint16_t domain, uint64_t cpu_phys, uint64_t length, void **out_virt)
+{
+    (void)domain;
+    if (s_simulate_map_mmio_fail) {
+        return -ENOENT;
+    }
+    if (!out_virt || length == 0) {
+        return -EINVAL;
+    }
+    *out_virt = (void *)(uintptr_t)cpu_phys;
+    return 0;
+}
+
 static const struct pci_backend s_mock_backend = {
     .read32 = mock_read32,
     .write32 = mock_write32,
     .route_gsi = mock_route_gsi,
+    .map_mmio = mock_map_mmio,
 };
 
 const struct pci_backend *arch_pci_backend(void)
@@ -227,6 +243,8 @@ static void setup_fixture(struct fake_ahci_fixture *fix, uint8_t bus, uint8_t sl
 
     fix->pdev.bars[5].kind = PCI_BAR_MMIO32;
     fix->pdev.bars[5].valid = true;
+    fix->pdev.bars[5].bus_address = 0x10000000ULL;
+    fix->pdev.bars[5].translated = true;
     fix->pdev.bars[5].address = (uint64_t)(uintptr_t)fix->hba_mem;
 }
 
@@ -662,6 +680,41 @@ static void test_port_fault_isolation(void)
     teardown_fixture(&fix);
 }
 
+/* ── Test 12: pci_iomap_range validation & probe cleanup on failure ── */
+static void test_probe_bar5_validation_and_iomap_failure(void)
+{
+    printf("\n  [TEST] Probe rejects invalid BAR5 kind/iomap failure and cleans up\n");
+
+    struct fake_ahci_fixture fix;
+    setup_fixture(&fix, 0, 31, 0x1);
+
+    struct pci_device_id id = { .class_value = fix.pdev.class_code, .class_mask = 0xFFFFFF };
+
+    /* 1) Wrong BAR5 type (PCI_BAR_IO) -> -EINVAL, decode/bus_master disabled, driver_data NULL */
+    fix.pdev.bars[5].kind = PCI_BAR_IO;
+    s_mock_cmd_reg = 0;
+    assert_eq(-EINVAL, ahci_probe(&fix.pdev, &id));
+    assert_null(fix.pdev.driver_data);
+    assert_eq(0u, s_mock_cmd_reg & 0x07u);
+
+    /* 2) PCI_BAR_NONE / invalid BAR5 -> -EINVAL */
+    fix.pdev.bars[5].kind = PCI_BAR_NONE;
+    fix.pdev.bars[5].valid = false;
+    assert_eq(-EINVAL, ahci_probe(&fix.pdev, &id));
+    assert_null(fix.pdev.driver_data);
+
+    /* 3) Valid MMIO32 BAR5 but backend map_mmio fails -> -ENOENT + cleanup */
+    fix.pdev.bars[5].kind = PCI_BAR_MMIO32;
+    fix.pdev.bars[5].valid = true;
+    s_simulate_map_mmio_fail = true;
+    assert_eq(-ENOENT, ahci_probe(&fix.pdev, &id));
+    s_simulate_map_mmio_fail = false;
+    assert_null(fix.pdev.driver_data);
+    assert_eq(0u, s_mock_cmd_reg & 0x07u);
+
+    teardown_fixture(&fix);
+}
+
 /* ── Test Runner ─────────────────────────────────────────────────── */
 int main(void)
 {
@@ -680,7 +733,8 @@ int main(void)
     test_quarantine_on_stop_failure();
     test_unsafe_failure_escalates();
     test_port_fault_isolation();
+    test_probe_bar5_validation_and_iomap_failure();
 
-    printf("\nAll 11 AHCI lifecycle tests passed successfully!\n");
+    printf("\nAll 12 AHCI lifecycle tests passed successfully!\n");
     return 0;
 }

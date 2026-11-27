@@ -164,6 +164,23 @@ static int aarch64_pci_route_gsi(const struct pci_device *pdev, uint32_t *out)
     return -ENOENT;
 }
 
+static bool pcie_range_contains(uint64_t win_base, uint64_t win_size,
+                                uint64_t addr, uint64_t length,
+                                uint64_t *out_off)
+{
+    if (win_size == 0ULL || addr < win_base) {
+        return false;
+    }
+    uint64_t off = addr - win_base;
+    if (off >= win_size || length > win_size - off) {
+        return false;
+    }
+    if (out_off) {
+        *out_off = off;
+    }
+    return true;
+}
+
 static int aarch64_pci_translate_resource(uint16_t domain, uint8_t space,
                                           uint64_t pci_addr, uint64_t size,
                                           uint64_t *out_cpu_addr)
@@ -181,15 +198,41 @@ static int aarch64_pci_translate_resource(uint16_t domain, uint8_t space,
 
     for (uint8_t i = 0U; i < r->range_count; i++) {
         const struct aarch64_pcie_range *rng = &r->ranges[i];
-        if (rng->space != space || pci_addr < rng->pci_base) {
-            continue;
-        }
-        uint64_t off = pci_addr - rng->pci_base;
-        if (off >= rng->size || size > rng->size - off) {
+        uint64_t off = 0ULL;
+        if (rng->space != space ||
+            !pcie_range_contains(rng->pci_base, rng->size, pci_addr, size, &off)) {
             continue;
         }
         *out_cpu_addr = rng->cpu_base + off;
         return 0;
+    }
+    return -ENOENT;
+}
+
+static int aarch64_pci_map_mmio(uint16_t domain, uint64_t cpu_phys, uint64_t length, void **out_virt)
+{
+    if (!out_virt || length == 0ULL) {
+        return -EINVAL;
+    }
+    *out_virt = NULL;
+    if (cpu_phys > UINT64_MAX - length) {
+        return -EINVAL;
+    }
+
+    const struct aarch64_pcie_root_desc *r = find_ready_root(domain);
+    if (!r) {
+        return -ENODEV;
+    }
+
+    for (uint8_t i = 0U; i < r->range_count; i++) {
+        const struct aarch64_pcie_range *rng = &r->ranges[i];
+        if (!rng->mapped) {
+            continue;
+        }
+        if (pcie_range_contains(rng->cpu_base, rng->size, cpu_phys, length, NULL)) {
+            *out_virt = (void *)(uintptr_t)(ARCH_PAGE_OFFSET + cpu_phys);
+            return 0;
+        }
     }
     return -ENOENT;
 }
@@ -218,6 +261,7 @@ static struct pci_backend s_aarch64_pci_backend = {
     .max_config_offset = 4092U,
     .translate_resource = aarch64_pci_translate_resource,
     .bus_range = aarch64_pci_bus_range,
+    .map_mmio = aarch64_pci_map_mmio,
 };
 
 static bool pcie_map_device_window_2m(uint16_t domain, const char *label,
@@ -347,29 +391,30 @@ int aarch64_pcie_prepare(const struct boot_context *ctx)
             continue;
         }
 
-        /* Pre-map bounded MMIO32 BAR windows before VMM gate closes */
-        bool mmio_ok = true;
-        for (uint8_t j = 0U; j < r->range_count; j++) {
-            const struct aarch64_pcie_range *rng = &r->ranges[j];
+        struct aarch64_pcie_root_desc ready = *r;
+        for (uint8_t j = 0U; j < AARCH64_PCIE_MAX_RANGES; j++) {
+            ready.ranges[j].mapped = false;
+        }
+
+        /* Pre-map bounded MMIO32 BAR windows before VMM gate closes;
+         * skipped or failed windows keep mapped=false so probe rejects them. */
+        for (uint8_t j = 0U; j < ready.range_count && j < AARCH64_PCIE_MAX_RANGES; j++) {
+            struct aarch64_pcie_range *rng = &ready.ranges[j];
             if (rng->space != PCI_SPACE_MMIO32 || rng->size == 0ULL) {
                 continue;
             }
             if (rng->size > (1ULL << 30)) {
                 continue;
             }
-            if (!pcie_map_device_window_2m(r->domain, "MMIO32", rng->cpu_base, rng->size,
-                                           mmap_ptr, stride, desc_count, ttbr1_root)) {
-                mmio_ok = false;
-                break;
+            if (pcie_map_device_window_2m(ready.domain, "MMIO32", rng->cpu_base, rng->size,
+                                          mmap_ptr, stride, desc_count, ttbr1_root)) {
+                rng->mapped = true;
             }
         }
-        if (!mmio_ok) {
-            continue;
-        }
 
-        s_ready_roots[s_ready_root_count] = *r;
-        s_pci_roots[s_ready_root_count].domain = r->domain;
-        s_pci_roots[s_ready_root_count].bus = r->bus_start;
+        s_ready_roots[s_ready_root_count] = ready;
+        s_pci_roots[s_ready_root_count].domain = ready.domain;
+        s_pci_roots[s_ready_root_count].bus = ready.bus_start;
         s_ready_root_count++;
     }
 
@@ -379,28 +424,6 @@ int aarch64_pcie_prepare(const struct boot_context *ctx)
         log_info("pcie: ready %u ECAM root(s)\n", (unsigned int)s_ready_root_count);
     }
     return 0;
-}
-
-int arch_pci_map_mmio_2m(uint64_t phys_addr)
-{
-    uint64_t blk_pa = phys_addr & (uint64_t)PAGE_2M_MASK;
-    for (uint32_t i = 0U; i < s_ready_root_count; i++) {
-        const struct aarch64_pcie_root_desc *r = &s_ready_roots[i];
-        for (uint8_t j = 0U; j < r->range_count; j++) {
-            const struct aarch64_pcie_range *rng = &r->ranges[j];
-            if (rng->space != PCI_SPACE_MMIO32 || rng->size == 0ULL ||
-                rng->size > (1ULL << 30)) {
-                continue;
-            }
-            uint64_t r_start = rng->cpu_base & (uint64_t)PAGE_2M_MASK;
-            uint64_t r_end = ((rng->cpu_base + rng->size - 1ULL) & (uint64_t)PAGE_2M_MASK)
-                           + (uint64_t)PAGE_2M_SIZE;
-            if (blk_pa >= r_start && blk_pa < r_end) {
-                return 0;
-            }
-        }
-    }
-    return -ENODEV;
 }
 
 const struct pci_backend *arch_pci_backend(void)

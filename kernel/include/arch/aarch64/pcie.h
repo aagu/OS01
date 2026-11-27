@@ -20,6 +20,7 @@ enum aarch64_pcie_ctrl_kind {
 struct aarch64_pcie_range {
     uint8_t space;        /* PCI_SPACE_IO / PCI_SPACE_MMIO32 / PCI_SPACE_MMIO64 */
     bool prefetchable;
+    bool mapped;          /* true iff Stage-3 pre-mapped this window as Device-nGnRnE */
     uint64_t pci_base;
     uint64_t cpu_base;
     uint64_t size;

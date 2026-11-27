@@ -136,7 +136,6 @@ uint64_t clocksource_freq_hz(void);
 uint64_t clocksource_cycles(void);
 uint64_t clocksource_read_ns(void);
 static inline uint64_t arch_clocksource_read_ns(void) { return clocksource_read_ns(); }
-static inline int arch_pci_map_mmio_2m(uint64_t phys_addr) { (void)phys_addr; return 0; }
 uint64_t arch_cycle_counter(void);
 
 #ifndef _ARCH_IO_H

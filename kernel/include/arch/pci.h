@@ -34,11 +34,10 @@ struct pci_backend {
                               uint64_t pci_addr, uint64_t size,
                               uint64_t *out_cpu_addr);
     int (*bus_range)(uint16_t domain, uint8_t *out_bus_start, uint8_t *out_bus_end);
+    int (*map_mmio)(uint16_t domain, uint64_t cpu_phys, uint64_t length, void **out_virt);
 };
 
 const struct pci_backend *arch_pci_backend(void);
-
-int arch_pci_map_mmio_2m(uint64_t phys_addr);
 
 int arch_pci_msix_map(const struct pci_device *pdev, uint64_t table_phys, void **out_virt);
 void arch_pci_msix_unmap(const struct pci_device *pdev, void *virt);

@@ -89,4 +89,37 @@ static inline uint32_t arch_ind(uint16_t port)
     return 0;
 }
 
+#ifndef _ARCH_X86_64_VMM_H
+#define _ARCH_X86_64_VMM_H
+#endif
+
+#ifndef PAGE_2M_SIZE
+#define PAGE_2M_SIZE (2ULL * 1024ULL * 1024ULL)
+#endif
+#ifndef PAGE_2M_MASK
+#define PAGE_2M_MASK (~(PAGE_2M_SIZE - 1ULL))
+#endif
+#ifndef PAGE_KERNEL_PMD_NOCACHE
+#define PAGE_KERNEL_PMD_NOCACHE 0ULL
+#endif
+#ifndef Phy_To_Virt
+#define Phy_To_Virt(x) ((void *)(uintptr_t)(x))
+#endif
+#ifndef kernel_map
+#define kernel_map NULL
+#endif
+
+typedef void (*mock_vmm_map_2m_fn)(uint64_t paddr);
+extern mock_vmm_map_2m_fn g_mock_vmm_map_2m;
+
+static inline void x86_vmm_map_2m(void *map, uint64_t paddr, uintptr_t vaddr, uint64_t flags)
+{
+    (void)map; (void)vaddr; (void)flags;
+    if (g_mock_vmm_map_2m) {
+        g_mock_vmm_map_2m(paddr);
+    }
+}
+
+static inline void flush_tlb(void) {}
+
 #endif /* ARCH9_BACKEND_RUNTIME_H */

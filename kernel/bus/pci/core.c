@@ -653,6 +653,46 @@ int pci_bar_window(const struct pci_device *pdev, unsigned int index, enum pci_b
     return 0;
 }
 
+int pci_iomap_range(const struct pci_device *pdev, unsigned int index,
+                    uint64_t offset, uint64_t length, void **out_virt)
+{
+    if (!out_virt) {
+        return -EINVAL;
+    }
+    *out_virt = NULL;
+    if (!pdev || length == 0 || index >= 6) {
+        return -EINVAL;
+    }
+
+    const struct pci_bar *bar = &pdev->bars[index];
+    if (!bar->valid ||
+        (bar->kind != PCI_BAR_MMIO32 && bar->kind != PCI_BAR_MMIO64)) {
+        return -EINVAL;
+    }
+
+    uint64_t cpu_phys = 0;
+    int rc = pci_bar_window(pdev, index, bar->kind, offset, length, &cpu_phys);
+    if (rc != 0) {
+        return rc;
+    }
+
+    const struct pci_backend *backend = arch_pci_backend();
+    if (!backend) {
+        return BUS_UNAVAILABLE;
+    }
+    if (!backend->map_mmio) {
+        return -ENOTSUP;
+    }
+
+    void *va = NULL;
+    rc = backend->map_mmio(pdev->domain, cpu_phys, length, &va);
+    if (rc != 0) {
+        return rc;
+    }
+    *out_virt = va;
+    return 0;
+}
+
 static inline uint16_t pci_config_limit(const struct pci_backend *backend)
 {
     return (backend && backend->max_config_offset > 252U &&
