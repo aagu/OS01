@@ -509,7 +509,11 @@ static int elf_load_at(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image,
     uint64_t bias = 0;
     x86_elf_pie_t pie;
     memset(&pie, 0, sizeof(pie));
-    char interp_path[X86_ELF_INTERP_PATH_MAX];
+    /* The path is read straight into out_image->interp_path: a 256 B
+     * local would blow the 512 B frame budget.  Before the success
+     * publish the bytes are unvalidated scratch — callers ignore
+     * *out_image unless this call returned 0. */
+    char *interp_path = out_image->interp_path;
     bool has_interp = false;
 
     if (ehdr.e_type == ET_DYN) {
@@ -759,9 +763,6 @@ static int elf_load_at(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image,
     out_image->is_pie  = is_pie;
     out_image->fs_base = tls.fs_base;
     out_image->has_interp = has_interp;
-    if (has_interp) {
-        memcpy(out_image->interp_path, interp_path, pie.interp_filesz);
-    }
 
     if (is_pie)
         x86_elf_pie_dispose(&pie);
