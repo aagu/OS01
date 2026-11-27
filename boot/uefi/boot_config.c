@@ -160,6 +160,9 @@ int uefi_boot_config_parse(const char *data, size_t size, bool aarch64,
                     out->platform = UEFI_BOOT_PLATFORM_QEMU_VIRT;
                 } else if (span_eq(data + val_start, e - val_start, "rpi5")) {
                     out->platform = UEFI_BOOT_PLATFORM_RPI5;
+                } else if (span_eq(data + val_start, e - val_start,
+                                   "dragon-q8b")) {
+                    out->platform = UEFI_BOOT_PLATFORM_DRAGON_Q8B;
                 } else {
                     if (error_line)
                         *error_line = line_no;
@@ -178,6 +181,8 @@ int uefi_boot_config_parse(const char *data, size_t size, bool aarch64,
                 } else if (span_eq(data + val_start, e - val_start,
                                    "rp1-header")) {
                     out->console = UEFI_BOOT_CONSOLE_RP1_HEADER;
+                } else if (span_eq(data + val_start, e - val_start, "acpi")) {
+                    out->console = UEFI_BOOT_CONSOLE_ACPI;
                 } else {
                     if (error_line)
                         *error_line = line_no;
@@ -199,6 +204,13 @@ int uefi_boot_config_parse(const char *data, size_t size, bool aarch64,
 
     if (aarch64 && out->console == UEFI_BOOT_CONSOLE_RP1_HEADER &&
         out->platform != UEFI_BOOT_PLATFORM_RPI5) {
+        if (error_line)
+            *error_line = console_line;
+        return -1;
+    }
+    if (aarch64 && out->console == UEFI_BOOT_CONSOLE_ACPI &&
+        out->platform != UEFI_BOOT_PLATFORM_DRAGON_Q8B &&
+        out->platform != UEFI_BOOT_PLATFORM_AUTO) {
         if (error_line)
             *error_line = console_line;
         return -1;

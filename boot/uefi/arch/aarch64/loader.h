@@ -129,6 +129,12 @@ enum aarch64_fdt_scan_result aarch64_fdt_boot_scan(
     const void *blob, uint32_t size, const char *required_compatible,
     uint64_t firmware_console_pa, struct aarch64_early_mmio_handoff *out);
 
+#include "../../../../kernel/include/arch/aarch64/acpi.h"
+
+int aarch64_acpi_pack_handoff(uint64_t rsdp_phys, void *dst_page,
+                              uint32_t dst_size, uint64_t dst_phys,
+                              struct aarch64_acpi_info *out);
+
 bool aarch64_fw_dtb_readable(const void *map, uint32_t entry_size,
                              uint32_t count, uint64_t pa, uint64_t length);
 bool aarch64_early_mmio_map_safe(const struct boot_context *ctx);

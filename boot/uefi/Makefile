@@ -42,6 +42,8 @@ SRCS := $(ROOT)/boot/uefi/main.c \
         $(ROOT)/boot/uefi/arch/aarch64/boot_memory.c \
         $(ROOT)/boot/uefi/arch/aarch64/elf.c \
         $(ROOT)/boot/uefi/arch/aarch64/fdt_early.c \
+        $(ROOT)/boot/uefi/arch/aarch64/acpi_early.c \
+        $(ROOT)/kernel/arch/aarch64/platform/acpi_parse.c \
         $(ROOT)/boot/uefi/arch/aarch64/handoff.S
 # LMA Task 2: the boot block base travels into the posix-uefi compile
 # via the environment CFLAGS contract. The inner make cannot see a

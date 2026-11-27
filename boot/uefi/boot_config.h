@@ -13,11 +13,13 @@ enum uefi_boot_platform {
     UEFI_BOOT_PLATFORM_AUTO = 0,
     UEFI_BOOT_PLATFORM_QEMU_VIRT = 1,
     UEFI_BOOT_PLATFORM_RPI5 = 2,
+    UEFI_BOOT_PLATFORM_DRAGON_Q8B = 3,
 };
 
 enum uefi_boot_console {
     UEFI_BOOT_CONSOLE_DTB = 0,
     UEFI_BOOT_CONSOLE_RP1_HEADER = 1,
+    UEFI_BOOT_CONSOLE_ACPI = 2,
 };
 
 struct uefi_boot_config {

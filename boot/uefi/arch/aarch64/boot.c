@@ -21,6 +21,12 @@
 _Static_assert(sizeof(struct boot_context) <= AARCH64_PAGE_SIZE,
                "boot_context exceeds first handoff page");
 
+/* UEFI ACPI 2.0 Table GUID: 8868e871-e4f1-11d3-bc22-0080c73c8881. */
+static const efi_guid_t acpi_20_table_guid = {
+    0x8868e871U, 0xe4f1U, 0x11d3U,
+    { 0xbcU, 0x22U, 0x00U, 0x80U, 0xc7U, 0x3cU, 0x88U, 0x81U }
+};
+
 /* UEFI Device Tree Table GUID: b1b621d5-f19c-41a5-830b-d9152c69aae0. */
 static const efi_guid_t fdt_table_guid = {
     0xb1b621d5U, 0xf19cU, 0x41a5U,
@@ -43,6 +49,7 @@ static uint16_t kernel_allocation_count;
 static efi_physical_address_t aarch64_ctx_phys;
 static efi_physical_address_t aarch64_fdt_phys;
 static uintn_t aarch64_fdt_pages;
+static efi_physical_address_t aarch64_acpi_phys;
 static efi_physical_address_t aarch64_mmap_phys;
 static uintn_t aarch64_mmap_pages;
 static int aarch64_trampoline_reserved;  /* AARCH64_TRAMPOLINE_BASE, 1 page */
@@ -606,6 +613,92 @@ efi_status_t arch_setup_graphics(struct boot_context *ctx,
     return EFI_SUCCESS;
 }
 
+static void uefi_put_hex64(uint64_t val)
+{
+    char buf[19];
+    static const char hex[] = "0123456789abcdef";
+    buf[0] = '0';
+    buf[1] = 'x';
+    for (int i = 0; i < 16; i++)
+        buf[2 + i] = hex[(val >> ((15 - i) * 4)) & 0xf];
+    buf[18] = '\0';
+    uefi_puts(buf);
+}
+
+static void *find_config_table(const efi_guid_t *target)
+{
+    uintn_t i;
+    if (!ST || !ST->ConfigurationTable)
+        return NULL;
+    for (i = 0; i < ST->NumberOfTableEntries; i++) {
+        if (guid_equal(&ST->ConfigurationTable[i].VendorGuid, target))
+            return ST->ConfigurationTable[i].VendorTable;
+    }
+    return NULL;
+}
+
+static efi_status_t fill_dragon_q8b_acpi(struct boot_context *ctx)
+{
+    void *rsdp = find_config_table(&acpi_20_table_guid);
+    efi_physical_address_t acpi_phys = 0;
+    struct aarch64_acpi_info acpi;
+    EFI_STATUS status;
+
+    if (!rsdp) {
+        uefi_puts("UEFI-Q8B: missing ACPI 2.0 RSDP\r\n");
+        return EFI_LOAD_ERROR;
+    }
+
+    status = alloc_handoff_pages(1, &acpi_phys);
+    if (EFI_ERROR(status)) {
+        uefi_puts("UEFI-Q8B: ACPI handoff alloc failed\r\n");
+        return status;
+    }
+    if (aarch64_acpi_pack_handoff((uint64_t)(uintptr_t)rsdp,
+                                  (void *)(uintptr_t)acpi_phys,
+                                  (uint32_t)AARCH64_PAGE_SIZE,
+                                  (uint64_t)acpi_phys, &acpi) != 0) {
+        (void)BS->FreePages(acpi_phys, 1);
+        uefi_puts("UEFI-Q8B: ACPI pack failed\r\n");
+        return EFI_LOAD_ERROR;
+    }
+    aarch64_acpi_phys = acpi_phys;
+
+    ctx->firmware.acpi_rsdp = (uint64_t)acpi_phys;
+    ctx->flags |= BOOT_CONTEXT_HAS_ACPI;
+
+    ctx->early_mmio.console_base = acpi.spcr_base;
+    {
+        uint64_t win_start = acpi.gicd_base;
+        uint64_t win_end = acpi.gicd_base + UINT64_C(0x10000);
+        if (acpi.gicr_base != 0u) {
+            uint64_t gicr_end = acpi.gicr_base +
+                (acpi.gicr_len ? (uint64_t)acpi.gicr_len : UINT64_C(0x100000));
+            if (acpi.gicr_base < win_start)
+                win_start = acpi.gicr_base;
+            if (gicr_end > win_end)
+                win_end = gicr_end;
+        }
+        uint64_t aligned_base = win_start & ~UINT64_C(0x1fffff);
+        uint64_t aligned_end = (win_end + UINT64_C(0x1fffff)) & ~UINT64_C(0x1fffff);
+        ctx->early_mmio.device_base = aligned_base;
+        ctx->early_mmio.device_blocks = (uint32_t)((aligned_end - aligned_base) >> 21);
+    }
+    ctx->early_mmio.reserved = 0u;
+    ctx->flags |= BOOT_CONTEXT_HAS_EARLY_MMIO |
+                  BOOT_CONTEXT_CONSOLE_FIRMWARE_CONFIGURED;
+
+    uefi_puts("UEFI-Q8B: ACPI packed gicd=");
+    uefi_put_hex64(acpi.gicd_base);
+    uefi_puts(" gicr=");
+    uefi_put_hex64(acpi.gicr_base);
+    uefi_puts(" uart=");
+    uefi_put_hex64(acpi.spcr_base);
+    uefi_puts("\r\n");
+
+    return capture_entropy(ctx);
+}
+
 efi_status_t arch_fill_firmware(struct boot_context *ctx,
                                 const struct uefi_boot_config *config)
 {
@@ -617,6 +710,9 @@ efi_status_t arch_fill_firmware(struct boot_context *ctx,
     struct aarch64_early_mmio_handoff early_mmio;
     enum aarch64_fdt_scan_result scan_rc;
     EFI_STATUS status;
+
+    if (config && config->platform == UEFI_BOOT_PLATFORM_DRAGON_Q8B)
+        return fill_dragon_q8b_acpi(ctx);
 
     status = load_and_copy_fdt(config, &fdt_phys, &fdt_pages, &fdt_size);
     if (EFI_ERROR(status))
@@ -752,8 +848,12 @@ efi_status_t arch_build_memory(struct boot_context *ctx,
                             (uint64_t)AARCH64_PAGE_SIZE, ctx) ||
         range_overlaps_mmio((uint64_t)aarch64_ctx_phys,
                             (uint64_t)AARCH64_PAGE_SIZE, ctx) ||
-        range_overlaps_mmio((uint64_t)aarch64_fdt_phys,
-                            (uint64_t)aarch64_fdt_pages * AARCH64_PAGE_SIZE, ctx) ||
+        (aarch64_fdt_pages != 0 &&
+         range_overlaps_mmio((uint64_t)aarch64_fdt_phys,
+                             (uint64_t)aarch64_fdt_pages * AARCH64_PAGE_SIZE, ctx)) ||
+        (aarch64_acpi_phys != 0 &&
+         range_overlaps_mmio((uint64_t)aarch64_acpi_phys,
+                             (uint64_t)AARCH64_PAGE_SIZE, ctx)) ||
         range_overlaps_mmio((uint64_t)aarch64_mmap_phys,
                             (uint64_t)aarch64_mmap_pages * AARCH64_PAGE_SIZE, ctx))
         return EFI_SECURITY_VIOLATION;
@@ -788,6 +888,10 @@ void arch_release(void)
         (void)BS->FreePages(aarch64_fdt_phys, aarch64_fdt_pages);
         aarch64_fdt_phys = 0;
         aarch64_fdt_pages = 0;
+    }
+    if (aarch64_acpi_phys) {
+        (void)BS->FreePages(aarch64_acpi_phys, 1);
+        aarch64_acpi_phys = 0;
     }
     if (aarch64_ctx_phys) {
         (void)BS->FreePages(aarch64_ctx_phys, 1);
@@ -854,8 +958,8 @@ static void flush_handoff_caches(void)
         .trampoline_base = (uint64_t)AARCH64_TRAMPOLINE_BASE,
         .page_size = (uint64_t)AARCH64_PAGE_SIZE,
         .ctx_phys = (uint64_t)aarch64_ctx_phys,
-        .fdt_phys = (uint64_t)aarch64_fdt_phys,
-        .fdt_pages = (uint64_t)aarch64_fdt_pages,
+        .fdt_phys = (uint64_t)(aarch64_fdt_phys ? aarch64_fdt_phys : aarch64_acpi_phys),
+        .fdt_pages = (uint64_t)(aarch64_fdt_phys ? aarch64_fdt_pages : (aarch64_acpi_phys ? 1u : 0u)),
         .mmap_phys = (uint64_t)aarch64_mmap_phys,
         .mmap_pages = (uint64_t)aarch64_mmap_pages,
     };
