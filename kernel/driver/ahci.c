@@ -9,19 +9,15 @@
 #include <memory/pmm.h>
 #include <memory/vmm.h>
 #include <memory/slab.h>
-#include <arch/x86_64/pte.h>   // PAGE_* x86 hardware PTE bits (Task 14 split)
-#include <arch/io.h>
+#include <arch/pci.h>
 #include <arch/cpu.h>
 #include <intr/interrupt.h>
 #include <time/clocksource.h>
-#ifndef OS01_HOST_TEST
-#include <arch/x86_64/clocksource.h>
-#endif
+#include <arch/clocksource.h>
 #include <string.h>
 #include <stdint.h>
 #include <errno.h>
 #include <log/log.h>
-#include <arch/x86_64/vmm.h>
 
 // ── Offsets within per-port 2MB DMA page ──────────────────
 #define DMA_OFF_CMD_LIST    0x0000    // 1 KB (32 headers × 32 B)
@@ -657,9 +653,14 @@ int ahci_probe(struct pci_device *pdev, const struct pci_device_id *id)
     ctrl->abar_phys = abar_phys;
 
 #ifndef OS01_HOST_TEST
-    uint64_t abar_page = abar_phys & PAGE_2M_MASK;
-    x86_vmm_map_2m(kernel_map, abar_page, (uintptr_t)Phy_To_Virt(abar_page), PAGE_KERNEL_PMD_NOCACHE);
-    flush_tlb();
+    ret = arch_pci_map_mmio_2m(abar_phys);
+    if (ret != 0) {
+        pci_set_decode(pdev, false, false);
+        pci_set_bus_master(pdev, false);
+        pdev->driver_data = NULL;
+        kfree(ctrl);
+        return ret;
+    }
 #endif
 
     ctrl->hba = (HBA_MEM *)Phy_To_Virt(abar_phys);

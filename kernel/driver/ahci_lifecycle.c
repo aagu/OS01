@@ -5,7 +5,7 @@
 #include <device/device.h>
 #include <time/clocksource.h>
 #ifndef OS01_HOST_TEST
-#include <arch/x86_64/clocksource.h>
+#include <arch/clocksource.h>
 #endif
 #include <arch/cpu.h>
 #include <errno.h>
@@ -27,7 +27,7 @@ int ahci_deadline_start(bool boot_phase, uint32_t timeout_ms, struct ahci_deadli
         uint64_t delta_cycles = (uint64_t)(((__uint128_t)timeout_ms * freq + 999) / 1000);
         out->expiry = clocksource_cycles() + delta_cycles;
     } else {
-        uint64_t now_ns = clocksource_read_ns();
+        uint64_t now_ns = arch_clocksource_read_ns();
         out->expiry = now_ns + (uint64_t)timeout_ms * 1000000ULL;
     }
     return 0;
@@ -46,7 +46,7 @@ bool ahci_deadline_expired(const struct ahci_deadline *dl)
         uint64_t now = clocksource_cycles();
         return (int64_t)(now - dl->expiry) >= 0;
     } else {
-        uint64_t now_ns = clocksource_read_ns();
+        uint64_t now_ns = arch_clocksource_read_ns();
         return (int64_t)(now_ns - dl->expiry) >= 0;
     }
 }

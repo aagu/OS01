@@ -117,6 +117,14 @@ static int x86_pci_route_gsi(const struct pci_device *pdev, uint32_t *out)
     return 0;
 }
 
+int arch_pci_map_mmio_2m(uint64_t phys_addr)
+{
+    uint64_t page = phys_addr & PAGE_2M_MASK;
+    x86_vmm_map_2m(kernel_map, page, (uintptr_t)Phy_To_Virt(page), PAGE_KERNEL_PMD_NOCACHE);
+    flush_tlb();
+    return 0;
+}
+
 static const struct pci_root s_x86_roots[] = {
     { .domain = 0, .bus = 0 },
 };

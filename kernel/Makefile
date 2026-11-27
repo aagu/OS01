@@ -161,6 +161,8 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_boot.c \
                    driver/keyboard.c \
                    driver/mouse.c \
                    driver/virtio_blk.c \
+                   driver/ahci.c \
+                   driver/ahci_lifecycle.c \
                    subsys/subsys.c \
                    random/random.c \
                    ../libc/random/chacha20.c \

@@ -38,6 +38,8 @@ struct pci_backend {
 
 const struct pci_backend *arch_pci_backend(void);
 
+int arch_pci_map_mmio_2m(uint64_t phys_addr);
+
 int arch_pci_msix_map(const struct pci_device *pdev, uint64_t table_phys, void **out_virt);
 void arch_pci_msix_unmap(const struct pci_device *pdev, void *virt);
 uint32_t arch_pci_msi_address(const struct pci_device *pdev);

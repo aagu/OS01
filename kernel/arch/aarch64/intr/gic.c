@@ -132,3 +132,9 @@ void gic_clear_pending_irq(uint32_t intid)
 
 uint32_t gic_dbg_last_iar(void)
 { return gic_driver_trace_get(k_cpu_index()); }       /* R2-6: 本 CPU 槽 */
+
+uint32_t unregister_irq(uint32_t gsi)
+{
+    (void)gic_irq_configure(gsi, false, 0x00, 0x00);
+    return 0;
+}

@@ -47,7 +47,7 @@ SUITE = "aarch64-pcie"
 
 
 def qemu_command(args: argparse.Namespace, diagnostic_dtb: str | None,
-                 attach_pci_rng: bool) -> list[str]:
+                 attach_pci_rng: bool, ahci_disk: str | None = None) -> list[str]:
     """Build the QEMU argv for one AArch64 PCIe acceptance boot."""
     command = [
         args.qemu,
@@ -71,6 +71,12 @@ def qemu_command(args: argparse.Namespace, diagnostic_dtb: str | None,
     else:
         command += [
             "-device", "virtio-rng-device",
+        ]
+    if ahci_disk:
+        command += [
+            "-device", "ich9-ahci,id=ahci",
+            "-drive", f"if=none,file={ahci_disk},format=raw,id=ahci_disk",
+            "-device", "ide-hd,drive=ahci_disk,bus=ahci.0",
         ]
     if diagnostic_dtb:
         command += ["-dtb", diagnostic_dtb]
@@ -163,6 +169,24 @@ def check_no_ecam(text: str) -> list[str]:
     return failures
 
 
+def check_ahci_virt(text: str) -> list[str]:
+    """Validate QEMU virt ich9-ahci enumeration, driver binding, and /dev/hdb read."""
+    text = text.replace("\r", "")
+    failures = _has_fatal_or_panic(text)
+    if not re.search(r"subsys:\s+init\s+device-boot[^\n]*ok", text):
+        failures.append("missing 'subsys: init  device-boot ... ok' boot marker")
+    for tag in ("__HDB_RC=0__", "__AHCI_LSPCI_RC=0__"):
+        if not re.search(rf"(?m)^{re.escape(tag)}$", text):
+            failures.append(f"missing standalone marker {tag!r}")
+    if "82801IR/IO/IH SATA AHCI Controller" not in text:
+        failures.append("missing ICH9 AHCI controller in lspci -v output")
+    if "Kernel driver in use: ahci" not in text:
+        failures.append("missing 'Kernel driver in use: ahci' in lspci -v output")
+    if "OS01-AARCH64-AHCI-OK" not in text:
+        failures.append("missing 'OS01-AARCH64-AHCI-OK' read from /dev/hdb")
+    return failures
+
+
 def _run_qemu_check(args: argparse.Namespace, *, check_name: str,
                     run_dir: Path) -> tuple[dict, list[str]]:
     result = {
@@ -187,7 +211,14 @@ def _run_qemu_check(args: argparse.Namespace, *, check_name: str,
                 diagnostic_dtb = build_no_ecam_dtb(diagnostic_dtb, run_dir)
 
         attach_pci_rng = (check_name == "ecam-virt")
-        command = qemu_command(args, diagnostic_dtb, attach_pci_rng)
+        ahci_disk = None
+        if check_name == "ahci-virt":
+            ahci_path = run_dir / "ahci-test.img"
+            with open(ahci_path, "wb") as f:
+                f.write(b"OS01-AARCH64-AHCI-OK\n")
+                f.truncate(2 * 1024 * 1024)
+            ahci_disk = str(ahci_path)
+        command = qemu_command(args, diagnostic_dtb, attach_pci_rng, ahci_disk=ahci_disk)
         (run_dir / "command.json").write_text(
             json.dumps(command, indent=2) + "\n", encoding="utf-8")
 
@@ -215,6 +246,18 @@ def _run_qemu_check(args: argparse.Namespace, *, check_name: str,
             )
             session.send(cmd.encode("utf-8"))
             session.wait_for(lambda s: bool(re.search(r"(?m)^__PCIE_DONE__$", s.replace("\r", ""))))
+        elif check_name == "ahci-virt":
+            cmd = (
+                "ls /dev/hdb; echo __HDB''_RC=$?__\n"
+                "head -n 1 /dev/hdb; echo __HDB_READ''_END__\n"
+                "lspci -v; echo __AHCI_LSPCI''_RC=$?__\n"
+                "echo __AHCI''_DONE__\n"
+            )
+            raw = cmd.encode("utf-8")
+            for i in range(0, len(raw), 8):
+                session.send(raw[i:i + 8])
+                time.sleep(0.01)
+            session.wait_for(lambda s: bool(re.search(r"(?m)^__AHCI_DONE__$", s.replace("\r", ""))))
         else:
             cmd = "lspci; echo __NOECAM''_RC=$?__\n"
             session.send(cmd.encode("utf-8"))
@@ -338,7 +381,7 @@ def self_test() -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="OS01 AArch64 PCIe acceptance suite")
-    parser.add_argument("--check", choices=("all", "ecam-virt", "no-ecam"), default="all")
+    parser.add_argument("--check", choices=("all", "ecam-virt", "ahci-virt", "no-ecam"), default="all")
     parser.add_argument("--self-test", action="store_true")
     parser.add_argument("--firmware", default=None)
     parser.add_argument("--image", default=None)
@@ -364,9 +407,10 @@ def main(argv: list[str] | None = None) -> int:
         print("ERROR: qemutests.harness.process is unavailable", file=sys.stderr)
         return 2
 
-    checks = ("ecam-virt", "no-ecam") if args.check == "all" else (args.check,)
+    checks = ("ecam-virt", "ahci-virt", "no-ecam") if args.check == "all" else (args.check,)
     checkers = {
         "ecam-virt": check_ecam_virt,
+        "ahci-virt": check_ahci_virt,
         "no-ecam": check_no_ecam,
     }
 

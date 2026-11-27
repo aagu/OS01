@@ -228,7 +228,15 @@ typedef volatile struct {
 #define AHCI_MAX_XFER_SECTORS ((2 * 1024 * 1024 - 0x4000) / 512) /* 4064 */
 
 #ifndef ahci_write32
+#ifdef __aarch64__
+#define ahci_write32(reg, val) do { \
+    __asm__ __volatile__("dsb st" ::: "memory"); \
+    *(volatile uint32_t *)(reg) = (uint32_t)(val); \
+    __asm__ __volatile__("dsb st" ::: "memory"); \
+} while (0)
+#else
 #define ahci_write32(reg, val) do { *(reg) = (val); } while (0)
+#endif
 #endif
 #ifndef ahci_record_dma_start
 #define ahci_record_dma_start() do {} while (0)

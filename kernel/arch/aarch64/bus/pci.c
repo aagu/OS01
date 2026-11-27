@@ -220,6 +220,58 @@ static struct pci_backend s_aarch64_pci_backend = {
     .bus_range = aarch64_pci_bus_range,
 };
 
+static bool pcie_map_device_window_2m(uint16_t domain, const char *label,
+                                      uint64_t base_pa, uint64_t size,
+                                      const void *mmap_ptr, uint32_t stride,
+                                      uint32_t desc_count, uint64_t *ttbr1_root)
+{
+    const uint64_t blk_sz = (uint64_t)PAGE_2M_SIZE;
+    const uint64_t blk_mask = (uint64_t)PAGE_2M_MASK;
+
+    if (size == 0ULL || base_pa > UINT64_MAX - size) {
+        log_warn("pcie: root domain=%u %s size overflow\n",
+                 (unsigned int)domain, label);
+        return false;
+    }
+
+    uint64_t map_start = base_pa & blk_mask;
+    uint64_t last_blk = (base_pa + size - 1ULL) & blk_mask;
+    if (last_blk > UINT64_MAX - blk_sz) {
+        log_warn("pcie: root domain=%u %s map_end overflow\n",
+                 (unsigned int)domain, label);
+        return false;
+    }
+    uint64_t map_end = last_blk + blk_sz;
+    if (map_start >= map_end || map_end > AARCH64_PT_PA_LIMIT) {
+        log_warn("pcie: root domain=%u %s PA %lx exceeds 1 TiB limit\n",
+                 (unsigned int)domain, label, (unsigned long)map_end);
+        return false;
+    }
+    if (map_start < (uint64_t)AARCH64_BOOT_BLOCK_END &&
+        map_end > (uint64_t)AARCH64_BOOT_BLOCK_BASE) {
+        log_warn("pcie: root domain=%u %s overlaps Boot Block B\n",
+                 (unsigned int)domain, label);
+        return false;
+    }
+
+    for (uint64_t blk_pa = map_start; blk_pa < map_end; blk_pa += blk_sz) {
+        int ov = aarch64_uefi_range_overlaps_ram(
+            mmap_ptr, stride, desc_count, blk_pa, blk_pa + blk_sz);
+        if (ov != 0) {
+            log_warn("pcie: root domain=%u %s blk %lx overlaps RAM or bad map\n",
+                     (unsigned int)domain, label, (unsigned long)blk_pa);
+            return false;
+        }
+        int mrc = aarch64_pt_ensure_device_2m(ttbr1_root, ARCH_PAGE_OFFSET + blk_pa, blk_pa);
+        if (mrc != AARCH64_PT_OK) {
+            log_warn("pcie: root domain=%u %s map_2m failed blk=%lx rc=%d\n",
+                     (unsigned int)domain, label, (unsigned long)blk_pa, mrc);
+            return false;
+        }
+    }
+    return true;
+}
+
 int aarch64_pcie_prepare(const struct boot_context *ctx)
 {
     s_ready_root_count = 0U;
@@ -265,8 +317,6 @@ int aarch64_pcie_prepare(const struct boot_context *ctx)
     }
 
     const void *mmap_ptr = (const void *)(uintptr_t)ctx->memory.entries;
-    const uint64_t blk_sz = (uint64_t)PAGE_2M_SIZE;
-    const uint64_t blk_mask = (uint64_t)PAGE_2M_MASK;
     uint64_t ttbr_raw = aarch64_read_ttbr1();
     uint64_t root_pa = ttbr_raw & AARCH64_TTBR_BASE_MASK;
     uint64_t *ttbr1_root = (uint64_t *)(uintptr_t)(ARCH_PAGE_OFFSET + root_pa);
@@ -292,49 +342,35 @@ int aarch64_pcie_prepare(const struct boot_context *ctx)
             continue;
         }
 
-        uint64_t map_start = r->reg_cpu_base & blk_mask;
-        uint64_t last_blk = (r->reg_cpu_base + active_size - 1ULL) & blk_mask;
-        if (last_blk > UINT64_MAX - blk_sz) {
-            log_warn("pcie: root domain=%u map_end overflow\n", (unsigned int)r->domain);
-            continue;
-        }
-        uint64_t map_end = last_blk + blk_sz;
-        if (map_start >= map_end || map_end > AARCH64_PT_PA_LIMIT) {
-            log_warn("pcie: root domain=%u ECAM PA %lx exceeds 1 TiB limit\n",
-                     (unsigned int)r->domain, (unsigned long)map_end);
-            continue;
-        }
-        if (map_start < (uint64_t)AARCH64_BOOT_BLOCK_END &&
-            map_end > (uint64_t)AARCH64_BOOT_BLOCK_BASE) {
-            log_warn("pcie: root domain=%u overlaps Boot Block B\n", (unsigned int)r->domain);
+        if (!pcie_map_device_window_2m(r->domain, "ECAM", r->reg_cpu_base, active_size,
+                                       mmap_ptr, stride, desc_count, ttbr1_root)) {
             continue;
         }
 
-        bool ok = true;
-        for (uint64_t blk_pa = map_start; blk_pa < map_end; blk_pa += blk_sz) {
-            int ov = aarch64_uefi_range_overlaps_ram(
-                mmap_ptr, stride, desc_count, blk_pa, blk_pa + blk_sz);
-            if (ov != 0) {
-                log_warn("pcie: root domain=%u ECAM blk %lx overlaps RAM or bad map\n",
-                         (unsigned int)r->domain, (unsigned long)blk_pa);
-                ok = false;
+        /* Pre-map bounded MMIO32 BAR windows before VMM gate closes */
+        bool mmio_ok = true;
+        for (uint8_t j = 0U; j < r->range_count; j++) {
+            const struct aarch64_pcie_range *rng = &r->ranges[j];
+            if (rng->space != PCI_SPACE_MMIO32 || rng->size == 0ULL) {
+                continue;
+            }
+            if (rng->size > (1ULL << 30)) {
+                continue;
+            }
+            if (!pcie_map_device_window_2m(r->domain, "MMIO32", rng->cpu_base, rng->size,
+                                           mmap_ptr, stride, desc_count, ttbr1_root)) {
+                mmio_ok = false;
                 break;
             }
-            int mrc = aarch64_pt_ensure_device_2m(ttbr1_root, ARCH_PAGE_OFFSET + blk_pa, blk_pa);
-            if (mrc != AARCH64_PT_OK) {
-                log_warn("pcie: root domain=%u map_2m failed blk=%lx rc=%d\n",
-                         (unsigned int)r->domain, (unsigned long)blk_pa, mrc);
-                ok = false;
-                break;
-            }
+        }
+        if (!mmio_ok) {
+            continue;
         }
 
-        if (ok) {
-            s_ready_roots[s_ready_root_count] = *r;
-            s_pci_roots[s_ready_root_count].domain = r->domain;
-            s_pci_roots[s_ready_root_count].bus = r->bus_start;
-            s_ready_root_count++;
-        }
+        s_ready_roots[s_ready_root_count] = *r;
+        s_pci_roots[s_ready_root_count].domain = r->domain;
+        s_pci_roots[s_ready_root_count].bus = r->bus_start;
+        s_ready_root_count++;
     }
 
     if (s_ready_root_count > 0U) {
@@ -343,6 +379,28 @@ int aarch64_pcie_prepare(const struct boot_context *ctx)
         log_info("pcie: ready %u ECAM root(s)\n", (unsigned int)s_ready_root_count);
     }
     return 0;
+}
+
+int arch_pci_map_mmio_2m(uint64_t phys_addr)
+{
+    uint64_t blk_pa = phys_addr & (uint64_t)PAGE_2M_MASK;
+    for (uint32_t i = 0U; i < s_ready_root_count; i++) {
+        const struct aarch64_pcie_root_desc *r = &s_ready_roots[i];
+        for (uint8_t j = 0U; j < r->range_count; j++) {
+            const struct aarch64_pcie_range *rng = &r->ranges[j];
+            if (rng->space != PCI_SPACE_MMIO32 || rng->size == 0ULL ||
+                rng->size > (1ULL << 30)) {
+                continue;
+            }
+            uint64_t r_start = rng->cpu_base & (uint64_t)PAGE_2M_MASK;
+            uint64_t r_end = ((rng->cpu_base + rng->size - 1ULL) & (uint64_t)PAGE_2M_MASK)
+                           + (uint64_t)PAGE_2M_SIZE;
+            if (blk_pa >= r_start && blk_pa < r_end) {
+                return 0;
+            }
+        }
+    }
+    return -ENODEV;
 }
 
 const struct pci_backend *arch_pci_backend(void)
