@@ -406,9 +406,14 @@ EOF
              # The probe-selection macro must cross the CONTROLLED
              # sub-make boundary (KERNEL_EXTRA_CFLAGS is an
              # OS01_SUBMAKE_ALLOWED channel) into the kernel sub-make.
-             echo "$dry_intr" | grep -qF "KERNEL_EXTRA_CFLAGS=-DX86_INTR_FAULT_TEST_BP=1" \
+             # The boundary shell-quotes every whitelisted override
+             # (commit 11d41818), so the assignment is printed as
+             # KERNEL_EXTRA_CFLAGS=-D... or KERNEL_EXTRA_CFLAGS="-D...";
+             # what the contract requires is that the NAME and its VALUE
+             # arrive together, so the quotes are optional here.
+             echo "$dry_intr" | grep -qE 'KERNEL_EXTRA_CFLAGS="?-DX86_INTR_FAULT_TEST_BP=1"?' \
                || { echo "targets: the probe macro did not cross the controlled sub-make boundary" >&2; exit 1; }
-             echo "$dry_intr" | grep -qF "KERNEL_EXTRA_CFLAGS=-DX86_INTR_FAULT_TEST_NMI=1" \
+             echo "$dry_intr" | grep -qE 'KERNEL_EXTRA_CFLAGS="?-DX86_INTR_FAULT_TEST_NMI=1"?' \
                || { echo "targets: the NMI probe macro did not cross the controlled sub-make boundary" >&2; exit 1; }
              # Each case must own its image dir; the normal build must
              # stay on the normal image.
