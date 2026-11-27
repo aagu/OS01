@@ -72,6 +72,29 @@ int main(int argc, char **argv)
         free_pages(Phy_to_2M_Page(allocated[i]->phy_address), 1);
     }
     CHECK(PMMngr.zones_struct[0].page_free_count == 32 - metadata_frames - 8);
+
+    /* Range-bounded 2 MiB & 4 KiB allocations */
+    uint64_t win_min = ram_base + (metadata_frames + 10) * PAGE_2M_SIZE;
+    uint64_t win_lim = ram_base + (metadata_frames + 14) * PAGE_2M_SIZE;
+    struct Page *rp1 = alloc_pages_in_range(ZONE_NORMAL, 2, 0, win_min, win_lim);
+    CHECK(rp1 != NULL);
+    CHECK(rp1->phy_address >= win_min);
+    CHECK(rp1->phy_address + 2 * PAGE_2M_SIZE <= win_lim);
+    struct Page *rp2 = alloc_pages_in_range(ZONE_NORMAL, 2, 0, win_min, win_lim);
+    CHECK(rp2 != NULL);
+    CHECK(rp2->phy_address >= win_min);
+    CHECK(rp2->phy_address + 2 * PAGE_2M_SIZE <= win_lim);
+    /* Window exhausted */
+    CHECK(alloc_pages_in_range(ZONE_NORMAL, 1, 0, win_min, win_lim) == NULL);
+    /* Empty window */
+    CHECK(alloc_pages_in_range(ZONE_NORMAL, 1, 0, win_min, win_min) == NULL);
+    CHECK(alloc_4k_page_in_range(win_min, win_min) == 0);
+    /* Free one 2 MiB frame, keep rp1 retained, verify 4 KiB allocates inside [win_min, win_lim) */
+    free_pages(rp2, 2);
+    uint64_t p4k = alloc_4k_page_in_range(win_min, win_lim);
+    CHECK(p4k >= win_min && p4k + PAGE_4K_SIZE <= win_lim);
+    free_4k_page(p4k);
+
     free(ram);
     printf("PMM boot/slab reservation passed, RAM base=%#lx, metadata frames=%u\n", ram_base, metadata_frames);
     return 0;

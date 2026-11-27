@@ -5047,6 +5047,31 @@
    }
   },
   {
+   "id": "drivers.usb.aarch64.rp1",
+   "owner": "host_unit",
+   "component": "drivers",
+   "behavior": "rp1_xhci_handoff",
+   "trigger": "host runner invokes test_aarch64_rp1_xhci.elf",
+   "assertions": [
+    "RP1 DTB parser extracts BCM2712 RC and enabled snps,dwc3 host slots while rejecting disabled, duplicate, bad PCI cell, and wrong-RC nodes",
+    "WoR RC/RP1 decoder computes BAR1 CPU window and DMA aperture with outbound exclusion, skips indirect cfg when link down, and restores selector"
+   ],
+   "failure_modes": [
+    "RP1 DTB or WoR BAR1/inbound/outbound decoding mismatch or selector leak"
+   ],
+   "primary": {
+    "layer": "host",
+    "source": "hosttests/cases/test_aarch64_rp1_xhci.c",
+    "selector": "test_aarch64_rp1_xhci",
+    "evidence": "host test exit 0"
+   },
+   "supporting": [],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary host unit test verifying RPi5 RP1 xHCI DT discovery and WoR PCIe resource decoding"
+   }
+  },
+  {
    "id": "drivers.usb.hid.input",
    "owner": "qemu_e2e",
    "component": "drivers",

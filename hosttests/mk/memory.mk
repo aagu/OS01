@@ -1206,12 +1206,17 @@ $(TEST_BLD)/aarch64_pcie_production.o: \
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) -DAARCH64_PCIE_HOST_TEST=1 -c $< -o $@
 
+$(TEST_BLD)/boot_mmio_production.o: $(TESTS_DIR)/kernel/arch/aarch64/memory/boot_mmio.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(AARCH64_PT_SW_HOST_CFLAGS) -DAARCH64_PCIE_HOST_TEST=1 -c $< -o $@
+
 LINK_CFLAGS_aarch64-pcie-ecam = $(HOST_CFLAGS) -DOS01_SELFTEST=1 \
 	-I$(TEST_MOCK)/page_table_aarch64_include \
 	$(KERNEL_INC) -idirafter $(TESTS_DIR)/libc/include \
 	-DAARCH64_PCIE_HOST_TEST=1 $(FRAMEWORK_INC)
 LINK_GROUP_aarch64-pcie-ecam := \
 	$(TEST_BLD)/aarch64_pcie_production.o \
+	$(TEST_BLD)/boot_mmio_production.o \
 	$(TEST_BLD)/aarch64_pt_production.o \
 	$(TEST_BLD)/vmm_gate_production.o \
 	$(TEST_BLD)/vmm_gate_test_stubs.o \

@@ -1372,6 +1372,19 @@
       }
     },
     {
+      "id": "test_aarch64_rp1_xhci",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [
+        "drivers.usb.aarch64.rp1"
+      ],
+      "link": "rp1-xhci",
+      "source": "hosttests/cases/test_aarch64_rp1_xhci.c"
+    },
+    {
       "kind": "host_test",
       "id": "test_aarch64_sched_charge",
       "layer": "host",

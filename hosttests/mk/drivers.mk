@@ -603,7 +603,6 @@ LINK_CFLAGS_xhci-dma = $(XHCI_HOST_CFLAGS)
 LINK_GROUP_xhci-dma := \
     $(TEST_BLD)/xhci_dma_production.o \
     $(TEST_BLD)/xhci_production.o \
-    $(TEST_BLD)/xhci_dma_production.o \
     $(TEST_BLD)/xhci_pci_production.o \
     $(TEST_BLD)/xhci_hub_production.o \
     $(TEST_BLD)/xhci_hid_desc_production.o \
@@ -611,7 +610,20 @@ LINK_GROUP_xhci-dma := \
     $(TEST_BLD)/device_core_production.o \
     $(TEST_BLD)/pci_core_production.o \
     $(TEST_BLD)/pci_match_production.o \
-    $(TEST_BLD)/pci_platform_production.o \
+    $(TEST_BLD)/pci_platform_production.o
+
+$(TEST_BLD)/dtb_parse_rp1_production.o: $(TESTS_DIR)/kernel/arch/aarch64/platform/dtb_parse_rp1.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/rp1_pcie_production.o: $(TESTS_DIR)/kernel/arch/aarch64/bus/rp1_pcie.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
+
+LINK_CFLAGS_rp1-xhci = $(XHCI_HOST_CFLAGS)
+LINK_GROUP_rp1-xhci := \
+    $(TEST_BLD)/dtb_parse_rp1_production.o \
+    $(TEST_BLD)/rp1_pcie_production.o \
     $(LIBC_OBJS)
 
 

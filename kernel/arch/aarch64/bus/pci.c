@@ -2,6 +2,7 @@
 #include <arch/pci.h>
 #include <bus/pci/pci.h>
 #include <arch/aarch64/pcie.h>
+#include <arch/aarch64/boot_mmio.h>
 #include <arch/aarch64/page_table.h>
 #include <arch/aarch64/boot_direct_map.h>
 #include <arch/aarch64/uefi_memory_map.h>
@@ -299,59 +300,19 @@ static struct pci_backend s_aarch64_pci_backend = {
 
 static bool pcie_map_device_window_2m(uint16_t domain, const char *label,
                                       uint64_t base_pa, uint64_t size,
-                                      const void *mmap_ptr, uint32_t stride,
-                                      uint32_t desc_count, uint64_t *ttbr1_root)
+                                      const struct aarch64_boot_mmio_ctx *mmio_ctx)
 {
-    const uint64_t blk_sz = (uint64_t)PAGE_2M_SIZE;
-    const uint64_t blk_mask = (uint64_t)PAGE_2M_MASK;
-
-    if (size == 0ULL || base_pa > UINT64_MAX - size) {
-        log_warn("pcie: root domain=%u %s size overflow\n",
-                 (unsigned int)domain, label);
+    int rc = aarch64_boot_mmio_map(mmio_ctx, base_pa, size);
+    if (rc != 0) {
+        log_warn("pcie: root domain=%u %s map failed (%d)\n",
+                 (unsigned int)domain, label, rc);
         return false;
-    }
-
-    uint64_t map_start = base_pa & blk_mask;
-    uint64_t last_blk = (base_pa + size - 1ULL) & blk_mask;
-    if (last_blk > UINT64_MAX - blk_sz) {
-        log_warn("pcie: root domain=%u %s map_end overflow\n",
-                 (unsigned int)domain, label);
-        return false;
-    }
-    uint64_t map_end = last_blk + blk_sz;
-    if (map_start >= map_end || map_end > AARCH64_PT_PA_LIMIT) {
-        log_warn("pcie: root domain=%u %s PA %lx exceeds 1 TiB limit\n",
-                 (unsigned int)domain, label, (unsigned long)map_end);
-        return false;
-    }
-    if (map_start < (uint64_t)AARCH64_BOOT_BLOCK_END &&
-        map_end > (uint64_t)AARCH64_BOOT_BLOCK_BASE) {
-        log_warn("pcie: root domain=%u %s overlaps Boot Block B\n",
-                 (unsigned int)domain, label);
-        return false;
-    }
-
-    for (uint64_t blk_pa = map_start; blk_pa < map_end; blk_pa += blk_sz) {
-        int ov = aarch64_uefi_range_overlaps_ram(
-            mmap_ptr, stride, desc_count, blk_pa, blk_pa + blk_sz);
-        if (ov != 0) {
-            log_warn("pcie: root domain=%u %s blk %lx overlaps RAM or bad map\n",
-                     (unsigned int)domain, label, (unsigned long)blk_pa);
-            return false;
-        }
-        int mrc = aarch64_pt_ensure_device_2m(ttbr1_root, ARCH_PAGE_OFFSET + blk_pa, blk_pa);
-        if (mrc != AARCH64_PT_OK) {
-            log_warn("pcie: root domain=%u %s map_2m failed blk=%lx rc=%d\n",
-                     (unsigned int)domain, label, (unsigned long)blk_pa, mrc);
-            return false;
-        }
     }
     return true;
 }
 
 static void pcie_prepare_xhci_bar0(const struct aarch64_pcie_root_desc *ready,
-                                   const void *mmap_ptr, uint32_t stride,
-                                   uint32_t desc_count, uint64_t *ttbr1_root)
+                                   const struct aarch64_boot_mmio_ctx *mmio_ctx)
 {
     uint8_t bus = ready->bus_start;
     for (uint8_t slot = 0U; slot < 32U; slot++) {
@@ -413,8 +374,7 @@ static void pcie_prepare_xhci_bar0(const struct aarch64_pcie_root_desc *ready,
             }
 
             if (!pcie_map_device_window_2m(ready->domain, "xHCI-BAR0", cpu_pa,
-                                           AARCH64_XHCI_BAR0_SIZE, mmap_ptr, stride,
-                                           desc_count, ttbr1_root)) {
+                                           AARCH64_XHCI_BAR0_SIZE, mmio_ctx)) {
                 continue;
             }
 
@@ -512,40 +472,11 @@ int aarch64_pcie_prepare(const struct boot_context *ctx)
         return 0;
     }
 
-    /* Validate UEFI raw memory map pointer & M0 bounds before dereferencing. */
-    if (!boot_context_valid(ctx) ||
-        (ctx->flags & BOOT_CONTEXT_HAS_MEMORY_MAP) == 0u ||
-        ctx->memory.format != BOOT_MEMORY_FORMAT_UEFI_RAW ||
-        ctx->memory.entries == 0u ||
-        ctx->memory.entry_size < AARCH64_UEFI_MEM_DESC_MIN_SIZE ||
-        ctx->memory.entry_count == 0u) {
+    struct aarch64_boot_mmio_ctx mmio_ctx;
+    if (aarch64_boot_mmio_ctx_init(ctx, &mmio_ctx) != 0) {
         log_warn("pcie: invalid UEFI memory map in boot_context, disabling PCIe\n");
         return 0;
     }
-
-    uint32_t stride = ctx->memory.entry_size;
-    uint32_t desc_count = ctx->memory.entry_count;
-    if ((uint64_t)desc_count > UINT64_MAX / stride) {
-        log_warn("pcie: UEFI memory map size overflow, disabling PCIe\n");
-        return 0;
-    }
-    uint64_t map_bytes = (uint64_t)desc_count * stride;
-    if (ctx->memory.entries > UINT64_MAX - map_bytes) {
-        log_warn("pcie: UEFI memory map end overflow, disabling PCIe\n");
-        return 0;
-    }
-    uint64_t uefi_map_end = ctx->memory.entries + map_bytes;
-    if (uefi_map_end > (uint64_t)AARCH64_BOOT_MAP_END ||
-        (ctx->memory.entries < (uint64_t)AARCH64_BOOT_BLOCK_END &&
-         uefi_map_end > (uint64_t)AARCH64_BOOT_BLOCK_BASE)) {
-        log_warn("pcie: UEFI memory map outside safe M0 window, disabling PCIe\n");
-        return 0;
-    }
-
-    const void *mmap_ptr = (const void *)(uintptr_t)ctx->memory.entries;
-    uint64_t ttbr_raw = aarch64_read_ttbr1();
-    uint64_t root_pa = ttbr_raw & AARCH64_TTBR_BASE_MASK;
-    uint64_t *ttbr1_root = (uint64_t *)(uintptr_t)(ARCH_PAGE_OFFSET + root_pa);
 
     uint32_t limit = topo->root_count;
     if (limit > AARCH64_PCIE_MAX_ROOTS) {
@@ -569,7 +500,7 @@ int aarch64_pcie_prepare(const struct boot_context *ctx)
         }
 
         if (!pcie_map_device_window_2m(r->domain, "ECAM", r->reg_cpu_base, active_size,
-                                       mmap_ptr, stride, desc_count, ttbr1_root)) {
+                                       &mmio_ctx)) {
             continue;
         }
 
@@ -589,7 +520,7 @@ int aarch64_pcie_prepare(const struct boot_context *ctx)
                 continue;
             }
             if (pcie_map_device_window_2m(ready.domain, "MMIO32", rng->cpu_base, rng->size,
-                                          mmap_ptr, stride, desc_count, ttbr1_root)) {
+                                          &mmio_ctx)) {
                 rng->mapped = true;
             }
         }
@@ -598,7 +529,7 @@ int aarch64_pcie_prepare(const struct boot_context *ctx)
         s_pci_roots[s_ready_root_count].domain = ready.domain;
         s_pci_roots[s_ready_root_count].bus = ready.bus_start;
         s_ready_root_count++;
-        pcie_prepare_xhci_bar0(&ready, mmap_ptr, stride, desc_count, ttbr1_root);
+        pcie_prepare_xhci_bar0(&ready, &mmio_ctx);
     }
 
     if (s_ready_root_count > 0U) {
@@ -608,8 +539,7 @@ int aarch64_pcie_prepare(const struct boot_context *ctx)
 
         if (topo->v2m.valid && topo->v2m.reg_cpu_base <= 0xFFFFFFFFULL - GICV2M_MSI_SETSPI_NS) {
             if (pcie_map_device_window_2m(0U, "GICv2m", topo->v2m.reg_cpu_base,
-                                           topo->v2m.reg_size, mmap_ptr, stride,
-                                           desc_count, ttbr1_root)) {
+                                           topo->v2m.reg_size, &mmio_ctx)) {
                 aarch64_pcie_dsb_sy_isb();
                 uint32_t typer = aarch64_pcie_mmio_read32(
                     (uintptr_t)(ARCH_PAGE_OFFSET + topo->v2m.reg_cpu_base + GICV2M_MSI_TYPER));

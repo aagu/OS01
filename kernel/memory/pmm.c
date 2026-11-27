@@ -286,11 +286,12 @@ void pmm_init(const struct boot_context *ctx)
     zone_select: zone select from DMA, Mapped in Pagetable, Unmapped in Pagetable
     page_flags: struct Page flags
 */
-struct Page * alloc_pages(int32_t zone_select, uint64_t number, uint64_t page_flags __attribute__((unused)))
+static struct Page * alloc_pages_bounded(int32_t zone_select, uint64_t number,
+                                         uint64_t min_pa, uint64_t limit_pa)
 {
-    if (number > 64)
+    if (number == 0 || number > 64 || min_pa >= limit_pa)
     {
-        log_err("alloc_pages() ERROR: number is invalid\n");
+        log_err("alloc_pages() ERROR: number or range is invalid\n");
         return NULL;
     }
 
@@ -321,9 +322,9 @@ struct Page * alloc_pages(int32_t zone_select, uint64_t number, uint64_t page_fl
         log_err("alloc_pages() ERROR: zone_select index is invalid\n");
         spin_unlock_irqrestore(&pmm_lock, flags);
         return NULL;
-        break;
     }
 
+    uint64_t span_bytes = number * PAGE_2M_SIZE;
     int32_t i;
     for (i = zone_start; i <= zone_end; i++)
     {
@@ -335,10 +336,9 @@ struct Page * alloc_pages(int32_t zone_select, uint64_t number, uint64_t page_fl
         if ((PMMngr.zones_struct + i)->page_free_count < number)
             continue;
         z = PMMngr.zones_struct + i;
-        /* bits_map is indexed RAM-relative (rel_idx = (PA - lowest_ram) /
-         * 2 MiB). zone_start_address is the absolute PA, so convert via
-         * the zone's pages_group pointer (which already points to the
-         * first Page struct for this zone). */
+        if (z->zone_end_address <= min_pa || z->zone_start_address >= limit_pa)
+            continue;
+
         start = (uint64_t)(z->pages_group - PMMngr.pages_struct);
         end = start + (z->zone_end_address >> PAGE_2M_SHIFT)
                     - (z->zone_start_address >> PAGE_2M_SHIFT);
@@ -357,18 +357,19 @@ struct Page * alloc_pages(int32_t zone_select, uint64_t number, uint64_t page_fl
             {
                 if (!((k ? ((*p >> k) | (*(p + 1) << (64 - k))) : *p) & (num)))
                 {
+                    uint64_t cand = j + k - shift;
+                    if (cand + number > end)
+                        continue;
+                    uint64_t first_pa = (PMMngr.pages_struct + cand)->phy_address;
+                    if (first_pa < min_pa || first_pa >= limit_pa ||
+                        span_bytes > limit_pa - first_pa)
+                        continue;
+
                     uint32_t l;
-                    page = j + k - shift;
+                    page = cand;
                     for (l = 0; l < number; l++)
                     {
                         struct Page * pageptr = PMMngr.pages_struct + page + l;
-
-                        /* bits_map is RAM-relative (pmm_init Step 4
-                         * indexes it via (PA - lowest_ram) >> 21), so
-                         * alloc/free must use the same index.
-                         * pages_struct is densely packed in RAM-
-                         * relative order, so (pageptr - pages_struct)
-                         * is the right index. */
                         uint64_t rel_idx = (uint64_t)(pageptr - PMMngr.pages_struct);
                         *(PMMngr.bits_map + (rel_idx >> 6)) |= 1UL << (rel_idx % 64);
                         z->page_using_count++;
@@ -388,6 +389,18 @@ struct Page * alloc_pages(int32_t zone_select, uint64_t number, uint64_t page_fl
 find_free_pages:
     spin_unlock_irqrestore(&pmm_lock, flags);
     return (struct Page *)(PMMngr.pages_struct + page);
+}
+
+struct Page * alloc_pages(int32_t zone_select, uint64_t number, uint64_t page_flags __attribute__((unused)))
+{
+    return alloc_pages_bounded(zone_select, number, 0ULL, UINT64_MAX);
+}
+
+struct Page * alloc_pages_in_range(int32_t zone_select, uint64_t number,
+                                   uint64_t page_flags __attribute__((unused)),
+                                   uint64_t min_pa, uint64_t limit_pa)
+{
+    return alloc_pages_bounded(zone_select, number, min_pa, limit_pa);
 }
 
 /*
@@ -651,36 +664,43 @@ uint64_t pmm_probe_4k_allocated_count(void)
 }
 #endif
 
-uint64_t alloc_4k_page(void)
+uint64_t alloc_4k_page_in_range(uint64_t min_pa, uint64_t limit_pa)
 {
-    // subpage_pools is initialized in pmm_init() — no lazy init needed.
+    if (min_pa >= limit_pa)
+        return 0;
 
     uint64_t flags = spin_lock_irqsave(&subpage_lock);
 
-    // Search existing pools
     list_t *pos = subpage_pools.next;
     while (pos != &subpage_pools) {
         struct subpage_pool *pool =
             container_of(pos, struct subpage_pool, list);
-        if (pool->alloc_count < SUBPAGE_4K_COUNT) {
+        if (pool->alloc_count < SUBPAGE_4K_COUNT &&
+            pool->base_phys + PAGE_2M_SIZE > min_pa &&
+            pool->base_phys < limit_pa) {
             for (int i = 0; i < (int)(SUBPAGE_4K_COUNT / 64); i++) {
                 if (pool->bitmap[i] == (uint64_t)-1) continue;
-                int bit = __builtin_ctzll(~pool->bitmap[i]);
-                pool->bitmap[i] |= (1ULL << bit);
-                pool->alloc_count++;
-                int slot = i * 64 + bit;
-                pool->cow_count[slot] = 0;   // fresh page, no COW references
-                uint64_t phys = pool->base_phys
-                              + (uint64_t)slot * PAGE_4K_SIZE;
-                spin_unlock_irqrestore(&subpage_lock, flags);
-                return phys;
+                uint64_t free_mask = ~pool->bitmap[i];
+                while (free_mask) {
+                    int bit = __builtin_ctzll(free_mask);
+                    int slot = i * 64 + bit;
+                    uint64_t phys = pool->base_phys + (uint64_t)slot * PAGE_4K_SIZE;
+                    if (phys >= min_pa && phys < limit_pa &&
+                        PAGE_4K_SIZE <= limit_pa - phys) {
+                        pool->bitmap[i] |= (1ULL << bit);
+                        pool->alloc_count++;
+                        pool->cow_count[slot] = 0;
+                        spin_unlock_irqrestore(&subpage_lock, flags);
+                        return phys;
+                    }
+                    free_mask &= ~(1ULL << bit);
+                }
             }
         }
         pos = pos->next;
     }
 
-    // No free slot — allocate a new 2MB pool
-    struct Page *pg = alloc_pages(ZONE_NORMAL, 1, 0);
+    struct Page *pg = alloc_pages_in_range(ZONE_NORMAL, 1, 0, min_pa, limit_pa);
     if (!pg) {
         spin_unlock_irqrestore(&subpage_lock, flags);
         return 0;
@@ -692,19 +712,22 @@ uint64_t alloc_4k_page(void)
     memset(pool->bitmap, 0, sizeof(pool->bitmap));
     pool->alloc_count = 0;
 
-    // Slot 0: used by subpage_pool struct itself
     pool->bitmap[0] |= 1;
     pool->alloc_count = 1;
     list_add_to_behind(&subpage_pools, &pool->list);
 
-    // Return slot 1 as the first free slot
     pool->bitmap[0] |= (1ULL << 1);
     pool->alloc_count++;
-    pool->cow_count[1] = 0;             // fresh slot 1, no COW references
+    pool->cow_count[1] = 0;
 
     uint64_t phys = pool->base_phys + PAGE_4K_SIZE;
     spin_unlock_irqrestore(&subpage_lock, flags);
     return phys;
+}
+
+uint64_t alloc_4k_page(void)
+{
+    return alloc_4k_page_in_range(0ULL, UINT64_MAX);
 }
 
 void free_4k_page(uint64_t phys)

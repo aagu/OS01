@@ -86,11 +86,14 @@ struct Zone
 
 uint64_t page_init(struct Page * page, uint64_t flags);
 struct Page * alloc_pages(int32_t zone_select, uint64_t number, uint64_t page_flags);
+struct Page * alloc_pages_in_range(int32_t zone_select, uint64_t number, uint64_t page_flags,
+                                   uint64_t min_pa, uint64_t limit_pa);
 void free_pages(struct Page * page,int32_t number);
 uint64_t page_clean(struct Page * page);
 
 // 4KB subpage allocator — 2MB pool split into 512 4KB slots with bitmap
 uint64_t alloc_4k_page(void);
+uint64_t alloc_4k_page_in_range(uint64_t min_pa, uint64_t limit_pa);
 void     free_4k_page(uint64_t phys);
 
 // COW refcount helpers — acquire subpage_lock internally
