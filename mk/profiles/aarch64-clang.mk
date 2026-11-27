@@ -23,10 +23,14 @@ OS01_ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/../..)
 # setting the variable, not by setting it empty).
 ifneq ($(origin AARCH64_BOOT_BLOCK_BASE),undefined)
 ifeq ($(strip $(AARCH64_BOOT_BLOCK_BASE)),)
-$(error AARCH64_BOOT_BLOCK_BASE is explicitly empty; unset it for the 0x40000000 default or give a decimal/0x hex base)
+$(error AARCH64_BOOT_BLOCK_BASE is explicitly empty; unset it for the default or give a decimal/0x hex base)
 endif
 else
+ifeq ($(strip $(AARCH64_PLATFORM)),dragon-q8b)
+AARCH64_BOOT_BLOCK_BASE := 0xA0000000
+else
 AARCH64_BOOT_BLOCK_BASE := 0x40000000
+endif
 endif
 
 # Value validation. The probe runs in bash so 0x literals are evaluated
@@ -45,7 +49,11 @@ endif
 # POSIX single-quote escaping: close the quote, emit an escaped quote,
 # reopen — so the value stays exactly one shell word.
 AARCH64_BOOT_BLOCK_BASE_SH := $(subst ','\'',$(AARCH64_BOOT_BLOCK_BASE))
+ifeq ($(strip $(AARCH64_PLATFORM)),dragon-q8b)
+AARCH64_BOOT_BLOCK_BASE_CHECK := $(shell bash -c 'v="$$1"; if ! [[ "$$v" =~ ^(0x[0-9a-fA-F]+|[0-9]+)$$ ]]; then echo "must be a single decimal or 0x hex integer"; exit 0; fi; n=$$(("$$1")); if (( n < 0x80000000 )); then echo "outside the dragon-q8b M0 map [0x80000000..0xC0000000]"; elif (( n % 0x200000 != 0 )); then echo "not 2 MiB aligned"; elif (( n + 0x200000 > 0xC0000000 )); then echo "outside the dragon-q8b M0 map [0x80000000..0xC0000000]"; elif (( 0xC0000000 - n - 0x200000 < 0x01400000 )); then echo "no room for the minimum 20 MiB early-arena window"; else echo OK; fi' _ '$(AARCH64_BOOT_BLOCK_BASE_SH)' 2>/dev/null)
+else
 AARCH64_BOOT_BLOCK_BASE_CHECK := $(shell bash -c 'v="$$1"; if ! [[ "$$v" =~ ^(0x[0-9a-fA-F]+|[0-9]+)$$ ]]; then echo "must be a single decimal or 0x hex integer"; exit 0; fi; n=$$(("$$1")); if (( n < 0 )); then echo "outside the M0 map [0..0x80000000]"; elif (( n % 0x200000 != 0 )); then echo "not 2 MiB aligned"; elif (( n < 0x0a000000 && n + 0x200000 > 0x08000000 )); then echo "overlaps the boot device window D [0x08000000..0x0a000000]"; elif (( n + 0x200000 > 0x80000000 )); then echo "outside the M0 map [0..0x80000000]"; elif (( 0x80000000 - n - 0x200000 < 0x01400000 )); then echo "no room for the minimum 20 MiB early-arena window"; else echo OK; fi' _ '$(AARCH64_BOOT_BLOCK_BASE_SH)' 2>/dev/null)
+endif
 ifneq ($(strip $(AARCH64_BOOT_BLOCK_BASE_CHECK)),OK)
 $(error invalid AARCH64_BOOT_BLOCK_BASE='$(AARCH64_BOOT_BLOCK_BASE)': $(AARCH64_BOOT_BLOCK_BASE_CHECK))
 endif

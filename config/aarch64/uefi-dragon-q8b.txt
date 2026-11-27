@@ -1,0 +1,2 @@
+platform dragon-q8b
+console acpi

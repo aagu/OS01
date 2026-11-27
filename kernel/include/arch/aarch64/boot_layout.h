@@ -38,7 +38,15 @@
 #define AARCH64_BOOT_BLOCK_SIZE   0x200000
 #define AARCH64_BOOT_DEVICE_BASE  0x08000000
 #define AARCH64_BOOT_DEVICE_END   0x0a000000
+#ifndef AARCH64_BOOT_MAP_END
+#if AARCH64_BOOT_BLOCK_BASE >= 0x80000000
+#define AARCH64_BOOT_MAP_END      0xC0000000
+#else
 #define AARCH64_BOOT_MAP_END      0x80000000
+#endif
+#endif
+#define AARCH64_BOOT_MAP_L2_COUNT (AARCH64_BOOT_MAP_END >> 30)
+#define AARCH64_BOOT_PT_COUNT     (2 + AARCH64_BOOT_MAP_L2_COUNT + 2)
 #ifndef AARCH64_BOOT_HIGH_END
 /* How far above the identity map the boot tables still reach: the one
  * 512 GiB span their single L0 entry covers. A Device window or a console

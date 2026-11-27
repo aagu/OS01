@@ -5,7 +5,7 @@
 .balign 0x1000
 .globl boot_page_tables
 boot_page_tables:
-    .skip   0x6000                            /* four tables + two reserved pages */
+    .skip   (AARCH64_BOOT_PT_COUNT * 0x1000)  /* L0 + L1 + low L2s + 2 reserved pages */
 .globl boot_page_tables_end
 boot_page_tables_end:
 
@@ -261,13 +261,13 @@ _start:
     cmp     x20, x4
     b.lo    7f
     ldr     x0, =boot_page_tables
-    mov     x1, #5                          /* reserved L2 table: high Device window */
+    mov     x1, #(3 + AARCH64_BOOT_MAP_L2_COUNT) /* reserved L2 table: high Device window */
     mov     x2, x20
     mov     x3, x22
     bl      aarch64_build_boot_window
 7:  cbz     x23, 8f
     ldr     x0, =boot_page_tables
-    mov     x1, #4                          /* reserved L2 table: console block */
+    mov     x1, #(2 + AARCH64_BOOT_MAP_L2_COUNT) /* reserved L2 table: console block */
     mov     x2, x23
     add     x3, x23, #0x200000
     bl      aarch64_build_boot_window

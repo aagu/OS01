@@ -23,7 +23,7 @@ bool aarch64_boot_validate_handoff(const struct boot_context *ctx)
 #define BOOT_INNER_SHAREABLE (UINT64_C(3) << 8)
 
 __attribute__((section(".boot.text.early_mmu")))
-void aarch64_build_boot_page_tables(uint64_t tables[6][512], uint64_t boot_base,
+void aarch64_build_boot_page_tables(uint64_t tables[AARCH64_BOOT_PT_COUNT][512], uint64_t boot_base,
                                     uint64_t device_base, uint64_t device_end)
 {
     const uint64_t table_flags = AARCH64_PT_DESC_VALID | AARCH64_PT_DESC_TABLE;
@@ -31,11 +31,11 @@ void aarch64_build_boot_page_tables(uint64_t tables[6][512], uint64_t boot_base,
                                  AARCH64_PT_DESC_UXN;
 
     tables[0][0] = (uintptr_t)tables[1] | table_flags;
-    tables[1][0] = (uintptr_t)tables[2] | table_flags;
-    tables[1][1] = (uintptr_t)tables[3] | table_flags;
+    for (unsigned l1 = 0; l1 < AARCH64_BOOT_MAP_L2_COUNT; ++l1)
+        tables[1][l1] = (uintptr_t)tables[2 + l1] | table_flags;
 
     uint64_t pa = 0;
-    for (unsigned table = 2; table < 4; ++table) {
+    for (unsigned table = 2; table < 2 + AARCH64_BOOT_MAP_L2_COUNT; ++table) {
         for (unsigned slot = 0; slot < 512; ++slot, pa += AARCH64_BOOT_BLOCK_SIZE) {
             uint64_t attrs = pa >= device_base && pa < device_end
                 ? AARCH64_PT_ATTR_DEVICE
@@ -55,7 +55,7 @@ void aarch64_build_boot_page_tables(uint64_t tables[6][512], uint64_t boot_base,
 #define BOOT_TABLE_PA_MASK UINT64_C(0x0000ffffffff000)
 
 __attribute__((section(".boot.text.early_mmu")))
-void aarch64_build_boot_window(uint64_t tables[6][512], unsigned table,
+void aarch64_build_boot_window(uint64_t tables[AARCH64_BOOT_PT_COUNT][512], unsigned table,
                                uint64_t base, uint64_t end)
 {
     const uint64_t table_flags = AARCH64_PT_DESC_VALID | AARCH64_PT_DESC_TABLE;
