@@ -864,6 +864,7 @@ make PROFILE=aarch64-clang test-aarch64 MODE=sched-ap  # AP 协作调度验收�
 make PROFILE=aarch64-clang test-aarch64 MODE=sched-ap AP_SCHED_CASE=fatal-owner  # fatal 单 owner 故障 boot
 make PROFILE=aarch64-clang test-aarch64 MODE=sched-tick  # 每核 tick 记账验收（1/2/4/8 核各两次）
 make PROFILE=aarch64-clang test-aarch64 MODE=exception-trace  # AArch64 异常回溯与帧读取修复验收（read/bad-fp/task，可设 EXCEPTION_TRACE_CASE=<case>）
+make PROFILE=aarch64-clang test-aarch64-usb-boot  # AArch64 QEMU PCI xHCI USB Mass Storage 引导验收（usb-only/dual/wrong-esp-type，可设 AARCH64_USB_BOOT_CASE=<case>）
 make test-contract                  # CI 契约检查
 make test-harness                   # Python unittest 框架回归（TEST_HARNESS_MODULES 列表；不启动 QEMU）
 make test-doctor                    # 环境体检：比对本地 clang/ld.lld/qemu 与 ci/Dockerfile 钉值

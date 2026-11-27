@@ -5016,6 +5016,37 @@
    }
   },
   {
+   "id": "drivers.usb.aarch64.boot",
+   "owner": "qemu_e2e",
+   "component": "drivers",
+   "behavior": "aarch64_usb_boot",
+   "trigger": "QEMU aarch64 virt boots USB-only, USB+virtio dual-disk, and wrong-ESP-type negative cases via qemu-xhci + usb-storage",
+   "assertions": [
+    "UEFI ESP GUID handoff tokens match expected GUID; usb-only and dual mount USB root/ESP markers via BOT and 512-byte usb_msc usba",
+    "wrong-esp-type publishes usba and fails closed with GUID mismatch rc=-2 without reaching shell"
+   ],
+   "failure_modes": [
+    "GUID mismatch/garbled handoff, missing usba publication, missing markers or second prompt, late fatal/panic, or negative case reaching shell"
+   ],
+   "primary": {
+    "layer": "qemu_e2e",
+    "source": "qemutests/aarch64_usb_boot.py",
+    "selector": "test-aarch64-usb-boot",
+    "evidence": "runner exit 0 plus archived metadata.json and serial.log"
+   },
+   "supporting": [
+    {
+     "layer": "harness",
+     "source": "qemutests/test_aarch64_usb_boot.py",
+     "selector": "test_aarch64_usb_boot"
+    }
+   ],
+   "overlap_decision": {
+    "action": "unique",
+    "reason": "Primary QEMU E2E suite verifying aarch64 PCI xHCI USB MSC boot and media identity"
+   }
+  },
+  {
    "id": "drivers.usb.hid.input",
    "owner": "qemu_e2e",
    "component": "drivers",

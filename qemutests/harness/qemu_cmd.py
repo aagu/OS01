@@ -154,18 +154,42 @@ def build_qemu_aarch64(
     memory: int | str = "512",
     qemu: str = "qemu-system-aarch64",
     extra: Sequence[str] = (),
+    storage: str = "virtio",
+    decoy_image: str | None = None,
 ) -> list[str]:
     """Build an aarch64 QEMU argv list with the paired virtio-rng device."""
     machine = "virt,gic-version=2" + (",acpi=off" if dtb else "")
+    if storage == "virtio":
+        pflash_arg = f"if=pflash,format=raw,file={firmware}"
+        storage_args = [
+            "-drive", f"if=none,file={image},format=raw,readonly=on,id=disk",
+            "-device", "virtio-blk-device,drive=disk",
+        ]
+    elif storage in ("usb", "usb+virtio"):
+        pflash_arg = f"if=pflash,format=raw,readonly=on,file={firmware}"
+        storage_args = [
+            "-drive", f"if=none,file={image},format=raw,readonly=on,id=usb",
+            "-device", "qemu-xhci,id=xhci,p2=4,p3=0",
+            "-device", "usb-storage,drive=usb,bus=xhci.0,port=1,bootindex=0",
+        ]
+        if storage == "usb+virtio":
+            if not decoy_image:
+                raise ValueError("decoy_image is required when storage='usb+virtio'")
+            storage_args.extend([
+                "-drive", f"if=none,file={decoy_image},format=raw,readonly=on,id=decoy",
+                "-device", "virtio-blk-device,drive=decoy,bootindex=1",
+            ])
+    else:
+        raise ValueError(f"unsupported aarch64 storage topology: {storage!r}")
+
     cmd = [
         str(qemu),
         "-M", machine,
         "-cpu", "cortex-a53",
         "-smp", str(cpus),
         "-m", str(memory),
-        "-drive", f"if=pflash,format=raw,file={firmware}",
-        "-drive", f"if=none,file={image},format=raw,readonly=on,id=disk",
-        "-device", "virtio-blk-device,drive=disk",
+        "-drive", pflash_arg,
+        *storage_args,
         *_RNG_PAIR,
         "-serial", "stdio",
         "-display", "none",

@@ -1464,6 +1464,18 @@
       "source": "hosttests/cases/test_aarch64_uefi_boot_memory.c"
     },
     {
+      "id": "test_aarch64_usb_boot",
+      "layer": "harness",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "pr",
+      "isolation": "none",
+      "scenarios": [
+        "drivers.usb.aarch64.boot"
+      ],
+      "source": "qemutests/test_aarch64_usb_boot.py"
+    },
+    {
       "id": "test_aarch64_user_asid",
       "layer": "host",
       "subsystem": "memory",

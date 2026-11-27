@@ -29,23 +29,55 @@
 
 static void emit_pct_s(const char *s) { kputs(s ? s : "(null)"); }
 
-/* Common body: walk `fmt`, expand %s / %u / %lu / %p, emit everything
+static void emit_hex(uint64_t v, int min_width, int uppercase)
+{
+    const char *hex = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
+    char buf[16];
+    int len = 0;
+    if (v == 0) {
+        buf[len++] = '0';
+    } else {
+        while (v > 0 && len < 16) {
+            buf[len++] = hex[v & 0xFU];
+            v >>= 4;
+        }
+    }
+    for (int pad = len; pad < min_width; pad++) {
+        kputs("0");
+    }
+    while (len > 0) {
+        char one[2] = { buf[--len], 0 };
+        kputs(one);
+    }
+}
+
+/* Common body: walk `fmt`, expand %s / %u / %lu / %x / %lx / %p, emit everything
  * else byte-by-byte. */
 static void vlog(const char *fmt, va_list ap)
 {
     while (*fmt) {
         if (fmt[0] == '%' && fmt[1] != '\0') {
-            char spec = fmt[1];
-            switch (spec) {
-            case 's':
+            const char *p = fmt + 1;
+            int min_width = 0;
+            if (*p == '0') {
+                p++;
+                while (*p >= '0' && *p <= '9') {
+                    min_width = min_width * 10 + (*p - '0');
+                    p++;
+                }
+            }
+            char spec = *p;
+            if (min_width == 0 && spec == 's') {
                 emit_pct_s(va_arg(ap, const char *));
-                fmt += 2;
+                fmt = p + 1;
                 continue;
-            case 'u':
+            }
+            if (min_width == 0 && spec == 'u') {
                 kputu((uint64_t)(unsigned)va_arg(ap, unsigned));
-                fmt += 2;
+                fmt = p + 1;
                 continue;
-            case 'd': {
+            }
+            if (min_width == 0 && spec == 'd') {
                 int val = va_arg(ap, int);
                 if (val < 0) {
                     kputs("-");
@@ -53,49 +85,35 @@ static void vlog(const char *fmt, va_list ap)
                 } else {
                     kputu((uint64_t)(unsigned)val);
                 }
-                fmt += 2;
+                fmt = p + 1;
                 continue;
             }
-            case 'l':
-                if (fmt[2] == 'u') {
+            if (spec == 'x' || spec == 'X') {
+                emit_hex((uint64_t)(unsigned)va_arg(ap, unsigned),
+                         min_width, spec == 'X');
+                fmt = p + 1;
+                continue;
+            }
+            if (min_width == 0 && spec == 'l') {
+                if (p[1] == 'u') {
                     kputu((uint64_t)va_arg(ap, unsigned long));
-                    fmt += 3;
+                    fmt = p + 2;
                     continue;
                 }
-                if (fmt[2] == 'x' || fmt[2] == 'X') {
+                if (p[1] == 'x' || p[1] == 'X') {
                     /* %lx — minimal hex long */
                     kputs("0x");
-                    uint64_t v = (uint64_t)va_arg(ap, unsigned long);
-                    static const char hex[] = "0123456789abcdef";
-                    char buf[17];
-                    int i = 16;
-                    if (v == 0) {
-                        kputs("0");
-                    } else {
-                        while (v > 0 && i >= 0) {
-                            buf[--i] = hex[v & 0xFU];
-                            v >>= 4;
-                        }
-                        while (i < 16) {
-                            char one[2] = { buf[i++], 0 };
-                            kputs(one);
-                        }
-                    }
-                    fmt += 3;
+                    emit_hex((uint64_t)va_arg(ap, unsigned long),
+                             0, p[1] == 'X');
+                    fmt = p + 2;
                     continue;
                 }
-                /* unknown %lX — fall through and emit literally */
-                break;
-            case 'p':
+            }
+            if (min_width == 0 && spec == 'p') {
                 kputs("0x");
                 kputx((uint64_t)(uintptr_t)va_arg(ap, void *));
-                fmt += 2;
+                fmt = p + 1;
                 continue;
-            default:
-                /* unknown specifier: emit `%X` literally so it is
-                 * visible that we don't understand it (better than
-                 * dropping the data on the floor). */
-                break;
             }
         }
         /* literal byte (or trailing '%' we can't decode) */

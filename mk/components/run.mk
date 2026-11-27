@@ -119,9 +119,9 @@ $(if $(AARCH64_UEFI_DISK),,$(error ERROR: aarch64-uefi targets require the aarch
 endef
 
 ifdef AARCH64_UEFI_DISK
-ifneq ($(filter run-aarch64-uefi test-aarch64 test-aarch64-boot-logo test-aarch64-pcie,$(MAKECMDGOALS)),)
+ifneq ($(filter run-aarch64-uefi test-aarch64 test-aarch64-boot-logo test-aarch64-pcie test-aarch64-usb-boot,$(MAKECMDGOALS)),)
 ifneq ($(filter qemu-virt,$(AARCH64_PLATFORM)),qemu-virt)
-$(error ERROR: $(filter run-aarch64-uefi test-aarch64 test-aarch64-boot-logo test-aarch64-pcie,$(MAKECMDGOALS)) is for QEMU virt only; got AARCH64_PLATFORM='$(AARCH64_PLATFORM)')
+$(error ERROR: $(filter run-aarch64-uefi test-aarch64 test-aarch64-boot-logo test-aarch64-pcie test-aarch64-usb-boot,$(MAKECMDGOALS)) is for QEMU virt only; got AARCH64_PLATFORM='$(AARCH64_PLATFORM)')
 endif
 endif
 endif
@@ -716,6 +716,20 @@ test-aarch64-pcie:
 	python3 qemutests/aarch64_pcie_test.py \
 	  --check all \
 	  --diagnostic-dtb=auto \
+	  --timeout 120 \
+	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --image "$(AARCH64_UEFI_DISK)" \
+	  --qemu "$(AARCH64_QEMU)" \
+	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)"
+
+AARCH64_USB_BOOT_CASE ?= all
+.PHONY: test-aarch64-usb-boot
+test-aarch64-usb-boot:
+	$(call require_aarch64_uefi)
+	$(call require_capability,uefi)
+	$(MAKE) --no-print-directory aarch64-uefi
+	python3 qemutests/aarch64_usb_boot.py \
+	  --case "$(AARCH64_USB_BOOT_CASE)" \
 	  --timeout 120 \
 	  --firmware "$(AARCH64_UEFI_FIRMWARE)" \
 	  --image "$(AARCH64_UEFI_DISK)" \

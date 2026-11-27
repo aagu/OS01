@@ -308,6 +308,37 @@ class BuildQemuAarch64Tests(unittest.TestCase):
         self.assertIn("rng-random,filename=/dev/urandom,id=rng0", argv)
         self.assertIn("virtio-rng-pci,rng=rng0", argv)
 
+    def test_aarch64_usb_and_dual_storage(self) -> None:
+        usb_argv = build_qemu_aarch64(
+            firmware="/fw/AAVMF.fd",
+            image="/img/usb.img",
+            cpus=1,
+            dtb="/tmp/virt.dtb",
+            storage="usb",
+        )
+        self.assertIn("qemu-xhci,id=xhci,p2=4,p3=0", usb_argv)
+        self.assertIn("usb-storage,drive=usb,bus=xhci.0,port=1,bootindex=0", usb_argv)
+        self.assertNotIn("virtio-blk-device,drive=disk", usb_argv)
+
+        dual_argv = build_qemu_aarch64(
+            firmware="/fw/AAVMF.fd",
+            image="/img/usb.img",
+            cpus=1,
+            dtb="/tmp/virt.dtb",
+            storage="usb+virtio",
+            decoy_image="/img/decoy.img",
+        )
+        self.assertIn("usb-storage,drive=usb,bus=xhci.0,port=1,bootindex=0", dual_argv)
+        self.assertIn("virtio-blk-device,drive=decoy,bootindex=1", dual_argv)
+        with self.assertRaises(ValueError):
+            build_qemu_aarch64(
+                firmware="/fw/AAVMF.fd",
+                image="/img/usb.img",
+                cpus=1,
+                dtb="/tmp/virt.dtb",
+                storage="usb+virtio",
+            )
+
 
 if __name__ == "__main__":
     unittest.main()
