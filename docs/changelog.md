@@ -1,9 +1,17 @@
 # 已完成工作汇总（Changelog）
 
-> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-27）。
+> OS01 各阶段已完成工作的按时间汇总。最新在前（截至 2026-11-28）。
 > 本表为历史完成记录，规划项见 `docs/roadmap.md`。
 
 ---
+
+## 2026-11-28
+
+- feat(x86_64,exec): **动态链接器 T1——内核 exec `PT_INTERP` 通路与解释器装载交接**（roadmap P5「动态链接器」拆分首片，spec [`docs/superpowers/specs/2026-11-27-exec-pt-interp-x86-design.md`](superpowers/specs/2026-11-27-exec-pt-interp-x86-design.md)、plan [`docs/superpowers/plans/2026-11-27-exec-pt-interp-x86.md`](superpowers/plans/2026-11-27-exec-pt-interp-x86.md)）：
+  - **内核**（`kernel/arch/x86_64/fs/elf.c`、`elf_pie.c`、`elf_image.h`、`sched/exec.c`）：ET_DYN 主程序带 `PT_INTERP` 时，`elf_load` 读路径（≤256 B、NUL 结尾、`/` 开头）→ VFS 打开 → 按既有静态 PIE 形约束校验 → 以独立 ASLR-B bias 装载为第二镜像（PIE 占页冲突改报 `-EEXIST` 驱动 bias 重采样 ≤16 次，耗尽报 `-ENOMEM`）；auxv `AT_BASE` 发布 interp bias（静态 PIE 保持 0，auxv 字节不变），`AT_ENTRY`/`AT_PHDR` 仍指主程序；初始 RIP 归解释器，骨架经 `AT_ENTRY` 跳回主程序。ET_EXEC 带 `PT_INTERP` 由静默忽略改为显式拒绝；`mm->start_code/end_code` 仍归主镜像所有（解释器装载不触碰，堆放置不变）。主程序 T1 仍为 RELATIVE-only 链接、内核自应用重定位。
+  - **用户态**：systest 夹具 `interp_probe.c` 双形态——`ldso.elf`（`/lib/ld.so` 骨架：走 auxv、打 marker、恢复初 rsp 后 `jmp *AT_ENTRY`；被直接 exec 时 `AT_BASE==0` 退出 91 不自跳）与 `dyn_exec.elf`（带 `PT_INTERP` 的 ET_DYN 主程序：校验 `AT_BASE`/`AT_PHDR` 描述的是被解释的主镜像后 exit 0）；安装为镜像内 `/lib/ld.so` 与 `/bin/dyn_exec`，形状门 `tools/tests/check_interp_fixture.py` 钉死 PT_INTERP 串/DT 白名单/`DF_1_PIE`/RELATIVE-only。
+  - **验收**：systest 新用例 `exec_interp` 全绿（fork/exec `/bin/dyn_exec` → 串口 `OS01_LDSO` → `OS01_DYNMAIN` → waitpid rc=0，套件 `PASS: all 134 syscall tests passed`）；宿主 `test_elf_load_4k` 新增 6 个 PT_INTERP 用例（装载发布/冲突重采样/耗尽/缺 interp `-ENOENT`/坏路径/ET_EXEC 拒绝）25085 断言全过，`test_process_image_lifecycle`（663）、`test_x86_aslr_exec`（174）、`test_boot_spawn_failure`（12）全绿。
+  - **剩余**（roadmap 行已更新）：T2 ld.so 符号重定位（GLOB_DAT/JUMP_SLOT、DT_NEEDED、hash 查找、mmap 窗口放置）、T3 共享 libc、T4 aarch64 对齐。
 
 ## 2026-11-27
 
