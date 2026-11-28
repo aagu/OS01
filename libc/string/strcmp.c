@@ -5,3 +5,8 @@ int strcmp(const char *a, const char *b)
     while (*a && *a == *b) { a++; b++; }
     return *(const unsigned char *)a - *(const unsigned char *)b;
 }
+
+int strcoll(const char *a, const char *b)
+{
+    return strcmp(a, b);
+}

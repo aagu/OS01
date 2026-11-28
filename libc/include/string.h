@@ -17,6 +17,7 @@ void* memset(void*, int, size_t);
 size_t strlen(const char*);
 size_t strnlen(const char *s, size_t maxlen);
 int strcmp(const char*, const char*);
+int strcoll(const char*, const char*);
 int strncmp(const char*, const char*, size_t);
 int strverscmp(const char*, const char*);
 char* strcpy(char* dest, const char* src);
