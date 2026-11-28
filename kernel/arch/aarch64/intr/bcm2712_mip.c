@@ -1,6 +1,7 @@
 /* kernel/arch/aarch64/intr/bcm2712_mip.c — BCM2712 MSI-X Input Peripheral (MIP) slot allocator */
 #include <arch/aarch64/bcm2712_mip.h>
 #include <arch/aarch64/ipi.h>
+#include <log/log.h>
 #include <errno.h>
 #include <string.h>
 
@@ -213,15 +214,19 @@ int bcm2712_mip_clear_probe(struct bcm2712_mip_route *route)
 
     gic_clear_pending(dev, route->intid);
     struct gic_spi_state st;
-    if (gic_spi_get_state(dev, route->intid, &st) != 0 || st.pending)
+    if (gic_spi_get_state(dev, route->intid, &st) != 0 || st.pending) {
+        log_warn("[bcm2712-mip] clear_probe gic_pending=%u active=%u en=%u\n",
+                 (unsigned)st.pending, (unsigned)st.active, (unsigned)st.enable);
         return -EIO;
+    }
 
-    bool host_pend = true, vpu_pend = true;
-    if (mip_reg_read_bit(route->plat, MIP_INT_STATUSL_HOST, route->hw_slot, &host_pend) != 0 ||
-        mip_reg_read_bit(route->plat, MIP_INT_STATUSL_VPU, route->hw_slot, &vpu_pend) != 0)
+    bool host_pend = true;
+    if (mip_reg_read_bit(route->plat, MIP_INT_STATUSL_HOST, route->hw_slot, &host_pend) != 0)
         return -EIO;
-    if (host_pend || vpu_pend)
+    if (host_pend) {
+        log_warn("[bcm2712-mip] clear_probe host_pend=%u\n", (unsigned)host_pend);
         return -EIO;
+    }
     return 0;
 }
 

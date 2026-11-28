@@ -47,6 +47,7 @@ extern struct rp1_host_bs g_rp1_host_bs;
 
 #define RP1_PCI_VENDOR_ID          0x1de4u
 #define RP1_PCI_DEVICE_ID          0x0001u
+#define RP1_PCI_REV_C0_ALT         0x00u
 #define RP1_PCI_REV_C0             0x02u
 
 #define RP1_PCI_CFG_STATUS         0x06u
@@ -104,6 +105,42 @@ static void rp1_zero(void *dst, size_t n)
     uint8_t *p = (uint8_t *)dst;
     for (size_t i = 0; i < n; i++)
         p[i] = 0;
+}
+
+static void rp1_log_str(const char *s)
+{
+#ifdef OS01_HOST_TEST
+    (void)s;
+#else
+    extern void uefi_rp1_log(const char *s);
+    uefi_rp1_log(s);
+#endif
+}
+
+static void rp1_log_hex(const char *label, uint64_t val)
+{
+#ifdef OS01_HOST_TEST
+    (void)label;
+    (void)val;
+#else
+    static const char hx[] = "0123456789abcdef";
+    char buf[20];
+    int i = 16;
+
+    rp1_log_str(label);
+    if (val == 0) {
+        rp1_log_str("0x0");
+        return;
+    }
+    buf[17] = '\0';
+    buf[16] = '\0';
+    while (val > 0 && i > 0) {
+        buf[--i] = hx[val & 0xfu];
+        val >>= 4;
+    }
+    rp1_log_str("0x");
+    rp1_log_str(&buf[i]);
+#endif
 }
 
 static uint16_t read_le16(const uint8_t *p)
@@ -186,8 +223,12 @@ static int parse_msix_cap(struct rp1_efi_pci_io_protocol *pci,
             entries = (uint16_t)((msgctl & 0x7ffu) + 1u);
             table_bir = table_dw & 7u;
             pba_bir = pba_dw & 7u;
-            if (table_bir != 0u || pba_bir != 0u)
+            if (table_bir != 0u || pba_bir != 0u) {
+                rp1_log_hex("rp1-pci: msix bad bir t=", table_bir);
+                rp1_log_hex(" p=", pba_bir);
+                rp1_log_str("\r\n");
                 return -1;
+            }
 
             info->msix_cap = cap_ptr;
             info->entries = entries;
@@ -208,15 +249,27 @@ static int parse_bar0_resources(const uint8_t *desc, uint64_t *cpu_out,
 
     if (!desc)
         return -1;
-    if (desc[0] != RP1_ACPI_QWORD_ADDR_TAG)
+    if (desc[0] != RP1_ACPI_QWORD_ADDR_TAG) {
+        rp1_log_hex("rp1-pci: desc0=", desc[0]);
+        rp1_log_str("\r\n");
         return -1;
+    }
     len = read_le16(desc + 1);
-    if (len != RP1_ACPI_QWORD_ADDR_LEN)
+    if (len != RP1_ACPI_QWORD_ADDR_LEN) {
+        rp1_log_hex("rp1-pci: desc_len=", len);
+        rp1_log_str("\r\n");
         return -1;
-    if (desc[3] != RP1_ACPI_RES_TYPE_MEM)
+    }
+    if (desc[3] != RP1_ACPI_RES_TYPE_MEM) {
+        rp1_log_hex("rp1-pci: desc_type=", desc[3]);
+        rp1_log_str("\r\n");
         return -1;
-    if (desc[46] != RP1_ACPI_END_TAG)
+    }
+    if (desc[46] != RP1_ACPI_END_TAG) {
+        rp1_log_hex("rp1-pci: desc_end=", desc[46]);
+        rp1_log_str("\r\n");
         return -1;
+    }
 
     addr_min = read_le64(desc + 14);
     addr_len = read_le64(desc + 38);
@@ -241,27 +294,43 @@ static int validate_rp1_candidate(struct rp1_efi_pci_io_protocol *pci,
     if (!pci->get_location || !pci->get_bar_attributes)
         return -1;
 
-    if (pci_cfg_u32(pci, RP1_PCI_CFG_BAR0, &bar0_lo) != 0)
+    if (pci_cfg_u32(pci, RP1_PCI_CFG_BAR0, &bar0_lo) != 0) {
+        rp1_log_str("rp1-pci: bar0 read fail\r\n");
         return -1;
-    if ((bar0_lo & 1u) != 0u) /* I/O BAR unsupported */
+    }
+    if ((bar0_lo & 1u) != 0u) { /* I/O BAR unsupported */
+        rp1_log_hex("rp1-pci: bar0 io=", bar0_lo);
+        rp1_log_str("\r\n");
         return -1;
+    }
     if ((bar0_lo & 0x6u) == 0x4u) {
         if (pci_cfg_u32(pci, RP1_PCI_CFG_BAR1, &bar0_hi) != 0)
             return -1;
-        if (bar0_hi != 0u) /* 64-bit BAR0 upper bits conflict with 32-bit PCI outbound window */
+        if (bar0_hi != 0u) { /* 64-bit BAR0 upper bits conflict with 32-bit PCI outbound window */
+            rp1_log_hex("rp1-pci: bar0_hi=", bar0_hi);
+            rp1_log_str("\r\n");
             return -1;
+        }
     } else if ((bar0_lo & 0x6u) != 0u) {
+        rp1_log_hex("rp1-pci: bar0 type=", bar0_lo);
+        rp1_log_str("\r\n");
         return -1;
     }
     bar0_pci = ((uint64_t)bar0_hi << 32) | (uint64_t)(bar0_lo & ~0xfu);
-    if (bar0_pci == 0u)
+    if (bar0_pci == 0u) {
+        rp1_log_str("rp1-pci: bar0_pci=0\r\n");
         return -1;
+    }
 
-    if (parse_msix_cap(pci, out) != 0)
+    if (parse_msix_cap(pci, out) != 0) {
+        rp1_log_str("rp1-pci: parse_msix_cap fail\r\n");
         return -1;
+    }
 
     st = pci->get_bar_attributes(pci, 0u, NULL, &resources);
     if (EFI_ERROR(st) || !resources) {
+        rp1_log_hex("rp1-pci: get_bar_attr st=", (uint64_t)st);
+        rp1_log_str("\r\n");
         if (resources && BS->FreePool)
             (void)BS->FreePool(resources);
         return -1;
@@ -326,6 +395,9 @@ int uefi_rp1_pci_capture(struct boot_rp1_pci_info *out)
     st = BS->LocateHandleBuffer(ByProtocol, &pci_io_guid, NULL,
                                 &handle_count, &handles);
     if (EFI_ERROR(st) || !handles || handle_count == 0u) {
+        rp1_log_hex("rp1-pci: LocateHandleBuffer st=", (uint64_t)st);
+        rp1_log_hex(" cnt=", (uint64_t)handle_count);
+        rp1_log_str("\r\n");
         if (handles)
             (void)BS->FreePool(handles);
         return -1;
@@ -345,12 +417,19 @@ int uefi_rp1_pci_capture(struct boot_rp1_pci_info *out)
         if (vendor != RP1_PCI_VENDOR_ID || device != RP1_PCI_DEVICE_ID)
             continue;
         if (pci_cfg_u8(pci, RP1_PCI_CFG_REV_ID, &rev) != 0 ||
-            rev != RP1_PCI_REV_C0)
+            (rev != RP1_PCI_REV_C0_ALT && rev != RP1_PCI_REV_C0)) {
+            rp1_log_hex("rp1-pci: skip rev=", rev);
+            rp1_log_str("\r\n");
             continue;
+        }
         if (pci_cfg_u8(pci, RP1_PCI_CFG_HDR_TYPE, &hdr) != 0 ||
-            (hdr & 0x7fu) != 0u)
+            (hdr & 0x7fu) != 0u) {
+            rp1_log_hex("rp1-pci: skip hdr=", hdr);
+            rp1_log_str("\r\n");
             continue;
+        }
         if (match != NULL) {
+            rp1_log_str("rp1-pci: dup RP1 C0\r\n");
             (void)BS->FreePool(handles);
             return -1; /* duplicate RP1 C0 */
         }
@@ -358,8 +437,11 @@ int uefi_rp1_pci_capture(struct boot_rp1_pci_info *out)
     }
 
     (void)BS->FreePool(handles);
-    if (!match)
+    if (!match) {
+        rp1_log_hex("rp1-pci: no match in handles=", (uint64_t)handle_count);
+        rp1_log_str("\r\n");
         return -1;
+    }
 
     if (validate_rp1_candidate(match, &tmp) != 0)
         return -1;

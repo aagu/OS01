@@ -96,18 +96,27 @@ void aarch64_rp1_pcie_prepare(const struct boot_context *ctx)
     const struct boot_rp1_pci_info *pci = boot_context_rp1_pci(ctx);
     if (!desc || !desc->valid || desc->rc_reg_size < 0x9004ULL ||
         desc->rc_reg_size > UINT32_MAX || desc->mip_span > UINT32_MAX ||
-        !pci || pci->entries == 0U || pci->bar0_size == 0ULL)
+        !pci || pci->entries == 0U || pci->bar0_size == 0ULL) {
+        log_warn("[rp1-pcie] skip: desc_ok=%u pci=%u\n",
+                 (unsigned)(desc && desc->valid), (unsigned)(pci != NULL));
         return;
+    }
 
     struct aarch64_boot_mmio_ctx mmio_ctx;
-    if (aarch64_boot_mmio_ctx_init(ctx, &mmio_ctx) != 0)
+    if (aarch64_boot_mmio_ctx_init(ctx, &mmio_ctx) != 0) {
+        log_warn("[rp1-pcie] mmio_ctx_init fail\n");
         return;
-    if (aarch64_boot_mmio_map(&mmio_ctx, desc->rc_reg_base, desc->rc_reg_size) != 0)
+    }
+    if (aarch64_boot_mmio_map(&mmio_ctx, desc->rc_reg_base, desc->rc_reg_size) != 0) {
+        log_warn("[rp1-pcie] map rc fail base=0x%lx\n", (unsigned long)desc->rc_reg_base);
         return;
+    }
 
     volatile uint8_t *rc_va = (volatile uint8_t *)rp1_pa_to_va(desc->rc_reg_base);
-    if (!rc_va)
+    if (!rc_va) {
+        log_warn("[rp1-pcie] rc_va null\n");
         return;
+    }
 
     struct aarch64_rp1_pcie_io io = {
         .ctx = (void *)(uintptr_t)rc_va,
@@ -116,14 +125,23 @@ void aarch64_rp1_pcie_prepare(const struct boot_context *ctx)
         .cfg_restore = rc_io_cfg_restore,
     };
     struct aarch64_rp1_endpoint ep;
-    if (aarch64_rp1_pcie_endpoint(desc, &io, &ep) != 0)
+    int ep_rc = aarch64_rp1_pcie_endpoint(desc, &io, &ep);
+    if (ep_rc != 0) {
+        log_warn("[rp1-pcie] endpoint fail rc=%d\n", ep_rc);
         return;
+    }
 
     /* Cross-check live endpoint against UEFI handoff before touching table/PBA. */
     if (ep.bus != pci->bus || ep.device != pci->device ||
         ep.function != pci->function || ep.bar0_pci != pci->bar0_pci ||
-        ep.bar0_cpu != pci->bar0_cpu)
+        ep.bar0_cpu != pci->bar0_cpu) {
+        log_warn("[rp1-pcie] ep mismatch ep(%u:%u.%u bar0=0x%lx/0x%lx) pci(%u:%u.%u bar0=0x%lx/0x%lx)\n",
+                 (unsigned)ep.bus, (unsigned)ep.device, (unsigned)ep.function,
+                 (unsigned long)ep.bar0_pci, (unsigned long)ep.bar0_cpu,
+                 (unsigned)pci->bus, (unsigned)pci->device, (unsigned)pci->function,
+                 (unsigned long)pci->bar0_pci, (unsigned long)pci->bar0_cpu);
         return;
+    }
 
     if (pci->msix_cap < 0x40U || pci->msix_cap > 0xf4U || (pci->msix_cap & 3U) != 0U)
         return;
@@ -139,8 +157,11 @@ void aarch64_rp1_pcie_prepare(const struct boot_context *ctx)
     uint16_t live_entries = (uint16_t)(((cap_dw0 >> 16) & 0x7ffU) + 1U);
     if ((cap_dw0 & 0xffU) != 0x11U || live_entries != pci->entries ||
         (cap_dw1 & 7U) != 0U || (cap_dw1 & ~7U) != pci->table_offset ||
-        (cap_dw2 & 7U) != 0U || (cap_dw2 & ~7U) != pci->pba_offset)
+        (cap_dw2 & 7U) != 0U || (cap_dw2 & ~7U) != pci->pba_offset) {
+        log_warn("[rp1-pcie] msix mismatch dw0=0x%x dw1=0x%x dw2=0x%x\n",
+                 cap_dw0, cap_dw1, cap_dw2);
         return;
+    }
 
     uint64_t table_span = (uint64_t)pci->entries * 16ULL;
     uint64_t pba_span = ((uint64_t)(pci->entries + 63U) / 64ULL) * 8ULL;
@@ -151,8 +172,12 @@ void aarch64_rp1_pcie_prepare(const struct boot_context *ctx)
         pba_span > pci->bar0_size - pci->pba_offset ||
         ((uint64_t)pci->table_offset + table_span > (uint64_t)pci->pba_offset &&
          (uint64_t)pci->pba_offset + pba_span > (uint64_t)pci->table_offset) ||
-        pci->bar0_pci + pci->bar0_size > ep.outbound_pci_base + ep.outbound_size)
+        pci->bar0_pci + pci->bar0_size > ep.outbound_pci_base + ep.outbound_size) {
+        log_warn("[rp1-pcie] bounds fail bar0_pci=0x%lx sz=0x%lx out=0x%lx+0x%lx\n",
+                 (unsigned long)pci->bar0_pci, (unsigned long)pci->bar0_size,
+                 (unsigned long)ep.outbound_pci_base, (unsigned long)ep.outbound_size);
         return;
+    }
 
     uint64_t table_pa = ep.bar0_cpu + pci->table_offset;
     uint64_t pba_pa = ep.bar0_cpu + pci->pba_offset;
@@ -161,8 +186,12 @@ void aarch64_rp1_pcie_prepare(const struct boot_context *ctx)
     if (aarch64_boot_mmio_map(&mmio_ctx, desc->mip_cpu_pa, desc->mip_span) != 0 ||
         aarch64_boot_mmio_map(&mmio_ctx, table_pa, table_span) != 0 ||
         aarch64_boot_mmio_map(&mmio_ctx, pba_pa, pba_span) != 0 ||
-        aarch64_boot_mmio_map(&mmio_ctx, apb_pa, AARCH64_RP1_APB_SPAN) != 0)
+        aarch64_boot_mmio_map(&mmio_ctx, apb_pa, AARCH64_RP1_APB_SPAN) != 0) {
+        log_warn("[rp1-pcie] map sub-window fail mip=0x%lx tbl=0x%lx pba=0x%lx apb=0x%lx\n",
+                 (unsigned long)desc->mip_cpu_pa, (unsigned long)table_pa,
+                 (unsigned long)pba_pa, (unsigned long)apb_pa);
         return;
+    }
 
     volatile uint8_t *mip_va = (volatile uint8_t *)rp1_pa_to_va(desc->mip_cpu_pa);
     volatile uint8_t *apb_va = (volatile uint8_t *)rp1_pa_to_va(apb_pa);

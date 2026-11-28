@@ -120,6 +120,22 @@ static void uefi_puts(const char *s)
     conout_puts(s);
 }
 
+static uint64_t s_rp1_console_pa;
+
+void uefi_rp1_log(const char *s)
+{
+    uefi_puts(s);
+    if (s_rp1_console_pa != 0u && s) {
+        volatile uint32_t *dr = (volatile uint32_t *)(uintptr_t)s_rp1_console_pa;
+        volatile uint32_t *fr = (volatile uint32_t *)(uintptr_t)(s_rp1_console_pa + 0x18u);
+        while (*s) {
+            while ((*fr & (1u << 5)) != 0u)
+                ;
+            *dr = (uint32_t)(uint8_t)*s++;
+        }
+    }
+}
+
 static uint32_t load_be32(const void *address)
 {
     const uint8_t *bytes = (const uint8_t *)address;
@@ -761,8 +777,10 @@ efi_status_t arch_fill_firmware(struct boot_context *ctx,
         else if (config->platform == UEFI_BOOT_PLATFORM_RPI5)
             required_compat = "raspberrypi,5-model-b";
 
-        if (config->console == UEFI_BOOT_CONSOLE_RP1_HEADER)
+        if (config->console == UEFI_BOOT_CONSOLE_RP1_HEADER) {
             fw_console_pa = UINT64_C(0x1f00030000);
+            s_rp1_console_pa = fw_console_pa;
+        }
     }
 
     scan_rc = aarch64_fdt_boot_scan((const void *)(uintptr_t)fdt_phys, fdt_size,

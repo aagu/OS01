@@ -188,7 +188,8 @@ int aarch64_rp1_pcie_endpoint(const struct aarch64_rp1_irq_desc *desc,
     if ((ep_id & 0xFFFFU) != RP1_VENDOR_ID ||
         ((ep_id >> 16) & 0xFFFFU) != RP1_DEVICE_ID)
         return -ENODEV;
-    if ((ep_rev & 0xFFU) != 2U)
+    uint8_t rev = (uint8_t)(ep_rev & 0xFFU);
+    if (rev != 0U && rev != 2U)
         return -ENODEV;
     if ((ep_cmd & 0x0006U) != 0x0006U)
         return -EIO;

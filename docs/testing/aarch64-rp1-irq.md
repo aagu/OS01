@@ -42,9 +42,19 @@ Branch: `feat/aarch64-rp1-irq`
   - `rp1_irq_probe.elf`: `fdf13d3f2e3dd8a180d21d3d92203fbe676f39bd5f12faa688f1f530af6855af`
   - `rpi5-poll-test.img`: `594297ae0956b4ec6a353541aacc9a51b0f4f1df6f8bfe853ff5b6f37e974d51`
 
-## 4. RPi 5 Hardware Cold-Boot Validation: **待测**
+## 4. RPi 5 Hardware Cold-Boot Validation: **PASS (IRQ Armed & Interactive Console Verified)**
 
-Physical RPi 5 UEFI v0.3 cold-boot with `enable_rp1_uart=1` is pending hardware execution on the target board:
+Physical RPi 5 (`boardrev c04170`, UEFI v0.3) cold-boot with `console rp1-header` verified on `/dev/ttyUSB0` (`115200 8N1`):
+
+- `UEFI-A64: layout entry=0x40080000 context=0x37f43000 size=240` (RP1 `rev=0x00` PCI BAR0 capture succeeded)
+- `[rp1-irq-topology] rc=0x0x1000120000 mip=0x0x1000130000 source=25 spi_base=128 count=64 offset=0`
+- `[rp1-irq-bar0] bdf=01:00.0 pci=0x0xc0410000 cpu=0x0x1f00410000 size=0x0x4000 table=0x0 pba=0x2000`
+- `[rp1-irq-window] action=program slot=4 pci=0x0xfffffff000 cpu=0x0x1000130000 span=0x0x1000 readback=ok`
+- `[rp1-irq-msix] source=25 address=0x0xfffffff000 data=0 intid=160 probe=ok`
+- `aarch64: PL011 console RX armed via RP1 source=25 intid=160` (`console_rx_poll_needed=false`)
+- BusyBox `ash` serial interactive command `echo RP1-IRQ-CONSOLE-OK` received, executed, and echoed via the armed RP1 MSI-X IRQ path.
+
+Optional A/B diagnostic `rp1_irq_probe` counter runs (`AARCH64_RP1_IRQ_DIAGNOSTIC=1` `irq` vs `poll` modes):
 
 ```bash
 python3 tools/tests/aarch64_rp1_irq_board.py --port /dev/ttyUSB0 --image /tmp/os01-rp1-irq-board/rpi5-irq-test.img --log /tmp/rpi5-irq.log --mode irq

@@ -589,6 +589,12 @@ static void test_endpoint_and_prepare_boundaries(void)
     assert_eq(2u, g_hw.sel_writes);
     assert_eq(1u, ep.bus);
     assert_eq(2u, ep.revision);
+
+    /* Real RPi 5 hardware reports RP1 Revision ID 0x00 */
+    g_hw.ep_cfg[0x08U / 4U] = 0x02000000U;
+    assert_eq(0, aarch64_rp1_pcie_endpoint(&g_stub_irq_desc, &io, &ep));
+    assert_eq(0u, ep.revision);
+    g_hw.ep_cfg[0x08U / 4U] = 0x02000002U;
     assert_eq(UINT64_C(0x100000), ep.bar0_pci);
     assert_eq(UINT64_C(0x1f00100000), ep.bar0_cpu);
     assert_eq(UINT64_C(0x400000), ep.bar1_pci);

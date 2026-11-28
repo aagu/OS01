@@ -267,6 +267,17 @@ static void test_capture_success_non_identity(void)
     assert_eq(0x50u, out.msix_cap);
     assert_eq(2u, g_free_calls);
     assert_true(g_freed_ptrs[0] != NULL || g_freed_ptrs[1] != NULL);
+
+    /* Real RPi 5 hardware reports RP1 Revision ID 0x00 */
+    reset_bus();
+    init_valid_rp1(&dev);
+    dev.cfg[0x08] = 0x00u;
+    g_devs[0] = &dev;
+    g_handles[0] = (efi_handle_t)0x1111;
+    g_dev_count = 1;
+    memset(&out, 0xaa, sizeof(out));
+    assert_eq(0, uefi_rp1_pci_capture(&out));
+    assert_eq(UINT64_C(0x1f00100000), out.bar0_cpu);
 }
 
 static void test_capture_failures_zero_out(void)
