@@ -207,6 +207,8 @@ test-aarch64-audit: $(BUILD_DIR)/artifacts/kernel.elf
 run-aarch64-uefi_SMP = $(if $(filter-out file undefined,$(origin SMP)),$(SMP),1)
 
 .PHONY: run-aarch64-uefi
+AARCH64_QEMU_DISPLAY ?= bochs-display
+
 run-aarch64-uefi: aarch64-uefi
 	$(call require_aarch64_uefi)
 	$(call require_capability,uefi)
@@ -229,7 +231,7 @@ run-aarch64-uefi: aarch64-uefi
 	  -drive if=none,file=$(AARCH64_UEFI_DISK),format=raw,readonly=on,id=disk \
 	  -device virtio-blk-device,drive=disk \
 	  -device virtio-rng-device \
-	  -device ramfb \
+	  -device $(AARCH64_QEMU_DISPLAY) \
 	  $$extra_dtb \
 	  -serial stdio -display $(DISPLAY) -no-reboot
 
