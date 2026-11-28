@@ -4,6 +4,7 @@
  * subsystem: userland-ldso
  * timing: strict
  * tier: nightly
+ * scenarios: [userland.ldso.units]
  */
 
 /*

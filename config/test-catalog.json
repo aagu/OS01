@@ -3640,7 +3640,9 @@
       "timing": "strict",
       "tier": "nightly",
       "isolation": "none",
-      "scenarios": [],
+      "scenarios": [
+        "userland.ldso.units"
+      ],
       "source": "hosttests/cases/test_ldso_units.c"
     },
     {
