@@ -541,7 +541,21 @@ int64_t spawn_user_task(const char *path, const char *const *argv)
      * image so ld.so can find its way back. */
     uint64_t entry_point = elf_img.has_interp ? elf_img.interp_entry
                                               : elf_img.entry;
-    tsk->flags = (tsk->flags & ~PF_LINUX_ABI) | elf_detect_abi(node);
+    uint32_t abi_flag = elf_detect_abi(node);
+    /* T2 ABI gate: interpreted mains are native-only — a Linux-ABI
+     * main would route the interpreter's syscalls into the compat
+     * table (see x86_exec_interp_abi_ok in elf_image.h). */
+    if (!x86_exec_interp_abi_ok(elf_img.has_interp, abi_flag)) {
+        if (tsk->files) { files_unpin(tsk->files); tsk->files = NULL; }
+        if (tsk->fpu_save) kfree(tsk->fpu_save);
+        destroy_unpublished_user_mm(mm);
+        kfree(mm);
+        kfree(thd);
+        kfree(raw_alloc);
+        vfs_node_put(node);
+        return -ENOEXEC;
+    }
+    tsk->flags = (tsk->flags & ~PF_LINUX_ABI) | abi_flag;
     vfs_node_put(node);
 
     // Set up heap.  mm_init_user_heap installs the unique zero-length
@@ -767,6 +781,14 @@ int64_t sys_exec(const char *path, pt_regs_t *regs,
     uint64_t entry_point = elf_img.has_interp ? elf_img.interp_entry
                                               : elf_img.entry;
     uint32_t abi_flag = elf_detect_abi(node);
+    /* T2 ABI gate: interpreted mains are native-only (see
+     * x86_exec_interp_abi_ok in elf_image.h). */
+    if (!x86_exec_interp_abi_ok(elf_img.has_interp, abi_flag)) {
+        destroy_unpublished_user_mm(new_mm);
+        kfree(new_mm);
+        vfs_node_put(node);
+        return -ENOEXEC;
+    }
     vfs_node_put(node);
 
     // Set up the heap.  mm_init_user_heap installs the unique

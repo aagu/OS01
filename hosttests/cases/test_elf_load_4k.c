@@ -2356,6 +2356,20 @@ TEST_FUNC(test_pie_interp_needed_rejected_without_interp)
     teardown_fixture();
 }
 
+TEST_FUNC(test_exec_interp_abi_gate_truth_table)
+{
+    /* exec-layer ABI gate (T2): an interp-bearing main must run under
+     * the OS01 native ABI — the int80 entry dispatches on the
+     * task-wide PF_LINUX_ABI flag (trap.c:1085), so a GNU-note main
+     * would route the interpreter's native syscalls into the Linux
+     * compat table.  abi_flag is the elf_detect_abi() result
+     * (0 = native, PF_LINUX_ABI = Linux compat). */
+    assert_true(x86_exec_interp_abi_ok(false, PF_LINUX_ABI));
+    assert_true(x86_exec_interp_abi_ok(true, 0));
+    assert_false(x86_exec_interp_abi_ok(true, PF_LINUX_ABI));
+    assert_true(x86_exec_interp_abi_ok(false, 0));
+}
+
 /* ══════════════════════════════════════════════════════════════
  * PT_TLS — Variant II static TLS
  * ══════════════════════════════════════════════════════════════ */
@@ -3050,6 +3064,7 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_pie_interp_dyn_tables_in_rw_rejected),
     TEST_ENTRY(test_pie_interp_jmprel_triggers_position_rule),
     TEST_ENTRY(test_pie_interp_needed_rejected_without_interp),
+    TEST_ENTRY(test_exec_interp_abi_gate_truth_table),
     TEST_ENTRY(test_tls_etexec_variant_ii),
     TEST_ENTRY(test_tls_align_zero_and_one),
     TEST_ENTRY(test_tls_pure_tbss_tinygo_shape),

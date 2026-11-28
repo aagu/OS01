@@ -36,6 +36,23 @@ typedef struct {
 } x86_elf_image_t;
 
 /**
+ * x86_exec_interp_abi_ok() — exec-layer ABI gate (x86_64 T2).  An
+ * interp-bearing main must run under the OS01 native ABI: the int80
+ * entry dispatches on the task-wide PF_LINUX_ABI flag
+ * (kernel/arch/x86_64/intr/trap.c, do_system_call — compat vs native
+ * table), the flag comes from the MAIN image's GNU ABI note, and the
+ * interpreter shares the task.  A Linux-ABI main would therefore
+ * route ld.so's native open/read/mmap into the Linux compat table.
+ * abi_flag is the elf_detect_abi() result (0 = native, nonzero =
+ * PF_LINUX_ABI); kernel/arch/x86_64/sched/exec.c rejects with
+ * -ENOEXEC when this returns false.
+ */
+static inline bool x86_exec_interp_abi_ok(bool has_interp, uint32_t abi_flag)
+{
+    return !(has_interp && abi_flag != 0);
+}
+
+/**
  * elf_load() — Load PT_LOAD segments (ET_EXEC, static-PIE ET_DYN, or
  * ET_DYN with PT_INTERP) from an ELF into the given mm's address
  * space.  A PT_INTERP image additionally loads the interpreter from
