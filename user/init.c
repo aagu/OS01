@@ -294,7 +294,11 @@ static void do_shutdown(int cmd)
     // If the requested action fails, fall through to reboot
     printf("init: reboot(%#x) failed, falling back to reboot...\n", cmd);
     reboot(RB_AUTOBOOT);
-    // unreachable
+    printf("init: reboot failed, system halted.\n");
+    shutdown_signal = 0;
+    for (;;) {
+        poll(NULL, 0, 1000);
+    }
 }
 
 // ── Add an action (from inittab or fallback) ────────────────

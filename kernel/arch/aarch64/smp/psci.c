@@ -4,7 +4,7 @@
 #define PSCI_VERSION_FID       UINT64_C(0x84000000)
 #define PSCI_CPU_ON64_FID      UINT64_C(0xc4000003)
 #define PSCI_SYSTEM_OFF_FID    UINT64_C(0x84000008)
-#define PSCI_SYSTEM_RESET64_FID UINT64_C(0xc4000009)
+#define PSCI_SYSTEM_RESET_FID  UINT64_C(0x84000009)
 
 static enum psci_conduit psci_conduit = PSCI_CONDUIT_NONE;
 
@@ -70,5 +70,5 @@ int32_t psci_system_off(void)
  * failure). */
 int32_t psci_system_reset(void)
 {
-    return (int32_t)(uint32_t)psci_call(PSCI_SYSTEM_RESET64_FID, 0, 0, 0);
+    return (int32_t)(uint32_t)psci_call(PSCI_SYSTEM_RESET_FID, 0, 0, 0);
 }
