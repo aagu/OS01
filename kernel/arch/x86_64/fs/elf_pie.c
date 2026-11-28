@@ -17,6 +17,14 @@ static inline bool add_overflows_u64(uint64_t a, uint64_t b, uint64_t *out)
     return false;
 }
 
+static inline bool mul_overflows_u64(uint64_t a, uint64_t b, uint64_t *out)
+{
+    if (b != 0 && a > UINT64_MAX / b)
+        return true;
+    *out = a * b;
+    return false;
+}
+
 static inline bool intervals_intersect_u64(uint64_t a0, uint64_t a1,
                                            uint64_t b0, uint64_t b1)
 {
@@ -69,6 +77,54 @@ void x86_elf_pie_dispose(x86_elf_pie_t *pie)
         kfree(pie->chunks);
     }
     memset(pie, 0, sizeof(*pie));
+}
+
+/* T2 SYMTAB/HASH position rule (see the call site): DT_HASH must be
+ * present; its SYSV header sizes the table, and both the hash and
+ * the symtab extents must be covered by readable non-writable
+ * PT_LOADs — the kernel writes RELATIVE targets before ld.so runs. */
+static int x86_pie_dyn_tables_in_ro(vfs_node_t *node,
+                                    const elf64_phdr_t *phdrs,
+                                    uint16_t phnum,
+                                    uint64_t hash_vaddr,
+                                    uint64_t symtab_vaddr,
+                                    uint64_t syment_val)
+{
+    if (hash_vaddr == 0 || syment_val != 24)
+        return -ENOEXEC;
+    uint64_t hash_file_off = 0;
+    if (find_covering_load(phdrs, phnum, hash_vaddr, 16,
+                           NULL, &hash_file_off) != 0)
+        return -ENOEXEC;
+    uint32_t hh[4];
+    int hr = vfs_read(node, hash_file_off, sizeof(hh), hh);
+    if (hr < 0 || (uint64_t)hr != sizeof(hh))
+        return -ENOEXEC;
+    uint64_t nbucket = hh[0], nchain = hh[1];
+    if (nbucket == 0 || nchain == 0 ||
+        nbucket > X86_ELF_PIE_MAX_RELA || nchain > X86_ELF_PIE_MAX_RELA)
+        return -ENOEXEC;
+    uint64_t hash_sz = 0;
+    if (add_overflows_u64(2, nbucket, &hash_sz) ||
+        add_overflows_u64(hash_sz, nchain, &hash_sz) ||
+        hash_sz > UINT64_MAX / 4)
+        return -ENOEXEC;
+    hash_sz *= 4;
+    const elf64_phdr_t *cov = NULL;
+    if (find_covering_load(phdrs, phnum, hash_vaddr, hash_sz,
+                           &cov, NULL) != 0 || !cov)
+        return -ENOEXEC;
+    if (cov->p_flags & PF_W)
+        return -ENOEXEC;
+    uint64_t symtab_sz = 0;
+    if (mul_overflows_u64(nchain, syment_val, &symtab_sz))
+        return -ENOEXEC;
+    if (find_covering_load(phdrs, phnum, symtab_vaddr, symtab_sz,
+                           &cov, NULL) != 0 || !cov)
+        return -ENOEXEC;
+    if (cov->p_flags & PF_W)
+        return -ENOEXEC;
+    return 0;
 }
 
 int x86_elf_pie_prepare(vfs_node_t *node,
@@ -273,11 +329,12 @@ int x86_elf_pie_prepare(vfs_node_t *node,
     bool has_jmprel = false, has_pltrelsz = false, has_pltgot = false;
     bool has_pltrel = false;
 
-    for (uint64_t base = 0; base < n_dyn && !seen_null; base += 8) {
-        elf64_dyn_t dyn_chunk[8];
+    for (uint64_t base = 0; base < n_dyn && !seen_null; base += 2) {
+        elf64_dyn_t dyn_chunk[2];   /* small chunk: prepare sits under
+                                     * the 512-byte frame audit */
         uint64_t cnt = n_dyn - base;
-        if (cnt > 8)
-            cnt = 8;
+        if (cnt > 2)
+            cnt = 2;
         uint64_t bytes = cnt * sizeof(elf64_dyn_t);
         int rd = vfs_read(node, dyn_file_off + base * sizeof(elf64_dyn_t),
                           bytes, dyn_chunk);
@@ -613,48 +670,17 @@ int x86_elf_pie_prepare(vfs_node_t *node,
      * them — NEEDED, any symbolic RELA record, or a non-empty JMPREL
      * (which the kernel deliberately does not walk, so symbolic
      * records can hide there).  Hash extents come from the SYSV hash
-     * header itself. */
+     * header itself.  Split into its own frame: prepare sits under
+     * the 512-byte stack audit and the rule owns real locals. */
     if (interp_dyn &&
         (needed_count > 0 || any_symbolic_rela ||
          (has_jmprel && has_pltrelsz && pltrelsz_val > 0))) {
-        if (!has_hash || hash_vaddr == 0)
-            return -ENOEXEC;
-        if (!has_syment || syment_val != 24)
-            return -ENOEXEC;
-        uint64_t hash_file_off = 0;
-        if (find_covering_load(phdrs, ehdr->e_phnum, hash_vaddr, 16,
-                               NULL, &hash_file_off) != 0)
-            return -ENOEXEC;
-        uint32_t hh[4];
-        int hr = vfs_read(node, hash_file_off, sizeof(hh), hh);
-        if (hr < 0 || (uint64_t)hr != sizeof(hh))
-            return -ENOEXEC;
-        uint64_t nbucket = hh[0], nchain = hh[1];
-        if (nbucket == 0 || nchain == 0 ||
-            nbucket > X86_ELF_PIE_MAX_RELA || nchain > X86_ELF_PIE_MAX_RELA)
-            return -ENOEXEC;
-        uint64_t hash_sz = 0;
-        if (add_overflows_u64(2, nbucket, &hash_sz) ||
-            add_overflows_u64(hash_sz, nchain, &hash_sz) ||
-            hash_sz > UINT64_MAX / 4)
-            return -ENOEXEC;
-        hash_sz *= 4;
-        const elf64_phdr_t *cov = NULL;
-        if (find_covering_load(phdrs, ehdr->e_phnum, hash_vaddr, hash_sz,
-                               &cov, NULL) != 0 || !cov)
-            return -ENOEXEC;
-        if (cov->p_flags & PF_W)
-            return -ENOEXEC;
-        uint64_t symtab_sz = 0;
-        if (add_overflows_u64(nchain * syment_val, 0, &symtab_sz) ||
-            nchain > UINT64_MAX / syment_val)
-            return -ENOEXEC;
-        symtab_sz = nchain * syment_val;
-        if (find_covering_load(phdrs, ehdr->e_phnum, symtab_vaddr, symtab_sz,
-                               &cov, NULL) != 0 || !cov)
-            return -ENOEXEC;
-        if (cov->p_flags & PF_W)
-            return -ENOEXEC;
+        int prc = x86_pie_dyn_tables_in_ro(node, phdrs,
+                                           ehdr->e_phnum,
+                                           hash_vaddr, symtab_vaddr,
+                                           syment_val);
+        if (prc != 0)
+            return prc;
     }
 
     out_pie->link_phdr_vaddr = ehdr->e_phoff;
