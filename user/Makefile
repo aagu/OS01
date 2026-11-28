@@ -269,19 +269,74 @@ $(INTERP_MAIN_ELF): $(INTERP_ENTRY_OBJ) $(INTERP_MAIN_OBJ) $(USER_LINK_KEY)
 		-o $@ $(INTERP_ENTRY_OBJ) $(INTERP_MAIN_OBJ)
 	$(OBJ_CPY) --strip-debug $@
 
+# ── T2 dynamic-link fixtures: dyn_link mains + libt2 ─────────
+# The SONAME of the lib on the link line IS the DT_NEEDED string the
+# consumer records, so the missing-library variant links a stub with
+# -soname /lib/libabsent.so that the image never stages.
+T2_LIB_SRC     := systest/fixtures/t2_lib.c
+T2_MAIN_SRC    := systest/fixtures/t2_main.c
+T2_LIB_OBJ     := $(OBJ_DIR)/systest/fixtures/t2_lib.o
+T2_MAIN_OBJ    := $(OBJ_DIR)/systest/fixtures/t2_main.o
+T2_LIBSO       := $(BUILD_DIR)/libt2.so
+T2_ABSENT_SO   := $(BUILD_DIR)/libabsent.so
+T2_MAIN_ELF    := $(BUILD_DIR)/dyn_link.elf
+T2_MISSING_ELF := $(BUILD_DIR)/dyn_link_missing.elf
+T2_FIXTURES    := $(T2_LIBSO) $(T2_MAIN_ELF) $(T2_MISSING_ELF)
+
+$(T2_LIB_OBJ): $(T2_LIB_SRC) $(USER_COMPILE_KEY)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(INTERP_BASE_CFLAGS) -fno-builtin -fPIC -c $< -o $@
+
+$(T2_MAIN_OBJ): $(T2_MAIN_SRC) $(USER_COMPILE_KEY)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(INTERP_BASE_CFLAGS) -fno-builtin -fPIE -c $< -o $@
+
+$(T2_LIBSO): $(T2_LIB_OBJ) $(USER_LINK_KEY)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) -m elf_x86_64 -shared -nostdlib --hash-style=sysv \
+		-z norelro -z max-page-size=4096 --pack-dyn-relocs=none \
+		-soname /lib/libt2.so -o $@ $(T2_LIB_OBJ)
+	$(OBJ_CPY) --strip-debug $@
+$(T2_ABSENT_SO): $(T2_LIB_OBJ) $(USER_LINK_KEY)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) -m elf_x86_64 -shared -nostdlib --hash-style=sysv \
+		-z norelro -z max-page-size=4096 --pack-dyn-relocs=none \
+		-soname /lib/libabsent.so -o $@ $(T2_LIB_OBJ)
+	$(OBJ_CPY) --strip-debug $@
+
+# ⚠ the entry object provides _start for every T2 main variant: with
+# it missing lld warns about the entry symbol and emits e_entry=0,
+# which the kernel rejects (entry not inside an executable PT_LOAD).
+$(T2_MAIN_ELF): $(INTERP_ENTRY_OBJ) $(T2_MAIN_OBJ) $(T2_LIBSO) $(USER_LINK_KEY)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) -m elf_x86_64 -pie --dynamic-linker /lib/ld.so \
+		--hash-style=sysv -z now -z norelro -z max-page-size=4096 \
+		--pack-dyn-relocs=none \
+		-o $@ $(INTERP_ENTRY_OBJ) $(T2_MAIN_OBJ) $(T2_LIBSO)
+	$(OBJ_CPY) --strip-debug $@
+$(T2_MISSING_ELF): $(INTERP_ENTRY_OBJ) $(T2_MAIN_OBJ) $(T2_ABSENT_SO) $(USER_LINK_KEY)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) -m elf_x86_64 -pie --dynamic-linker /lib/ld.so \
+		--hash-style=sysv -z now -z norelro -z max-page-size=4096 \
+		--pack-dyn-relocs=none \
+		-o $@ $(INTERP_ENTRY_OBJ) $(T2_MAIN_OBJ) $(T2_ABSENT_SO)
+	$(OBJ_CPY) --strip-debug $@
+
 # Structural gate: the ELF shapes the interpreter contract relies on.
 INTERP_CHECK_STAMP := $(BUILD_DIR)/.interp-fixtures.checked
-$(INTERP_CHECK_STAMP): $(INTERP_FIXTURES) $(OS01_ROOT)/tools/tests/check_interp_fixture.py
+$(INTERP_CHECK_STAMP): $(INTERP_FIXTURES) $(T2_FIXTURES) $(OS01_ROOT)/tools/tests/check_interp_fixture.py
 	python3 $(OS01_ROOT)/tools/tests/check_interp_fixture.py \
 		--readelf "$(LLVM_READELF)" \
-		--ldso $(INTERP_LDSO_ELF) --dyn $(INTERP_MAIN_ELF)
+		--ldso $(INTERP_LDSO_ELF) --dyn $(INTERP_MAIN_ELF) \
+		--dynlink $(T2_MAIN_ELF) --dynmissing $(T2_MISSING_ELF) \
+		--libt2 $(T2_LIBSO)
 	@touch $@
 endif
 endif
 
 .PHONY: all clean
 all: $(PROGRAMS) $(RUNTIME_PROBE_ELF) $(ASLR_B_EXEC_ELF) $(PTLS_FIXTURES) \
-     $(PTLS_CHECK_STAMP) $(INTERP_FIXTURES) $(INTERP_CHECK_STAMP) \
+     $(PTLS_CHECK_STAMP) $(INTERP_FIXTURES) $(T2_FIXTURES) $(INTERP_CHECK_STAMP) \
      $(DOOM_ARCHIVE)
 
 $(OBJ_DIR)/%.o: %.c $(USER_COMPILE_KEY)

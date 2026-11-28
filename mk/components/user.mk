@@ -28,7 +28,7 @@ USER_ARTIFACTS := $(addprefix $(USER_ARTIFACT_DIR)/,$(addsuffix .elf,$(USER_PROG
 USER_RUNTIME_PROBE := $(USER_ARTIFACT_DIR)/user_udivti3_link_probe.elf
 USER_ASLR_B_EXEC_FIXTURE := $(if $(and $(filter 1,$(OS01_SYSTEST)),$(filter x86_64-unknown-none,$(RUNTIME_TARGET_user))),$(USER_ARTIFACT_DIR)/aslr_b_exec.elf)
 USER_PTLS_FIXTURES := $(if $(and $(filter 1,$(OS01_SYSTEST)),$(filter x86_64-unknown-none,$(RUNTIME_TARGET_user))),$(addprefix $(USER_ARTIFACT_DIR)/,ptls_exec.elf ptls_pie.elf ptls_plain.elf))
-USER_INTERP_FIXTURES := $(if $(and $(filter 1,$(OS01_SYSTEST)),$(filter x86_64-unknown-none,$(RUNTIME_TARGET_user))),$(addprefix $(USER_ARTIFACT_DIR)/,ldso.elf dyn_exec.elf))
+USER_INTERP_FIXTURES := $(if $(and $(filter 1,$(OS01_SYSTEST)),$(filter x86_64-unknown-none,$(RUNTIME_TARGET_user))),$(addprefix $(USER_ARTIFACT_DIR)/,ldso.elf dyn_exec.elf dyn_link.elf dyn_link_missing.elf libt2.so))
 
 # One grouped rule (GNU make &:, runs once per invocation): under the
 # generation lease the sub-make builds every program into $(USER_BUILD_DIR),
