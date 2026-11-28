@@ -156,9 +156,21 @@ static int scsi_read_10(struct usb_msc_dev *m, uint32_t lba, uint16_t count,
     put_be32(cdb + 2, lba);
     put_be16(cdb + 7, count);
 
-    return usb_msc_bot_command(&m->bot, cdb, sizeof(cdb), USB_MSC_IN,
-                               buf, (uint32_t)count * USB_MSC_SECTOR_SIZE,
-                               true, actual);
+    int rc = usb_msc_bot_command(&m->bot, cdb, sizeof(cdb), USB_MSC_IN,
+                                 buf, (uint32_t)count * USB_MSC_SECTOR_SIZE,
+                                 true, actual);
+#if defined(AARCH64_RP1_IRQ_DIAGNOSTIC) && AARCH64_RP1_IRQ_DIAGNOSTIC
+    if (rc == 0 && actual) {
+        uint64_t full_sectors = (uint64_t)(*actual / USB_MSC_SECTOR_SIZE);
+        if (full_sectors > 0 && (uint64_t)lba <= 1024ULL &&
+            (uint64_t)lba + full_sectors > 1024ULL) {
+            log_info("[rp1-irq-usb-read] disk=%s lba=%u count=%u actual=%lu\n",
+                     (m->bdev && m->bdev->name[0]) ? m->bdev->name : "usb",
+                     (unsigned)lba, (unsigned)count, (unsigned long)*actual);
+        }
+    }
+#endif
+    return rc;
 }
 
 static int scsi_write_10(struct usb_msc_dev *m, uint32_t lba, uint16_t count,

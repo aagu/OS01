@@ -9,6 +9,7 @@
  */
 #include "test_framework.h"
 #include <arch/aarch64/rp1_xhci.h>
+#include <arch/aarch64/rp1_pcie.h>
 #include <driver/xhci.h>
 #include <errno.h>
 #include <stdbool.h>
@@ -38,6 +39,22 @@ static void fdt_be32_put(uint8_t *p, uint32_t v)
     p[1] = (uint8_t)(v >> 16);
     p[2] = (uint8_t)(v >> 8);
     p[3] = (uint8_t)v;
+}
+
+int aarch64_rp1_mmio_read32(const struct aarch64_rp1_irq_platform *p,
+                            enum aarch64_rp1_mmio_space space,
+                            uint32_t off, uint32_t *value)
+{
+    (void)p; (void)space; (void)off; (void)value;
+    return -ENOSYS;
+}
+
+int aarch64_rp1_mmio_write32(const struct aarch64_rp1_irq_platform *p,
+                             enum aarch64_rp1_mmio_space space,
+                             uint32_t off, uint32_t value)
+{
+    (void)p; (void)space; (void)off; (void)value;
+    return -ENOSYS;
 }
 
 static void fdt_init(struct fdt_buf *f) { memset(f, 0, sizeof(*f)); }

@@ -2,7 +2,7 @@
 # "Rootfs manifest"). Programs use the shared discovery list. sh.c is built
 # for development, while /bin/sh remains the BusyBox applet.
 # Flavor-aware program filter: exactly one stress program per variant.
-ROOTFS_USER_PROGRAMS := $(if $(filter 1,$(ARCH6_FSSTRESS_TEST)),$(filter-out sh test_arch10_capacity usb_boot_probe usb_hid_probe,$(USER_PROGRAMS)),$(if $(filter 1,$(CAPACITY_TEST)),$(filter-out sh test_arch6_fsstress usb_boot_probe usb_hid_probe,$(USER_PROGRAMS)),$(filter-out sh test_arch10_capacity test_arch6_fsstress usb_boot_probe usb_hid_probe,$(USER_PROGRAMS))))
+ROOTFS_USER_PROGRAMS := $(if $(filter 1,$(ARCH6_FSSTRESS_TEST)),$(filter-out sh test_arch10_capacity usb_boot_probe usb_hid_probe rp1_irq_probe,$(USER_PROGRAMS)),$(if $(filter 1,$(CAPACITY_TEST)),$(filter-out sh test_arch6_fsstress usb_boot_probe usb_hid_probe rp1_irq_probe,$(USER_PROGRAMS)),$(filter-out sh test_arch10_capacity test_arch6_fsstress usb_boot_probe usb_hid_probe rp1_irq_probe,$(USER_PROGRAMS))))
 ROOTFS_FILES := $(foreach p,$(ROOTFS_USER_PROGRAMS),/bin/$(p)=$(USER_ARTIFACT_DIR)/$(p).elf:0755) \
                 /bin/busybox=$(USER_ARTIFACT_DIR)/busybox.elf:0755 \
                 /kernel.bin=$(KERNEL_ARTIFACT):0644 /etc/inittab=$(INITTAB_FILE):0644
