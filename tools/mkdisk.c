@@ -291,6 +291,7 @@ int main(int argc, char **argv)
     const char *efi_path       = NULL;
     const char *manifest_path  = NULL;
     const char *esp_kernel     = "kernel.bin";
+    const char *esp_kernel_src_arg = NULL;
     const char *esp_config     = NULL;
 
     for (int i = 1; i < argc; i++) {
@@ -299,6 +300,7 @@ int main(int argc, char **argv)
         else if (!strcmp(argv[i], "--temp-dir") && i+1 < argc)       temp_dir      = argv[++i];
         else if (!strcmp(argv[i], "--rootfs-manifest") && i+1 < argc) manifest_path = argv[++i];
         else if (!strcmp(argv[i], "--esp-kernel") && i+1 < argc)     esp_kernel    = argv[++i];
+        else if (!strcmp(argv[i], "--esp-kernel-src") && i+1 < argc) esp_kernel_src_arg = argv[++i];
         else if (!strcmp(argv[i], "--esp-config") && i+1 < argc)     esp_config    = argv[++i];
     }
     if (!output_path || !efi_path || !temp_dir || !manifest_path) {
@@ -361,17 +363,18 @@ int main(int argc, char **argv)
     snprintf(esp_tmp, sizeof(esp_tmp), "%s/_mkdisk_esp.%d.img", temp_dir, getpid());
     snprintf(rootfs_tmp, sizeof(rootfs_tmp), "%s/_mkdisk_rootfs.%d.img", temp_dir, getpid());
 
-    // The bootloader reads the ESP kernel from the ESP; the manifest's
-    // /<esp-kernel> file entry (default /kernel.bin, x86 layout) is its
-    // source (no separate --kernel argument).  aarch64 passes
-    // --esp-kernel kernel.elf because its UEFI loader reads \kernel.elf.
-    char esp_kernel_dest[64];
-    snprintf(esp_kernel_dest, sizeof(esp_kernel_dest), "/%s", esp_kernel);
-    const char *esp_kernel_src = NULL;
-    for (int i = 0; i < nentries; i++) {
-        if (!entries[i].is_symlink && !strcmp(entries[i].dest, esp_kernel_dest)) {
-            esp_kernel_src = entries[i].src;
-            break;
+    // The bootloader reads the ESP kernel from the ESP; --esp-kernel-src
+    // supplies it directly, or else the manifest's /<esp-kernel> file entry
+    // (default /kernel.bin, x86 layout) is used as a fallback.
+    const char *esp_kernel_src = esp_kernel_src_arg;
+    if (!esp_kernel_src) {
+        char esp_kernel_dest[64];
+        snprintf(esp_kernel_dest, sizeof(esp_kernel_dest), "/%s", esp_kernel);
+        for (int i = 0; i < nentries; i++) {
+            if (!entries[i].is_symlink && !strcmp(entries[i].dest, esp_kernel_dest)) {
+                esp_kernel_src = entries[i].src;
+                break;
+            }
         }
     }
 

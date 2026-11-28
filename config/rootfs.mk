@@ -5,7 +5,7 @@
 ROOTFS_USER_PROGRAMS := $(if $(filter 1,$(ARCH6_FSSTRESS_TEST)),$(filter-out sh test_arch10_capacity usb_boot_probe usb_hid_probe rp1_irq_probe,$(USER_PROGRAMS)),$(if $(filter 1,$(CAPACITY_TEST)),$(filter-out sh test_arch6_fsstress usb_boot_probe usb_hid_probe rp1_irq_probe,$(USER_PROGRAMS)),$(filter-out sh test_arch10_capacity test_arch6_fsstress usb_boot_probe usb_hid_probe rp1_irq_probe,$(USER_PROGRAMS))))
 ROOTFS_FILES := $(foreach p,$(ROOTFS_USER_PROGRAMS),/bin/$(p)=$(USER_ARTIFACT_DIR)/$(p).elf:0755) \
                 /bin/busybox=$(USER_ARTIFACT_DIR)/busybox.elf:0755 \
-                /kernel.bin=$(KERNEL_ARTIFACT):0644 /etc/inittab=$(INITTAB_FILE):0644
+                /etc/inittab=$(INITTAB_FILE):0644
 ifeq ($(filter 1,$(OS01_SYSTEST))$(filter x86_64-unknown-none,$(RUNTIME_TARGET_user)),1x86_64-unknown-none)
 ROOTFS_FILES += /bin/aslr_b_exec=$(USER_ARTIFACT_DIR)/aslr_b_exec.elf:0755 \
                 /bin/ptls_exec=$(USER_ARTIFACT_DIR)/ptls_exec.elf:0755 \

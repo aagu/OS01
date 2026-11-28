@@ -191,11 +191,12 @@ $(ROOTFS_MANIFEST): $(ROOTFS_MANIFEST_DEPS)
 	@test -s $@.tmp
 	@mv $@.tmp $@
 
-$(DISK_IMG): $(ROOTFS_MANIFEST) $(UEFI_EFI) $(HOST_MKDISK)
+$(DISK_IMG): $(ROOTFS_MANIFEST) $(UEFI_EFI) $(HOST_MKDISK) $(KERNEL_ARTIFACT)
 	@$(MAKE) -C tools check-deps HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools
 	@mkdir -p $(dir $@) $(dir $@)tmp
 	@$(HOST_MKDISK) --output $@ --efi $(UEFI_EFI) \
-	  --temp-dir $(dir $@)tmp --rootfs-manifest $(ROOTFS_MANIFEST)
+	  --temp-dir $(dir $@)tmp --rootfs-manifest $(ROOTFS_MANIFEST) \
+	  --esp-kernel-src $(KERNEL_ARTIFACT)
 
 # Project-root disk.img is a one-way, content-guarded copy of the NORMAL
 # image (legacy entry point) — never the variant image, regardless of
@@ -312,24 +313,22 @@ ifeq ($(IMAGE_VARIANT),selftest)
 	@$(MAKE) -C tools check-deps HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools
 	@mkdir -p $(dir $@) $(dir $@)tmp
 	@rm -f $@.tmp
-	@printf 'file\t/kernel.elf\t$(KERNEL_BUILD_DIR)/kernel.elf\t0644\n' > $@.tmp
-	@printf 'file\t/etc/inittab\t$(OS01_ROOT)/config/inittab\t0644\n' >> $@.tmp
+	@printf 'file\t/etc/inittab\t$(OS01_ROOT)/config/inittab\t0644\n' > $@.tmp
 	@printf 'file\t/etc/vfs-selftest.txt\t$(AARCH64_SELFTEST_MARKER)\t0644\n' >> $@.tmp
 	@mv $@.tmp $(dir $@)rootfs.selftest.manifest
 	@$(HOST_MKDISK) --output $@ --efi $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
 	  --temp-dir $(dir $@)tmp --rootfs-manifest $(dir $@)rootfs.selftest.manifest \
-	  --esp-kernel kernel.elf --esp-config $(AARCH64_ESP_CONFIG)
+	  --esp-kernel kernel.elf --esp-kernel-src $(KERNEL_BUILD_DIR)/kernel.elf \
+	  --esp-config $(AARCH64_ESP_CONFIG)
 else
 	@$(MAKE) -C tools check-deps HOST_TOOLS_DIR=$(BUILD_DIR)/host-tools
 	@mkdir -p $(dir $@) $(dir $@)tmp
 	@rm -f $@.tmp
 	$(eval include $(OS01_ROOT)/config/rootfs.mk)
 	@# Product manifest (2026-11-21): the full unlocked aarch64 product
-	@# userspace on the ext2 rootfs.  /kernel.elf doubles as the mkdisk
-	@# --esp-kernel source (the aarch64 loader reads \kernel.elf from the
-	@# ESP) — mirroring the x86 /kernel.bin contract.
-	@printf 'file\t/kernel.elf\t$(BUILD_DIR)/artifacts/kernel.elf\t0644\n' > $@.tmp
-	@printf 'file\t/etc/inittab\t$(INITTAB_FILE)\t0644\n' >> $@.tmp
+	@# userspace on the ext2 rootfs.  The ESP kernel is supplied via
+	@# --esp-kernel-src so /kernel.elf is not duplicated in ext2 rootfs.
+	@printf 'file\t/etc/inittab\t$(INITTAB_FILE)\t0644\n' > $@.tmp
 	@printf 'file\t/bin/busybox\t$(USER_ARTIFACT_DIR)/busybox.elf\t0755\n' >> $@.tmp
 	@for p in $(AARCH64_ROOTFS_PROGRAMS); do \
 	  printf 'file\t/bin/%s\t$(USER_ARTIFACT_DIR)/%s.elf\t0755\n' "$$p" "$$p" >> $@.tmp; \
@@ -344,7 +343,8 @@ else
 	@mv $@.tmp $(dir $@)rootfs.product.manifest
 	@$(HOST_MKDISK) --output $@ --efi $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI \
 	  --temp-dir $(dir $@)tmp --rootfs-manifest $(dir $@)rootfs.product.manifest \
-	  --esp-kernel kernel.elf --esp-config $(AARCH64_ESP_CONFIG)
+	  --esp-kernel kernel.elf --esp-kernel-src $(BUILD_DIR)/artifacts/kernel.elf \
+	  --esp-config $(AARCH64_ESP_CONFIG)
 endif
 
 endif
