@@ -501,6 +501,11 @@ static const test_case_t tests[] = {
     {"pt_tls_exec",               "PT_TLS load/spawn/exec",    test_pt_tls_exec,               1, 0},
     // ── PT_INTERP: kernel-loaded interpreter handoff (T1) ──
     {"exec_interp",               "PT_INTERP exec handoff",    test_exec_interp,               1, 0},
+    // ── T2: dynamic-link chain (ld.so relocations + negatives) ──
+    {"exec_dyn_link",             "dyn link chain rc=0",       test_exec_dyn_link,             1, 0},
+    {"exec_dyn_link_missing",     "dyn link missing lib 95",   test_exec_dyn_link_missing,     1, 0},
+    {"exec_dyn_link_gnuabi",      "dyn link Linux-ABI rej",    test_exec_dyn_link_gnuabi,      1, 0},
+    {"exec_dyn_link_baddyn",      "dyn link bad dyn 98",       test_exec_dyn_link_baddyn,      1, 0},
 #endif
 };
 

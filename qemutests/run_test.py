@@ -647,10 +647,78 @@ def test_systest(tester):
         for cid, reason in sorted(pr.reasons.items()):
             print(f"FAIL: systest case {cid}: {reason}")
         return False
+
+    # ── T2 serial-window gates ─────────────────────────────────
+    # The exit codes prove the exec layer and ld.so agreed on the
+    # outcome; these windows additionally pin WHERE each failure came
+    # from, so a vacuous pass (right rc, wrong path) still fails the
+    # suite.  Boundaries are the protocol's own per-case records —
+    # each case opens with "[TEST] BEGIN <id>" and closes with the
+    # SAME id's PASS/FAIL/SKIP terminal ([TEST] END only appears at
+    # suite end).  Only the T2 cases are checked, and only when they
+    # actually ran (SYSTEST_CASE may filter them out); no global scan
+    # — T1's exec_interp window legitimately contains the skeleton's
+    # [LDSO-ENTER] too.
+    if not _check_ldso_serial_windows(output, requested_case):
+        return False
+
     if requested_case is not None:
         print(f"PASS: case {requested_case} passed")
     else:
         print(f"PASS: all {pr.passed} syscall tests passed")
+    return True
+
+
+T2_SERIAL_CASES = (
+    # (case id, ordered markers, forbidden substring, required substring)
+    ("exec_dyn_link",
+     ["[LDSO-ENTER]", "[LDSO-RELOC]", "[DYN-T2]"], None, None),
+    ("exec_dyn_link_missing", None, None, "[LDSO-ERR-OPEN]"),
+    ("exec_dyn_link_gnuabi", None, "[LDSO-", None),
+    ("exec_dyn_link_baddyn", None, None, "[LDSO-ERR-DYN]"),
+)
+
+
+def _check_ldso_serial_windows(output: str, requested_case) -> bool:
+    """Per-case serial evidence for the T2 dynamic-link cases.  A
+    window spans from the case's BEGIN line to its own terminal;
+    missing markers, wrong marker order, or a marker outside its
+    window (ld.so running where it must not) FAIL the suite."""
+    for cid, ordered, forbidden, required in T2_SERIAL_CASES:
+        begin = f"[TEST] BEGIN {cid}\n"
+        bpos = output.find(begin)
+        if bpos < 0:
+            # Case did not run in this invocation (SYSTEST_CASE filter
+            # or suite drift): nothing to gate here.  A full-table run
+            # that lost a case already failed parse_v1 above.
+            continue
+        if requested_case is not None and requested_case != cid:
+            continue
+        m = re.search(
+            rf"\[TEST\] (?:PASS|FAIL|SKIP) {re.escape(cid)}\n",
+            output[bpos:])
+        if not m:
+            print(f"FAIL: serial window {cid}: no terminal record")
+            return False
+        window = output[bpos:bpos + m.end()]
+
+        if forbidden is not None and forbidden in window:
+            print(f"FAIL: serial window {cid}: contains {forbidden!r} "
+                  f"(the interpreter ran where it must not)")
+            return False
+        if required is not None and required not in window:
+            print(f"FAIL: serial window {cid}: missing {required!r} "
+                  f"(failure path not evidenced)")
+            return False
+        if ordered:
+            pos = 0
+            for marker in ordered:
+                at = window.find(marker, pos)
+                if at < 0:
+                    print(f"FAIL: serial window {cid}: {marker!r} "
+                          f"missing or out of order")
+                    return False
+                pos = at + len(marker)
     return True
 
 

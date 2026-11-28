@@ -94,9 +94,10 @@ typedef struct {
 #define DT_RELAENT   9
 #define DT_STRSZ     10
 #define DT_SYMENT    11
+#define DT_SONAME    14
 #define DT_JMPREL    23
 #define DT_PLTREL    20
-#define DT_RELACOUNT 0x6ffffef9LL
+#define DT_RELACOUNT 0x6ffffff9LL
 #define DT_DEBUG     21
 #define DT_FLAGS     30
 #define DT_FLAGS_1   0x6ffffffbLL

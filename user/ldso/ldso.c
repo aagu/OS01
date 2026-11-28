@@ -397,6 +397,10 @@ static bool scan_dynamic(const elf64_dyn_t *dyn, uint64_t bytes,
                 return false;
             out->syment = val;
             break;
+        case DT_SONAME:
+            /* Inert for linking; the staged filename is what the
+             * DT_NEEDED strings point at. */
+            break;
         case DT_HASH:
             if (out->hash_raw != 0)
                 return false;
@@ -630,7 +634,7 @@ static int apply_rela_table(dso_img_t *d, const elf64_phdr_t *ph,
 {
     if (bytes == 0)
         return 0;
-    if ((bytes & 15ULL) != 0 || (bytes % 24) != 0)
+    if ((bytes % 24) != 0)     /* RELA entries are 24 bytes each */
         return 98;
     uint64_t n = bytes / 24;
     if (n > LDSO_SCOPE_BOUND)
@@ -749,7 +753,7 @@ static long prot_for(uint32_t p_flags)
 static int validate_lib_shape(long fd, uint64_t file_size,
                               const elf64_ehdr_t *eh,
                               elf64_phdr_t *ph,
-                              dso_img_t *d)
+                              dso_img_t *d, const char **errtag)
 {
     if (eh->e_phentsize != sizeof(elf64_phdr_t) ||
         eh->e_phnum == 0 || eh->e_phnum > LDSO_PHDR_MAX ||
@@ -758,10 +762,14 @@ static int validate_lib_shape(long fd, uint64_t file_size,
     uint64_t ph_bytes = (uint64_t)eh->e_phnum * sizeof(elf64_phdr_t);
     if (eh->e_phoff > file_size || ph_bytes > file_size - eh->e_phoff)
         return 98;
-    if (sysc3(SYS_lseek, fd, (long)eh->e_phoff, SEEK_SET) < 0)
+    if (sysc3(SYS_lseek, fd, (long)eh->e_phoff, SEEK_SET) < 0) {
+        *errtag = "PHRD";
         return 99;
-    if (!read_full(fd, ph, ph_bytes))
+    }
+    if (!read_full(fd, ph, ph_bytes)) {
+        *errtag = "PHRD";
         return 99;
+    }
 
     unsigned nloads = 0;
     uint64_t lo = 0, hi = 0;
@@ -812,13 +820,20 @@ static int validate_lib_shape(long fd, uint64_t file_size,
         dynp->p_filesz > sizeof(g_dyn_scratch) ||
         dynp->p_filesz != dynp->p_memsz)
         return 98;
-    if (sysc3(SYS_lseek, fd, (long)dynp->p_offset, SEEK_SET) < 0)
+    if (sysc3(SYS_lseek, fd, (long)dynp->p_offset, SEEK_SET) < 0) {
+        *errtag = "DYNRD";
         return 99;
-    if (!read_full(fd, g_dyn_scratch, dynp->p_filesz))
+    }
+    if (!read_full(fd, g_dyn_scratch, dynp->p_filesz)) {
+        *errtag = "DYNRD";
         return 99;
+    }
     if (!scan_dynamic((const elf64_dyn_t *)g_dyn_scratch, dynp->p_filesz,
-                      true /* shared objects: no GNU hash */, d))
+                      true /* shared objects: no GNU hash */, d)) {
+        *errtag = "DYN";       /* bounded-scan failure (no DT_NULL or
+                                * malformed entries) — attributed */
         return 98;
+    }
 
     /* A loaded object must be hash-lookup ready and every table it
      * declared must be covered by its own readable LOADs. */
@@ -831,12 +846,12 @@ static int validate_lib_shape(long fd, uint64_t file_size,
     if (d->rela_bytes > 0 &&
         (!range_in_readable_load(ph, eh->e_phnum, d->rela_raw,
                                  d->rela_bytes) ||
-         (d->rela_bytes & 15ULL) != 0))
+         (d->rela_bytes % 24) != 0))
         return 98;
     if (d->jmprel_bytes > 0 &&
         (!range_in_readable_load(ph, eh->e_phnum, d->jmprel_raw,
                                  d->jmprel_bytes) ||
-         (d->jmprel_bytes & 15ULL) != 0))
+         (d->jmprel_bytes % 24) != 0))
         return 98;
     if (d->strsz > 0 &&
         !range_in_readable_load(ph, eh->e_phnum, d->strtab_raw, d->strsz))
@@ -901,8 +916,8 @@ static int load_lib(const char *path, const elf64_phdr_t **out_ph,
     if (sysc3(SYS_lseek, fd, 0, SEEK_SET) < 0 ||
         !read_full(fd, &eh, sizeof(eh))) {
         sysc3(SYS_close, fd, 0, 0);
-        LDSO_ERR("ELF");
-        return 98;
+        LDSO_ERR("EHDR");
+        return 99;
     }
     if (eh.e_ident[0] != 0x7f || eh.e_ident[1] != 'E' ||
         eh.e_ident[2] != 'L' || eh.e_ident[3] != 'F' ||
@@ -915,15 +930,20 @@ static int load_lib(const char *path, const elf64_phdr_t **out_ph,
 
     dso_img_t *d = &g_dso[g_ndso];
     lds_zero(d, sizeof(*d));
+    const char *errtag = "ELF";
     int rc = validate_lib_shape(fd, (uint64_t)fsize, &eh,
-                                (elf64_phdr_t *)g_phdr_scratch, d);
+                                (elf64_phdr_t *)g_phdr_scratch, d,
+                                &errtag);
     if (rc == 95) {
         sysc3(SYS_close, fd, 0, 0);
         return rc;
     }
     if (rc != 0) {
         sysc3(SYS_close, fd, 0, 0);
-        LDSO_ERR("ELF");
+        if (errtag[0] == 'D')  /* DYN vs ELF: which validator spoke */
+            LDSO_ERR("DYN");
+        else
+            LDSO_ERR("ELF");
         return rc;
     }
 
@@ -973,6 +993,22 @@ static int load_lib(const char *path, const elf64_phdr_t **out_ph,
         d->bias = map_start - lo;
     }
 
+    /* The anonymous mapping is demand-populated: PTEs exist only
+     * after a USER-mode access (the kernel's read path faults instead
+     * of demand-filling — copy_to_user_ft's prepare stage rejects
+     * ranges with absent PTEs).  Pre-touch every page fd_read will
+     * write so the file bytes land, then let BSS stay zero. */
+    for (unsigned i = 0; i < eh.e_phnum; i++) {
+        const elf64_phdr_t *l = (const elf64_phdr_t *)g_phdr_scratch + i;
+        if (l->p_type != PT_LOAD || l->p_filesz == 0)
+            continue;
+        uint64_t tlo = align_down4k(l->p_vaddr), tend;
+        if (align_up4k(l->p_vaddr + l->p_filesz, &tend))
+            break;
+        for (uint64_t va = tlo; va < tend; va += LDSO_PAGE)
+            *(volatile uint8_t *)(d->bias + va) = 0;
+    }
+
     /* Read each PT_LOAD's file bytes to bias + p_vaddr; BSS beyond
      * p_filesz stays zero from the anonymous mapping. */
     segwin_t wins[LDSO_SEG_MAX];
@@ -982,11 +1018,16 @@ static int load_lib(const char *path, const elf64_phdr_t **out_ph,
         if (l->p_type != PT_LOAD || l->p_memsz == 0)
             continue;
         if (l->p_filesz > 0) {
-            if (sysc3(SYS_lseek, fd, (long)l->p_offset, SEEK_SET) < 0 ||
-                !read_full(fd, (void *)(d->bias + l->p_vaddr),
+            long ls = sysc3(SYS_lseek, fd, (long)l->p_offset, SEEK_SET);
+            if (ls < 0) {
+                sysc3(SYS_close, fd, 0, 0);
+                LDSO_ERR("SEEK");
+                return 99;
+            }
+            if (!read_full(fd, (void *)(d->bias + l->p_vaddr),
                            l->p_filesz)) {
                 sysc3(SYS_close, fd, 0, 0);
-                LDSO_ERR("ELF");
+                LDSO_ERR("SEGRD");
                 return 99;
             }
         }
@@ -1086,11 +1127,13 @@ static void t2_run(const uint64_t *sp)
         LDSO_FAIL(98, "ELF");
     if (m->rela_bytes > 0 &&
         (!range_in_readable_load(mph, (unsigned)phnum, m->rela_raw,
-                                 m->rela_bytes) || (m->rela_bytes & 15ULL)))
+                                 m->rela_bytes) ||
+         (m->rela_bytes % 24) != 0))
         LDSO_FAIL(98, "ELF");
     if (m->jmprel_bytes > 0 &&
         (!range_in_readable_load(mph, (unsigned)phnum, m->jmprel_raw,
-                                 m->jmprel_bytes) || (m->jmprel_bytes & 15ULL)))
+                                 m->jmprel_bytes) ||
+         (m->jmprel_bytes % 24) != 0))
         LDSO_FAIL(98, "ELF");
 
     /* Load the dependency graph breadth-first (acceptance: one
