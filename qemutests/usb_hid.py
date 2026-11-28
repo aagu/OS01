@@ -34,7 +34,8 @@ try:
 except ImportError:  # pragma: no cover - exercised only on broken installs
     ProcessSession = None
 
-from qemutests.harness.qemu_cmd import build_qemu_x86
+from qemutests.aarch64_uefi_smp import generate_diagnostic_dtb
+from qemutests.harness.qemu_cmd import build_qemu_aarch64, build_qemu_x86
 from qemutests.harness.qmp import QmpClient
 from qemutests import usb_boot as ub
 
@@ -72,12 +73,27 @@ def direct_argv(
     disk: Path,
     smp: int,
     *,
+    arch: str = "x86_64",
+    dtb: Path | None = None,
     qmp_sock: Path | None = None,
 ) -> list[str]:
-    """Build the direct USB HID + AHCI root QEMU command line."""
+    """Build the direct USB HID + root disk QEMU command line."""
     extra: list[str] = []
     if qmp_sock is not None:
         extra.extend(["-qmp", f"unix:{qmp_sock},server=on,wait=off"])
+    if arch == "aarch64":
+        extra.extend(["-device", "bochs-display"])
+        return build_qemu_aarch64(
+            qemu=str(qemu),
+            firmware=str(firmware),
+            image=str(disk),
+            cpus=smp,
+            dtb=str(dtb) if dtb is not None else None,
+            memory=MEMORY_MIB,
+            storage="virtio",
+            usb_input="direct",
+            extra=extra,
+        )
     return build_qemu_x86(
         qemu=str(qemu),
         firmware=str(firmware),
@@ -97,6 +113,8 @@ def hub_argv(
     disk: Path,
     smp: int,
     *,
+    arch: str = "x86_64",
+    dtb: Path | None = None,
     qmp_sock: Path | None = None,
     trace_events: Path | None = None,
     trace_file: Path | None = None,
@@ -107,6 +125,21 @@ def hub_argv(
         extra.extend(["-qmp", f"unix:{qmp_sock},server=on,wait=off"])
     if trace_events is not None and trace_file is not None:
         extra.extend(["-trace", f"events={trace_events},file={trace_file}"])
+    if arch == "aarch64":
+        extra.extend(["-device", "bochs-display"])
+        return build_qemu_aarch64(
+            qemu=str(qemu),
+            firmware=str(firmware),
+            image=str(disk),
+            cpus=smp,
+            dtb=str(dtb) if dtb is not None else None,
+            memory=MEMORY_MIB,
+            storage="usb",
+            usb_readonly=False,
+            usb_hub=True,
+            usb_input="hub",
+            extra=extra,
+        )
     return build_qemu_x86(
         qemu=str(qemu),
         firmware=str(firmware),
@@ -461,6 +494,11 @@ def _run_direct_or_hub(
     qmp_sock = qmp_tmpdir / "q.sock"
     events_file = run_dir / "trace-events.txt"
     trace_file = run_dir / "trace.log"
+    arch = getattr(args, "arch", "x86_64")
+    dtb: Path | None = None
+    if arch == "aarch64":
+        dtb = Path(generate_diagnostic_dtb(qemu, str(qmp_tmpdir), cpus=smp, ram_mib=MEMORY_MIB))
+
     if case == CASE_HUB:
         events_file.write_text("scsi_disk_new_request\nusb_msd_send_status\n")
         argv = hub_argv(
@@ -468,12 +506,22 @@ def _run_direct_or_hub(
             firmware,
             private_disk,
             smp,
+            arch=arch,
+            dtb=dtb,
             qmp_sock=qmp_sock,
             trace_events=events_file,
             trace_file=trace_file,
         )
     else:
-        argv = direct_argv(qemu, firmware, private_disk, smp, qmp_sock=qmp_sock)
+        argv = direct_argv(
+            qemu,
+            firmware,
+            private_disk,
+            smp,
+            arch=arch,
+            dtb=dtb,
+            qmp_sock=qmp_sock,
+        )
 
     _write_json(run_dir / "argv.json", argv)
 
@@ -869,6 +917,7 @@ def run_case(args: argparse.Namespace, *, session_factory=None) -> int:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="USB-only HID input & Hub storage E2E runner")
     parser.add_argument("--case", required=True, choices=CASES)
+    parser.add_argument("--arch", default="x86_64", choices=("x86_64", "aarch64"))
     parser.add_argument("--qemu", required=True)
     parser.add_argument("--firmware", required=True)
     parser.add_argument("--disk", required=True)

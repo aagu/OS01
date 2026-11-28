@@ -30,17 +30,22 @@ static bool hid_ep_valid(const struct usb_endpoint_descriptor *ep,
     if (mps < min_mps)
         return false;
 
+    uint8_t interval = ep->bInterval;
     switch (speed_class) {
     case XHCI_PORT_SPEED_LOW:
-        if (mps > 8U || ep->bInterval < 10U)
+        if (mps > 8U)
             return false;
+        /* Many real-world Low-Speed HID devices advertise bInterval < 10 ms
+         * (e.g. 8 ms or 1 ms) despite USB 2.0 §9.6.6; clamp to 10 ms. */
+        if (interval < 10U)
+            interval = 10U;
         break;
     case XHCI_PORT_SPEED_FULL:
-        if (mps > 64U || ep->bInterval < 1U)
+        if (mps > 64U || interval < 1U)
             return false;
         break;
     case XHCI_PORT_SPEED_HIGH:
-        if (mps > 1024U || ep->bInterval < 1U || ep->bInterval > 16U)
+        if (mps > 1024U || interval < 1U || interval > 16U)
             return false;
         break;
     default:
@@ -51,7 +56,7 @@ static bool hid_ep_valid(const struct usb_endpoint_descriptor *ep,
     out_cand->iface = iface_num;
     out_cand->dci = dci;
     out_cand->ep_addr = ep->bEndpointAddress;
-    out_cand->interval = ep->bInterval;
+    out_cand->interval = interval;
     out_cand->mps = mps;
     return true;
 }

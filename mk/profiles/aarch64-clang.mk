@@ -365,10 +365,10 @@ KERNEL_BUILD_DIR := $(BUILD_DIR)/kernel$(if $(KERNEL_VARIANT),/$(KERNEL_VARIANT)
 USER_VARIANT ?= $(if $(filter 1,$(OS01_SYSTEST)),systest)$(if $(filter 1,$(USER_DEBUG)),user-debug)
 USER_BUILD_DIR := $(BUILD_DIR)/user$(if $(USER_VARIANT),/$(USER_VARIANT))
 USER_ARTIFACT_DIR := $(BUILD_DIR)/artifacts/user$(if $(USER_VARIANT),/$(USER_VARIANT))
-# Directory apps that link the gfx/gui/lvgl/mbedTLS sysroot libraries are
-# x86-only until those libraries exist on this arch (user/apps.mk filters
+# Directory apps that link the mbedTLS sysroot library are
+# x86-only until that library exists on this arch (user/apps.mk filters
 # these out of USER_PROGRAMS).
-USER_EXCLUDED_PROGRAMS := usb_hid_probe netmodeltest
+USER_EXCLUDED_PROGRAMS := netmodeltest
 UEFI_BUILD_DIR := $(BUILD_DIR)/uefi
 UEFI_RUNTIME_DIR := $(BUILD_DIR)/uefi-runtime
 UEFI_EFI   ?= $(BUILD_DIR)/artifacts/uefi/BOOTAA64.EFI

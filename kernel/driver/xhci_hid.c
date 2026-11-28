@@ -1,4 +1,4 @@
-/* kernel/arch/x86_64/driver/xhci_hid.c — xHCI Boot HID runtime service */
+/* kernel/driver/xhci_hid.c — xHCI Boot HID runtime service */
 #include <driver/xhci_hid.h>
 #include <driver/xhci.h>
 #include <driver/usb_hid_report.h>
@@ -809,13 +809,18 @@ int arch_usb_hid_start_worker(void)
 }
 
 #ifndef OS01_HOST_TEST
+#ifdef __aarch64__
+static const char *const xhci_hid_requires[] = { "device-boot", "rp1-xhci" };
+#else
 static const char *const xhci_hid_requires[] = { "device-boot" };
+#endif
 
 static int xhci_hid_register(void)
 {
     return register_subsys_deps("usb-hid", xhci_hid_init,
                                 SUBSYS_PHASE_STORAGE, SUBSYS_FLAG_OPTIONAL,
-                                xhci_hid_requires, 1);
+                                xhci_hid_requires,
+                                (unsigned)(sizeof(xhci_hid_requires) / sizeof(xhci_hid_requires[0])));
 }
 SUBSYS_INITCALL(xhci_hid_register);
 #else

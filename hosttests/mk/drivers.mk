@@ -571,7 +571,7 @@ test-xhci-intr-in test_xhci_intr_in: $(TEST_BLD)/test_xhci_intr_in.elf
 	$<
 
 # xHCI Boot HID runtime service (binding, monitor, disconnect, teardown)
-$(TEST_BLD)/xhci_hid_production.o: $(TESTS_DIR)/kernel/arch/x86_64/driver/xhci_hid.c
+$(TEST_BLD)/xhci_hid_production.o: $(TESTS_DIR)/kernel/driver/xhci_hid.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
 

@@ -278,13 +278,15 @@ static void test_hid_scan_config(void)
     assert_eq(0, xhci_hid_scan_config(bad_mps_bits, sizeof(bad_mps_bits), XHCI_PORT_SPEED_HIGH, out, &skip));
     assert_false(out[XHCI_HID_KEYBOARD].valid);
 
-    const uint8_t bad_ls_intv[] = {
+    /* LS bInterval < 10 (real-world quirk) is accepted and clamped to 10 */
+    const uint8_t quirk_ls_intv[] = {
         9, USB_DESC_TYPE_CONFIGURATION, 25, 0, 1, 1, 0, 0xA0, 50,
         9, USB_DESC_TYPE_INTERFACE, 0, 0, 1, USB_CLASS_HID, USB_HID_SUBCLASS_BOOT, USB_HID_PROTO_KEYBOARD, 0,
         7, USB_DESC_TYPE_ENDPOINT, 0x81, 3, 8, 0, 9,
     };
-    assert_eq(0, xhci_hid_scan_config(bad_ls_intv, sizeof(bad_ls_intv), XHCI_PORT_SPEED_LOW, out, &skip));
-    assert_false(out[XHCI_HID_KEYBOARD].valid);
+    assert_eq(0, xhci_hid_scan_config(quirk_ls_intv, sizeof(quirk_ls_intv), XHCI_PORT_SPEED_LOW, out, &skip));
+    assert_true(out[XHCI_HID_KEYBOARD].valid);
+    assert_eq(10, out[XHCI_HID_KEYBOARD].interval);
 
     const uint8_t bad_hs_intv[] = {
         9, USB_DESC_TYPE_CONFIGURATION, 25, 0, 1, 1, 0, 0xA0, 50,

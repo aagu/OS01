@@ -292,7 +292,7 @@ endif
 # probe programs are dropped from the NORMAL image on x86 too
 # (config/rootfs.mk applies the same filter).  Requires userland: user.mk
 # defines USER_PROGRAMS and is included before this file.
-AARCH64_ROOTFS_PROGRAMS := $(filter-out sh test_arch10_capacity test_arch6_fsstress usb_boot_probe rp1_irq_probe,$(USER_PROGRAMS))
+AARCH64_ROOTFS_PROGRAMS := $(filter-out sh test_arch10_capacity test_arch6_fsstress usb_boot_probe usb_hid_probe rp1_irq_probe,$(USER_PROGRAMS))
 AARCH64_ROOTFS_PROGRAM_ELFS := $(addprefix $(USER_ARTIFACT_DIR)/,$(addsuffix .elf,$(AARCH64_ROOTFS_PROGRAMS)))
 AARCH64_SELFTEST_MARKER := $(BUILD_DIR)/image$(if $(IMAGE_VARIANT),/$(IMAGE_VARIANT))/vfs-selftest.txt
 

@@ -50,6 +50,7 @@ bool pl011_rx_pending(void);
 uint32_t pl011_dr_read(void);
 void pl011_irq_rx_enable(void);
 void pl011_clear_ints(void);
+extern void keyboard_set_tty(tty_t *tty) __attribute__((weak));
 
 static tty_t *console_tty;
 static bool console_rx_poll_needed;
@@ -180,6 +181,8 @@ static void rp1_attach_fallback(const char *reason)
 
 void arch_console_input_attach(struct tty_struct *tty)
 {
+    if (keyboard_set_tty)
+        keyboard_set_tty(tty);
 #ifdef OS01_SELFTEST
     console_tty = tty;
     return;

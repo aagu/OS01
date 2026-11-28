@@ -156,9 +156,22 @@ def build_qemu_aarch64(
     extra: Sequence[str] = (),
     storage: str = "virtio",
     decoy_image: str | None = None,
+    usb_readonly: bool = True,
+    usb_hub: bool = False,
+    usb_input: str = "off",
 ) -> list[str]:
     """Build an aarch64 QEMU argv list with the paired virtio-rng device."""
+    if usb_input not in ("off", "direct", "hub"):
+        raise ValueError(f"Unsupported usb_input mode: {usb_input!r}")
+    if usb_hub and storage != "usb":
+        raise ValueError("usb_hub=True requires storage='usb'")
+    if usb_input == "hub" and (storage != "usb" or not usb_hub):
+        raise ValueError("usb_input='hub' requires storage='usb' and usb_hub=True")
     machine = "virt,gic-version=2" + (",acpi=off" if dtb else "")
+    usb_drive_spec = f"if=none,file={image},format=raw"
+    if usb_readonly:
+        usb_drive_spec += ",readonly=on"
+    usb_drive_spec += ",id=usb"
     if storage == "virtio":
         pflash_arg = f"if=pflash,format=raw,file={firmware}"
         storage_args = [
@@ -167,10 +180,19 @@ def build_qemu_aarch64(
         ]
     elif storage in ("usb", "usb+virtio"):
         pflash_arg = f"if=pflash,format=raw,readonly=on,file={firmware}"
+        if usb_hub:
+            usb_devs = [
+                "-device", "usb-hub,bus=xhci.0,port=1",
+                "-device", "usb-storage,drive=usb,bus=xhci.0,port=1.2,bootindex=0",
+            ]
+        else:
+            usb_devs = [
+                "-device", "usb-storage,drive=usb,bus=xhci.0,port=1,bootindex=0",
+            ]
         storage_args = [
-            "-drive", f"if=none,file={image},format=raw,readonly=on,id=usb",
+            "-drive", usb_drive_spec,
             "-device", "qemu-xhci,id=xhci,p2=4,p3=0",
-            "-device", "usb-storage,drive=usb,bus=xhci.0,port=1,bootindex=0",
+            *usb_devs,
         ]
         if storage == "usb+virtio":
             if not decoy_image:
@@ -181,6 +203,19 @@ def build_qemu_aarch64(
             ])
     else:
         raise ValueError(f"unsupported aarch64 storage topology: {storage!r}")
+
+    if usb_input == "direct":
+        if storage == "virtio":
+            storage_args.extend(["-device", "qemu-xhci,id=xhci,p2=4,p3=0"])
+        storage_args.extend([
+            "-device", "usb-kbd,id=kbd,bus=xhci.0,port=2,usb_version=2",
+            "-device", "usb-mouse,id=mouse,bus=xhci.0,port=3,usb_version=2",
+        ])
+    elif usb_input == "hub":
+        storage_args.extend([
+            "-device", "usb-kbd,id=kbd,bus=xhci.0,port=1.3,usb_version=1",
+            "-device", "usb-mouse,id=mouse,bus=xhci.0,port=1.4,usb_version=1",
+        ])
 
     cmd = [
         str(qemu),

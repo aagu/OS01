@@ -236,6 +236,9 @@ run-aarch64-uefi: aarch64-uefi
 	  -device virtio-blk-device,drive=disk \
 	  -device virtio-rng-device \
 	  -device $(AARCH64_QEMU_DISPLAY) \
+	  -device qemu-xhci,id=xhci \
+	  -device usb-kbd,bus=xhci.0 \
+	  -device usb-mouse,bus=xhci.0 \
 	  $$extra_dtb \
 	  -serial stdio -display $(DISPLAY) -no-reboot
 
@@ -741,6 +744,19 @@ test-aarch64-usb-boot:
 	  --image "$(AARCH64_UEFI_DISK)" \
 	  --qemu "$(AARCH64_QEMU)" \
 	  --build-dir "$(BUILD_DIR)" --profile "$(PROFILE)"
+
+AARCH64_USB_HID_CASE ?= direct
+.PHONY: test-aarch64-usb-hid
+test-aarch64-usb-hid:
+	$(call require_aarch64_uefi)
+	$(call require_capability,uefi)
+	$(MAKE) --no-print-directory aarch64-uefi $(USER_ARTIFACT_DIR)/usb_hid_probe.elf
+	python3 qemutests/usb_hid.py --arch aarch64 --case "$(AARCH64_USB_HID_CASE)" \
+	  --qemu "$(AARCH64_QEMU)" --firmware "$(AARCH64_UEFI_FIRMWARE)" \
+	  --disk "$(AARCH64_UEFI_DISK)" \
+	  --probe-elf "$(USER_ARTIFACT_DIR)/usb_hid_probe.elf" \
+	  --smp 1 --timeout 180 \
+	  --log-dir "$(BUILD_DIR)/logs/aarch64-usb-hid-$(AARCH64_USB_HID_CASE)"
 
 # ── Validation ─────────────────────────────────────────────
 # validate keeps the x86 kernel + UEFI artifact checks (kernel ELF has no
@@ -2091,7 +2107,7 @@ HELP_SEC_RUN := \
 HELP_SEC_AARCH64 := \
 	'aarch64-uefi' '(uefi)' 'Build aarch64 disk + firmware' \
 	'aarch64-uefi-kernel' '(uefi)' 'Build aarch64 kernel.elf only' \
-	'run / run-aarch64-uefi' '(uefi)' 'QEMU virt + cortex-a53 + virtio-blk + bochs-display (default SMP=1 = the single-core product userspace run; explicit SMP=N wins, multi-core boots come up kernel-only; AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to skip auto DTB)'
+	'run / run-aarch64-uefi' '(uefi)' 'QEMU virt + cortex-a53 + virtio-blk + bochs-display + qemu-xhci + usb-kbd/mouse (default SMP=1 = the single-core product userspace run; explicit SMP=N wins, multi-core boots come up kernel-only; AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to skip auto DTB)'
 HELP_SEC_VALIDATE := \
 	'validate' '(rootfs)' 'kernel ELF + UEFI COFF + profile info' \
 	'validate-kernel' '(rootfs)' 'kernel ELF sanity (no undef, EM_X86_64, exports)' \

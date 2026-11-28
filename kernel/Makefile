@@ -168,6 +168,8 @@ KERNEL_C_SOURCES := memory/pmm.c memory/pmm_boot.c \
                    driver/xhci_dma.c \
                    driver/xhci_hub.c \
                    driver/xhci_hid_desc.c \
+                   driver/xhci_hid.c \
+                   driver/usb_hid_report.c \
                    driver/xhci_msc.c \
                    driver/usb_msc.c \
                    driver/usb_msc_bot.c \
@@ -297,11 +299,8 @@ KERNEL_C_SOURCES := \
 # driver/input_route.c, driver/keyboard.c and driver/mouse.c are
 # architecture-neutral input consumers; i8042/ps2_kbd/ps2_mouse live in
 # arch/x86_64/driver/.
-KERNEL_C_SOURCES := $(filter-out driver/pit.c driver/usb_hid_report.c,$(KERNEL_C_SOURCES))
+KERNEL_C_SOURCES := $(filter-out driver/pit.c,$(KERNEL_C_SOURCES))
 KERNEL_C_SOURCES += $(ARCH_PLATFORM_C_SOURCES)
-ifeq ($(ARCH),x86_64)
-KERNEL_C_SOURCES += driver/usb_hid_report.c
-endif
 # Monitor plan Task 4: arch-neutral thermal facade (weak defaults + the
 # per-CPU sample cache procfs/thermal reads).  Listed EXPLICITLY, never
 # via a wildcard: kernel/arch/*.c is NOT covered by the ARCHDIR wildcard

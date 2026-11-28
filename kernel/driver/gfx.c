@@ -62,15 +62,12 @@
 #endif
 
 // ── The input device ops ─────────────────────────────────────
-// The keyboard / mouse device ops live in the x86-only PS/2 drivers
-// (kernel/driver/{keyboard,mouse}.c), while this device is
-// architecture-neutral.  The references are weak so a platform without
-// an input chain still links: there the ops do not exist, no input can
-// be bound, and every bind is refused with EINVAL.
-#if defined(__x86_64__) || defined(OS01_HOST_TEST)
+// The keyboard / mouse device ops live in kernel/driver/{keyboard,mouse}.c,
+// while this device is architecture-neutral.  The references are weak so
+// a platform without an input chain still links: there the ops do not exist,
+// no input can be bound, and every bind is refused with EINVAL.
 extern const struct devfs_ops keyboard_ops __attribute__((weak));
 extern const struct devfs_ops mouse_ops __attribute__((weak));
-#endif
 
 // ── Per-file view state is declared in kernel/include/driver/gfx.h
 //    so the test TU can reference the struct.  Here we only operate
@@ -1317,13 +1314,9 @@ static int gfx_ioctl_file(file_t *f, int cmd, void *arg)
             return -EBADF;
         }
 
-#if defined(__x86_64__) || defined(OS01_HOST_TEST)
         int crc = gfx_input_file_check(kbd_file, &keyboard_ops);
         if (crc == 0 && mouse_file)
             crc = gfx_input_file_check(mouse_file, &mouse_ops);
-#else
-        int crc = -EINVAL;
-#endif
         if (crc < 0) {
             file_put(kbd_file);
             if (mouse_file) file_put(mouse_file);
