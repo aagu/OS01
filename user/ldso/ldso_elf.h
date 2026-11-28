@@ -69,9 +69,12 @@ typedef struct {
 
 /* ── program headers ────────────────────────────────────────── */
 
+#define ET_DYN    3U
+
 #define PT_LOAD   1U
 #define PT_DYNAMIC 2U
 #define PT_INTERP 3U
+#define PT_PHDR   6U
 
 #define PF_X 1U
 #define PF_W 2U
@@ -93,6 +96,8 @@ typedef struct {
 #define DT_SYMENT    11
 #define DT_JMPREL    23
 #define DT_PLTREL    20
+#define DT_RELACOUNT 0x6ffffef9LL
+#define DT_DEBUG     21
 #define DT_FLAGS     30
 #define DT_FLAGS_1   0x6ffffffbLL
 #define DT_GNU_HASH  0x6ffffef5LL

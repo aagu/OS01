@@ -249,7 +249,7 @@ $(INTERP_ENTRY_OBJ): $(INTERP_DIR)/interp_entry.S $(USER_COMPILE_KEY)
 
 $(INTERP_LDSO_OBJ): $(OS01_ROOT)/user/ldso/ldso.c $(OS01_ROOT)/user/ldso/ldso_elf.h $(USER_COMPILE_KEY)
 	@mkdir -p $(dir $@)
-	$(EFFECTIVE_CC) $(INTERP_BASE_CFLAGS) -fPIE -c $< -o $@
+	$(EFFECTIVE_CC) $(INTERP_BASE_CFLAGS) -fno-builtin -fPIE -c $< -o $@
 
 $(INTERP_MAIN_OBJ): $(INTERP_DIR)/interp_probe.c $(USER_COMPILE_KEY)
 	@mkdir -p $(dir $@)
