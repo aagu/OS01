@@ -14,6 +14,7 @@ ROOTFS_FILES += /bin/aslr_b_exec=$(USER_ARTIFACT_DIR)/aslr_b_exec.elf:0755 \
                 /lib/ld.so=$(USER_ARTIFACT_DIR)/ldso.elf:0755 \
                 /bin/dyn_exec=$(USER_ARTIFACT_DIR)/dyn_exec.elf:0755 \
                 /bin/dyn_link=$(USER_ARTIFACT_DIR)/dyn_link.elf:0755 \
+                /bin/dyn_link_export=$(USER_ARTIFACT_DIR)/dyn_link_export.elf:0755 \
                 /bin/dyn_link_missing=$(USER_ARTIFACT_DIR)/dyn_link_missing.elf:0755 \
                 /bin/dyn_link_gnuabi=$(USER_ARTIFACT_DIR)/dyn_link_gnuabi.elf:0755 \
                 /bin/dyn_link_baddyn=$(USER_ARTIFACT_DIR)/dyn_link_baddyn.elf:0755 \

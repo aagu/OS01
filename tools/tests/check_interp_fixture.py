@@ -195,7 +195,8 @@ def symbol_value(readelf_bin: str, path: str, name: str) -> int:
 
 
 def check_t2_dynamic_main(readelf_bin: str, path: str,
-                          expected_needed: str) -> None:
+                          expected_needed: str,
+                          require_imports: bool = True) -> None:
     """The T2 dynamic main: T1 interp shape plus NEEDED + the PLT/GOT
     family, no GNU hash (--hash-style=sysv pin), and the symbolic
     relocation shapes ld.so exists to resolve."""
@@ -214,17 +215,26 @@ def check_t2_dynamic_main(readelf_bin: str, path: str,
     needed = dynamic_tag_values(dyn_text, path, "NEEDED")
     require(needed == [expected_needed],
             f"{path}: NEEDED {needed} != [{expected_needed}]")
-    require("JMPREL" in re.sub(r"\(([^)]*)\)", r"\1", dyn_text),
-            f"{path}: DT_JMPREL missing")
+    if require_imports:
+        require("JMPREL" in re.sub(r"\(([^)]*)\)", r"\1", dyn_text),
+                f"{path}: DT_JMPREL missing")
     require("GNU_HASH" not in re.sub(r"\(([^)]*)\)", r"\1", dyn_text),
             f"{path}: GNU hash must be absent (--hash-style=sysv pin)")
     rel = readelf(readelf_bin, path, "-r")
     types = set(re.findall(r"R_X86_64_(\w+)", rel))
-    require("GLOB_DAT" in types,
-            f"{path}: no GLOB_DAT relocation (data import missing)")
-    require("JUMP_SLOT" in types,
-            f"{path}: no JUMP_SLOT relocation (call import missing)")
-    check_relocations(readelf_bin, path, allow_none=False,
+    if require_imports:
+        require("GLOB_DAT" in types,
+                f"{path}: no GLOB_DAT relocation (data import missing)")
+        require("JUMP_SLOT" in types,
+                f"{path}: no JUMP_SLOT relocation (call import missing)")
+    else:
+        # The export-only main imports nothing: no symbolic record may
+        # exist, so the lookup scope must be exercised purely by the
+        # library's import of the main's own definition.
+        require(not (types & {"GLOB_DAT", "JUMP_SLOT"}),
+                f"{path}: export-only main carries an unexpected "
+                f"symbolic relocation {sorted(types)}")
+    check_relocations(readelf_bin, path, allow_none=not require_imports,
                       allowed={"RELATIVE", "GLOB_DAT", "JUMP_SLOT"})
 
 
@@ -346,6 +356,7 @@ def main() -> int:
     ap.add_argument("--ldso", required=True)
     ap.add_argument("--dyn", required=True)
     ap.add_argument("--dynlink", required=True)
+    ap.add_argument("--dynexport", required=True)
     ap.add_argument("--dynmissing", required=True)
     ap.add_argument("--libt2", required=True)
     ap.add_argument("--dngnuabi", required=True)
@@ -387,6 +398,8 @@ def main() -> int:
                               "/lib/libt2.so")
         check_t2_dynamic_main(args.readelf, args.dynmissing,
                               "/lib/libabsent.so")
+        check_t2_dynamic_main(args.readelf, args.dynexport,
+                              "/lib/libt2.so", require_imports=False)
         check_libt2(args.readelf, args.libt2)
         check_t2_dynamic_main(args.readelf, args.dynbaddyn,
                               "/lib/libbad_dyn.so")
@@ -402,6 +415,7 @@ def main() -> int:
     print("check_interp_fixture: OK "
           f"(ldso={args.ldso} dyn={args.dyn} dynlink={args.dynlink} "
           f"dynmissing={args.dynmissing} libt2={args.libt2} "
+          f"dynexport={args.dynexport} "
           f"dngnuabi={args.dngnuabi} libbad={args.libbad} "
           f"dynbaddyn={args.dynbaddyn})")
     return 0

@@ -33,3 +33,15 @@ long t2_add(long a, long b)
 {
     return add_fn(a, b);
 }
+
+/* Imported from the MAIN image (defined there, never referenced by
+ * the main itself): the linker's symbol scope must search the main
+ * first even when the main carries no symbolic relocations of its
+ * own — spec §6, and exactly the shape T3's libc.so will hit when
+ * it consumes executable-exported globals. */
+extern long main_exported;
+
+long t2_gain(void)
+{
+    return main_exported;
+}

@@ -1168,6 +1168,22 @@ static void t2_run(const uint64_t *sp)
             LDSO_FAIL(rc, "ELF");
     }
 
+    /* Spec §6: the lookup scope is main first, then libraries —
+     * including a main that IMPORTS nothing (a library may consume a
+     * symbol the executable defines; exactly the shape T3's libc.so
+     * hits with executable-exported globals).  Whenever libraries are
+     * loaded, the main must be searchable: the kernel's position rule
+     * already guarantees DT_HASH for any NEEDED-bearing main, so a
+     * header-init failure here means the two validators disagree.  A
+     * library-free main (legal RELATIVE-only T1 shape, no DT_HASH
+     * required) stays unsearchable — nothing would ever be looked up
+     * in it. */
+    if (npending > 0 || g_ndso > 1) {
+        if (!init_hash_header(&g_dso[0], mph, (unsigned)phnum))
+            LDSO_FAIL(98, "ELF");
+        g_main_hash_ok = true;
+    }
+
     /* Apply relocations: main first (kernel did its RELATIVE pass),
      * then libraries in load order. */
     int rc = apply_image_relocs(&g_dso[0], mph, (unsigned)phnum, true);

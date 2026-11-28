@@ -98,6 +98,16 @@ void test_exec_dyn_link(void)
     CHECKF(rc == 0, "exec_dyn_link chain",
            "ld.so loaded libt2 and resolved symbols (rc=%d)",
            "ld.so loaded libt2 and resolved symbols (rc=%d)", rc);
+
+    /* The export-only shape: the main carries DT_NEEDED but no
+     * symbolic relocations of its own — the library imports a
+     * MAIN-defined symbol, so reaching exit 0 proves the lookup
+     * scope includes the executable (spec §6) even when it imports
+     * nothing. */
+    rc = run_user_image("/bin/dyn_link_export");
+    CHECKF(rc == 0, "exec_dyn_link export-only scope",
+           "lib import of main-defined symbol resolved (rc=%d)",
+           "lib import of main-defined symbol resolved (rc=%d)", rc);
 }
 
 void test_exec_dyn_link_missing(void)

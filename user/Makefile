@@ -323,12 +323,26 @@ $(T2_MISSING_ELF): $(INTERP_ENTRY_OBJ) $(T2_MAIN_OBJ) $(T2_ABSENT_SO) $(USER_LIN
 	$(OBJ_CPY) --strip-debug $@
 
 # ── T2 negative fixtures: ABI gate + corrupted dynamic table ──
+T2_EXPORT_OBJ  := $(OBJ_DIR)/systest/fixtures/t2_main_export.o
+T2_EXPORT_ELF  := $(BUILD_DIR)/dyn_link_export.elf
 T2_GNUABI_OBJ  := $(OBJ_DIR)/systest/fixtures/t2_main_gnuabi.o
 T2_GNUABI_ELF  := $(BUILD_DIR)/dyn_link_gnuabi.elf
 T2_BADRAW_SO   := $(BUILD_DIR)/libbad_dyn_raw.so
 T2_BAD_SO      := $(BUILD_DIR)/libbad_dyn.so
 T2_BADDYN_ELF  := $(BUILD_DIR)/dyn_link_baddyn.elf
-T2_NEG_FIXTURES := $(T2_GNUABI_ELF) $(T2_BAD_SO) $(T2_BADDYN_ELF)
+T2_NEG_FIXTURES := $(T2_EXPORT_ELF) $(T2_GNUABI_ELF) $(T2_BAD_SO) $(T2_BADDYN_ELF)
+
+$(T2_EXPORT_OBJ): $(T2_MAIN_SRC) $(USER_COMPILE_KEY)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(INTERP_BASE_CFLAGS) -fno-builtin -fPIE -DT2_EXPORT_ONLY -c $< -o $@
+
+$(T2_EXPORT_ELF): $(INTERP_ENTRY_OBJ) $(T2_EXPORT_OBJ) $(T2_LIBSO) $(USER_LINK_KEY)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) -m elf_x86_64 -pie --dynamic-linker /lib/ld.so \
+		--hash-style=sysv -z now -z norelro -z max-page-size=4096 \
+		--pack-dyn-relocs=none \
+		-o $@ $(INTERP_ENTRY_OBJ) $(T2_EXPORT_OBJ) $(T2_LIBSO)
+	$(OBJ_CPY) --strip-debug $@
 
 $(T2_GNUABI_OBJ): $(T2_MAIN_SRC) $(USER_COMPILE_KEY)
 	@mkdir -p $(dir $@)
@@ -370,6 +384,7 @@ $(INTERP_CHECK_STAMP): $(INTERP_FIXTURES) $(T2_FIXTURES) $(T2_NEG_FIXTURES) $(OS
 		--ldso $(INTERP_LDSO_ELF) --dyn $(INTERP_MAIN_ELF) \
 		--dynlink $(T2_MAIN_ELF) --dynmissing $(T2_MISSING_ELF) \
 		--libt2 $(T2_LIBSO) \
+		--dynexport $(T2_EXPORT_ELF) \
 		--dngnuabi $(T2_GNUABI_ELF) --libbad $(T2_BAD_SO) \
 		--dynbaddyn $(T2_BADDYN_ELF)
 	@touch $@
