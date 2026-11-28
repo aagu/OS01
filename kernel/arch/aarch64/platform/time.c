@@ -66,6 +66,7 @@
 #include <arch/aarch64/gic.h>
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/timer.h>
+#include <arch/aarch64/console.h>
 #include <arch/aarch64/sched_tick.h>
 #include <percpu/percpu.h>     /* cpu_id() — the BSP owns the global tick */
 #include <log/log.h>
@@ -133,6 +134,9 @@ static void cntp_tick_handler(uint32_t intid, uint64_t param, struct pt_regs *re
     if (cpu_id() == 0) {
         /* Global time base — BSP only. */
         tick_handler();
+#if !defined(OS01_HOST_TEST) && !defined(OS01_SELFTEST)
+        aarch64_console_poll();
+#endif
 #ifdef AARCH64_SCHED_TICK_TEST
         /* The per-CPU tick observer (selftest build only): the BSP's
          * completed global tick. */

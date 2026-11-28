@@ -8,6 +8,7 @@
 // FIFO into tty_push_input, mirroring the x86 COM1 RX path.
 
 #include <arch/console.h>
+#include <arch/aarch64/console.h>
 #include <arch/aarch64/gic.h>
 #include <arch/aarch64/ipi.h>
 #include <arch/aarch64/dtb.h>
@@ -24,6 +25,17 @@ void pl011_irq_rx_enable(void);
 void pl011_clear_ints(void);
 
 static tty_t *console_tty;
+static bool console_rx_poll_needed;
+
+static void pl011_console_drain_rx(void)
+{
+    while (pl011_rx_pending()) {
+        uint32_t dr = pl011_dr_read();
+        char c = (char)(uint8_t)dr;
+        if (console_tty)
+            tty_push_input(console_tty, c);
+    }
+}
 
 /* Level-triggered contract (spec §2.3): drain the RX FIFO (each DR read
  * clears the device source) + ICR BEFORE EOI; EOI is issued by
@@ -34,13 +46,16 @@ static void pl011_console_rx_handler(uint32_t intid, uint64_t param,
 {
     (void)intid; (void)param; (void)regs;
 
-    while (pl011_rx_pending()) {
-        uint32_t dr = pl011_dr_read();
-        char c = (char)(uint8_t)dr;
-        if (console_tty)
-            tty_push_input(console_tty, c);
-    }
+    pl011_console_drain_rx();
     pl011_clear_ints();
+}
+
+void aarch64_console_poll(void)
+{
+    if (!__atomic_load_n(&console_rx_poll_needed, __ATOMIC_ACQUIRE) ||
+        !console_tty)
+        return;
+    pl011_console_drain_rx();
 }
 
 void arch_console_input_attach(struct tty_struct *tty)
@@ -61,9 +76,10 @@ void arch_console_input_attach(struct tty_struct *tty)
         gic_register_handler(intid, pl011_console_rx_handler, 0,
                              "pl011-console") != 0 ||
         gic_irq_configure(intid, true, 0x00, bsp_target) != 0) {
-        /* Input is a degrade, not a boot failure: the console still works
-         * for output (same wire as printk). */
-        log_warn("aarch64: PL011 console RX IRQ not armed (intid=%u)\n",
+        /* Input falls back to 100 Hz CNTP timer polling on BSP so platforms
+         * without a DTB PL011 SPI (e.g. RPi5 intid=0) still get console RX. */
+        __atomic_store_n(&console_rx_poll_needed, true, __ATOMIC_RELEASE);
+        log_warn("aarch64: PL011 console RX IRQ not armed (intid=%u), using 100 Hz poll fallback\n",
                  intid);
         return;
     }
