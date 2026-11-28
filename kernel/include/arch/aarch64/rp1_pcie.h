@@ -97,4 +97,24 @@ int aarch64_rp1_cfg_write16(const struct aarch64_rp1_irq_platform *p,
 int aarch64_rp1_irq_flush(const struct aarch64_rp1_irq_platform *p,
                           uint32_t source);
 
+struct aarch64_rp1_msi_window {
+    uint8_t slot;
+    bool valid;
+    bool programmed;
+    bool quarantined;
+    uint64_t pci_addr;
+    uint64_t cpu_addr;
+    uint64_t span;
+    uint32_t saved_cfg_lo;
+    uint32_t saved_cfg_hi;
+    uint32_t saved_remap_lo;
+    uint32_t saved_remap_hi;
+};
+
+int aarch64_rp1_msi_window_claim(const struct aarch64_rp1_irq_platform *p,
+                                 struct aarch64_rp1_msi_window *out);
+
+int aarch64_rp1_msi_window_restore(const struct aarch64_rp1_irq_platform *p,
+                                   struct aarch64_rp1_msi_window *win);
+
 #endif /* ARCH_AARCH64_RP1_PCIE_H */

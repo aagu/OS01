@@ -6,6 +6,12 @@ $(TEST_BLD)/test_aarch64_aslr.o: $(TEST_CASES)/test_aarch64_aslr.c
 $(TEST_BLD)/test_aarch64_aslr.elf: $(TEST_BLD)/test_aarch64_aslr.o $(LINK_GROUP_aarch64-aslr)
 	$(HOST_CC) $(LINK_LDFLAGS_aarch64-aslr) -o $@ $^
 
+$(TEST_BLD)/test_aarch64_bcm2712_mip.o: $(TEST_CASES)/test_aarch64_bcm2712_mip.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_rp1-mip)),$(LINK_CFLAGS_rp1-mip),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_aarch64_bcm2712_mip.elf: $(TEST_BLD)/test_aarch64_bcm2712_mip.o $(LINK_GROUP_rp1-mip)
+	$(HOST_CC) $(LINK_LDFLAGS_rp1-mip) -o $@ $^
+
 $(TEST_BLD)/test_aarch64_boot_elf.o: $(TEST_CASES)/test_aarch64_boot_elf.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_aarch64-boot-elf)),$(LINK_CFLAGS_aarch64-boot-elf),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@

@@ -1108,6 +1108,19 @@
       }
     },
     {
+      "id": "test_aarch64_bcm2712_mip",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "intr.aarch64.bcm2712_mip"
+      ],
+      "link": "rp1-mip",
+      "source": "hosttests/cases/test_aarch64_bcm2712_mip.c"
+    },
+    {
       "id": "test_aarch64_boot_elf",
       "layer": "host",
       "subsystem": "boot",

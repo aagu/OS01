@@ -42,6 +42,22 @@ int  gic_irq_config(struct gic_dev *dev, uint32_t intid, bool enable,
                                                      —— SPI 递送先决条件 (spec §2.2 R1-2) */
 int  gic_irq_enable(struct gic_dev *dev, uint32_t intid);
 int  gic_irq_disable(struct gic_dev *dev, uint32_t intid);
+
+struct gic_spi_state {
+    bool enable;
+    bool active;
+    bool pending;
+    bool edge;
+    uint8_t priority;
+    uint8_t target;
+    uint8_t group;
+    bool group_writable;
+};
+
+int  gic_spi_get_state(struct gic_dev *dev, uint32_t intid, struct gic_spi_state *out);
+int  gic_spi_set_edge(struct gic_dev *dev, uint32_t intid, bool edge);
+int  gic_spi_restore_state(struct gic_dev *dev, uint32_t intid,
+                           const struct gic_spi_state *saved);
 uint32_t gic_ack(struct gic_dev *dev);            /* 原始 IAR（含 CPUID 位）+ 记录 dbg_last_iar */
 void gic_eoi(struct gic_dev *dev, uint32_t iar);  /* 原样写回完整 IAR (spec §2.3/D7) */
 void gic_send_sgi(struct gic_dev *dev, uint32_t sgi, uint8_t targets, uint8_t filter);

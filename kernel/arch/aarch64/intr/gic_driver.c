@@ -22,8 +22,10 @@
 #define GICD_ICENABLER  0x180u
 #define GICD_ISPENDR    0x200u
 #define GICD_ICPENDR    0x280u
+#define GICD_ISACTIVER  0x300u
 #define GICD_IPRIORITYR 0x400u
 #define GICD_ITARGETSR  0x800u
+#define GICD_ICFGR      0xC00u
 #define GICD_SGIR       0xF00u
 #define GICC_CTLR       0x000u
 #define GICC_PMR        0x004u
@@ -217,6 +219,96 @@ int gic_irq_disable(struct gic_dev *dev, uint32_t intid)
 {
     if (!dev || !intid_ok(dev, intid)) return -1;
     w32(dev->gicd, GICD_ICENABLER + (intid / 32u) * 4u, 1u << (intid % 32u));
+    return 0;
+}
+
+int gic_spi_get_state(struct gic_dev *dev, uint32_t intid, struct gic_spi_state *out)
+{
+    if (!dev || !out || dev->is_v3 || !dev->gicd ||
+        gic_irq_type(intid) != GIC_IRQ_SPI || intid >= dev->nr_intids)
+        return -1;
+    volatile uint32_t *g = dev->gicd;
+    uint32_t bit = 1u << (intid % 32u);
+    uint32_t word_off = (intid / 32u) * 4u;
+    uint32_t byte_off = (intid / 4u) * 4u;
+    uint32_t shift = (intid % 4u) * 8u;
+    uint32_t cfg_off = GICD_ICFGR + (intid / 16u) * 4u;
+    uint32_t cfg_bit = 1u << (((intid % 16u) * 2u) + 1u);
+
+    out->enable = (r32(g, GICD_ISENABLER + word_off) & bit) != 0u;
+    out->active = (r32(g, GICD_ISACTIVER + word_off) & bit) != 0u;
+    out->pending = (r32(g, GICD_ISPENDR + word_off) & bit) != 0u;
+    out->edge = (r32(g, cfg_off) & cfg_bit) != 0u;
+    out->priority = (uint8_t)((r32(g, GICD_IPRIORITYR + byte_off) >> shift) & 0xffu);
+    out->target = (uint8_t)((r32(g, GICD_ITARGETSR + byte_off) >> shift) & 0xffu);
+    out->group = (uint8_t)((r32(g, GICD_IGROUPR + word_off) & bit) != 0u ? 1u : 0u);
+    out->group_writable = !dev->security_extn;
+    return 0;
+}
+
+int gic_spi_set_edge(struct gic_dev *dev, uint32_t intid, bool edge)
+{
+    if (!dev || dev->is_v3 || !dev->gicd ||
+        gic_irq_type(intid) != GIC_IRQ_SPI || intid >= dev->nr_intids)
+        return -1;
+    volatile uint32_t *g = dev->gicd;
+    uint32_t bit = 1u << (intid % 32u);
+    uint32_t word_off = (intid / 32u) * 4u;
+    if ((r32(g, GICD_ISENABLER + word_off) & bit) != 0u)
+        return -1; /* only modify disabled SPI */
+
+    uint32_t cfg_off = GICD_ICFGR + (intid / 16u) * 4u;
+    uint32_t cfg_bit = 1u << (((intid % 16u) * 2u) + 1u);
+    uint32_t v = r32(g, cfg_off);
+    if (edge) v |= cfg_bit;
+    else      v &= ~cfg_bit;
+    w32(g, cfg_off, v);
+    uint32_t rb = r32(g, cfg_off);
+    return ((rb & cfg_bit) != 0u) == edge ? 0 : -1;
+}
+
+int gic_spi_restore_state(struct gic_dev *dev, uint32_t intid,
+                          const struct gic_spi_state *saved)
+{
+    if (!dev || !saved || dev->is_v3 || !dev->gicd ||
+        gic_irq_type(intid) != GIC_IRQ_SPI || intid >= dev->nr_intids)
+        return -1;
+    if (!gic_get_handler(intid, (uint64_t *)0))
+        return -1;
+
+    volatile uint32_t *g = dev->gicd;
+    uint32_t bit = 1u << (intid % 32u);
+    uint32_t word_off = (intid / 32u) * 4u;
+    if ((r32(g, GICD_ISENABLER + word_off) & bit) != 0u)
+        return -1;
+
+    if (gic_spi_set_edge(dev, intid, saved->edge) != 0)
+        return -1;
+
+    uint32_t byte_off = (intid / 4u) * 4u;
+    uint32_t shift = (intid % 4u) * 8u;
+    uint32_t pr_val = (r32(g, GICD_IPRIORITYR + byte_off) & ~(0xffu << shift)) |
+                      ((uint32_t)saved->priority << shift);
+    w32(g, GICD_IPRIORITYR + byte_off, pr_val);
+    if (((r32(g, GICD_IPRIORITYR + byte_off) >> shift) & 0xffu) != saved->priority)
+        return -1;
+
+    uint32_t tg_val = (r32(g, GICD_ITARGETSR + byte_off) & ~(0xffu << shift)) |
+                      ((uint32_t)saved->target << shift);
+    w32(g, GICD_ITARGETSR + byte_off, tg_val);
+    if (((r32(g, GICD_ITARGETSR + byte_off) >> shift) & 0xffu) != saved->target)
+        return -1;
+
+    if (!dev->security_extn && saved->group_writable) {
+        uint32_t grp_off = GICD_IGROUPR + word_off;
+        uint32_t gv = r32(g, grp_off);
+        if (saved->group) gv |= bit;
+        else              gv &= ~bit;
+        w32(g, grp_off, gv);
+        uint8_t rb_grp = (uint8_t)((r32(g, grp_off) & bit) != 0u ? 1u : 0u);
+        if (rb_grp != (saved->group ? 1u : 0u))
+            return -1;
+    }
     return 0;
 }
 

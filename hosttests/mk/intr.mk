@@ -201,6 +201,34 @@ $(TEST_BLD)/test_gic_driver.elf: $(TEST_BLD)/test_gic_driver.o $(TEST_BLD)/gic_d
 test_gic_driver: $(TEST_BLD)/test_gic_driver.elf
 	$<
 
+# BCM2712 MIP + RP1 inbound window (Task 3)
+RP1_MIP_HOST_CFLAGS := $(HOST_CFLAGS) -DOS01_HOST_GIC_MMIO_TRACE=1 -DOS01_HOST_GIC_MMIO_READ_TRACE=1 \
+                       -I$(TESTS_DIR)/kernel/include $(LIBC_INC)
+
+$(TEST_BLD)/rp1_mip_pcie_production.o: $(TESTS_DIR)/kernel/arch/aarch64/bus/rp1_pcie.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/rp1_pcie.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/rp1_xhci.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(RP1_MIP_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/bcm2712_mip_production.o: $(TESTS_DIR)/kernel/arch/aarch64/intr/bcm2712_mip.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/bcm2712_mip.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/rp1_pcie.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(RP1_MIP_HOST_CFLAGS) -c $< -o $@
+
+LINK_CFLAGS_rp1-mip = $(RP1_MIP_HOST_CFLAGS) $(FRAMEWORK_INC)
+LINK_GROUP_rp1-mip := \
+    $(TEST_BLD)/rp1_mip_pcie_production.o \
+    $(TEST_BLD)/bcm2712_mip_production.o \
+    $(TEST_BLD)/gic_driver_mmio_trace.o \
+    $(LIBC_OBJS)
+
+.PHONY: test-aarch64-bcm2712-mip
+test-aarch64-bcm2712-mip: $(TEST_BLD)/test_aarch64_bcm2712_mip.elf
+	$<
+
 # aarch64 ipi_broadcast
 AARCH64_IPI_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC)
 

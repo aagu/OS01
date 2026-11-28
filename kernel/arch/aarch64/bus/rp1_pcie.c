@@ -2,6 +2,7 @@
 #include <arch/aarch64/rp1_xhci.h>
 #include <arch/aarch64/rp1_pcie.h>
 #include <errno.h>
+#include <log/log.h>
 #include <string.h>
 
 #define BCM2712_RC_BUS_NUM             0x0018U
@@ -228,5 +229,247 @@ int aarch64_rp1_pcie_endpoint(const struct aarch64_rp1_irq_desc *desc,
     out->outbound_pci_base = out_pci_base;
     out->outbound_cpu_base = out_cpu_base;
     out->outbound_size = out_size;
+    return 0;
+}
+
+/* ── BCM2712 RC inbound MSI doorbell window (BAR4..10) ───────────────── */
+#define BCM2712_BAR1_CFG_BASE    0x402cU
+#define BCM2712_BAR1_REMAP_LO    0x40acU
+#define BCM2712_BAR1_REMAP_HI    0x40b0U
+#define BCM2712_INTERNAL_MSI_LO  0x4044U
+#define BCM2712_INTERNAL_MSI_HI  0x4048U
+#define BCM2712_BAR4_CFG_BASE    0x40d4U
+#define BCM2712_BAR4_REMAP_BASE  0x410cU
+#define BCM2712_EXTRA_WIN_COUNT  7U
+#define BCM2712_SIZE_4K          0x1cU
+#define BCM2712_WIN_4K_SPAN      0x1000ULL
+
+static bool s_extra_win_quarantined[BCM2712_EXTRA_WIN_COUNT];
+
+static int decode_rc_bar_size(uint32_t size_enc, uint64_t *span_out)
+{
+    if (size_enc == 0U) {
+        *span_out = 0ULL;
+        return 0;
+    }
+    if (size_enc >= 1U && size_enc <= 21U) {
+        *span_out = 1ULL << (size_enc + 15U);
+        return 0;
+    }
+    if (size_enc >= 0x1cU && size_enc <= 0x1fU) {
+        *span_out = 1ULL << (size_enc - 0x1cU + 12U);
+        return 0;
+    }
+    return -EFAULT;
+}
+
+static bool ranges_overlap_u64(uint64_t a0, uint64_t asz, uint64_t b0, uint64_t bsz)
+{
+    if (asz == 0ULL || bsz == 0ULL)
+        return false;
+    uint64_t a1 = (a0 > UINT64_MAX - asz) ? UINT64_MAX : (a0 + asz);
+    uint64_t b1 = (b0 > UINT64_MAX - bsz) ? UINT64_MAX : (b0 + bsz);
+    return a0 < b1 && b0 < a1;
+}
+
+int aarch64_rp1_msi_window_claim(const struct aarch64_rp1_irq_platform *p,
+                                 struct aarch64_rp1_msi_window *out)
+{
+    if (!out)
+        return -EINVAL;
+    memset(out, 0, sizeof(*out));
+    if (!p || !p->valid || !p->desc.valid)
+        return -EINVAL;
+
+    uint64_t target_pci = p->desc.msi_pci_addr & ~0xfffULL;
+    uint64_t target_cpu = p->desc.mip_cpu_pa & ~0xfffULL;
+
+    /* 1. Check RC internal MSI target trap (0x4044 bit 0). */
+    uint32_t imsi_lo = 0U, imsi_hi = 0U;
+    if (aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, BCM2712_INTERNAL_MSI_LO, &imsi_lo) != 0 ||
+        aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, BCM2712_INTERNAL_MSI_HI, &imsi_hi) != 0)
+        return -EIO;
+    if ((imsi_lo & 1U) != 0U) {
+        uint64_t imsi_pci = ((uint64_t)imsi_hi << 32) | (uint64_t)(imsi_lo & ~0xfffU);
+        if (ranges_overlap_u64(imsi_pci, BCM2712_WIN_4K_SPAN, target_pci, BCM2712_WIN_4K_SPAN))
+            return -EEXIST;
+    }
+
+    /* 2. Check RC_BAR1..3 (read-only). */
+    for (uint32_t k = 0U; k < 3U; k++) {
+        uint32_t lo = 0U, hi = 0U;
+        uint64_t span = 0ULL;
+        if (aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, BCM2712_BAR1_CFG_BASE + 8U * k, &lo) != 0 ||
+            aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, BCM2712_BAR1_CFG_BASE + 8U * k + 4U, &hi) != 0)
+            return -EIO;
+        uint32_t senc = lo & 0x1fU;
+        if (decode_rc_bar_size(senc, &span) != 0)
+            return -EFAULT;
+        if (span == 0ULL)
+            continue;
+        uint64_t pci_base = ((uint64_t)hi << 32) | (uint64_t)(lo & ~0xfffU);
+        if (k == 0U && senc == BCM2712_SIZE_4K && pci_base == target_pci) {
+            uint32_t rlo = 0U, rhi = 0U;
+            if (aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, BCM2712_BAR1_REMAP_LO, &rlo) != 0 ||
+                aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, BCM2712_BAR1_REMAP_HI, &rhi) != 0)
+                return -EIO;
+            uint64_t cpu_base = ((uint64_t)rhi << 32) | (uint64_t)(rlo & ~0xfffU);
+            if ((rlo & 1U) != 0U && cpu_base == target_cpu) {
+                out->slot = 1U;
+                out->valid = true;
+                out->programmed = false;
+                out->pci_addr = target_pci;
+                out->cpu_addr = target_cpu;
+                out->span = BCM2712_WIN_4K_SPAN;
+                log_info("[rp1-irq-window] action=borrow slot=1 pci=0x%lx cpu=0x%lx span=0x%lx readback=ok\n",
+                         (unsigned long)target_pci, (unsigned long)target_cpu,
+                         (unsigned long)BCM2712_WIN_4K_SPAN);
+                return 0;
+            }
+            return -EEXIST;
+        }
+        if (ranges_overlap_u64(pci_base, span, target_pci, BCM2712_WIN_4K_SPAN))
+            return -EEXIST;
+    }
+
+    /* 3. Scan RC_BAR4..10 for exact borrow or first free slot. */
+    int free_idx = -1;
+    for (uint32_t i = 0U; i < BCM2712_EXTRA_WIN_COUNT; i++) {
+        uint32_t cfg_lo = 0U, cfg_hi = 0U, rmp_lo = 0U, rmp_hi = 0U;
+        uint64_t span = 0ULL;
+        if (aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, BCM2712_BAR4_CFG_BASE + 8U * i, &cfg_lo) != 0 ||
+            aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, BCM2712_BAR4_CFG_BASE + 8U * i + 4U, &cfg_hi) != 0 ||
+            aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, BCM2712_BAR4_REMAP_BASE + 8U * i, &rmp_lo) != 0 ||
+            aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, BCM2712_BAR4_REMAP_BASE + 8U * i + 4U, &rmp_hi) != 0)
+            return -EIO;
+
+        uint32_t senc = cfg_lo & 0x1fU;
+        bool rmp_en = (rmp_lo & 1U) != 0U;
+        if (decode_rc_bar_size(senc, &span) != 0)
+            return -EFAULT;
+
+        if (senc == 0U && !rmp_en) {
+            if (free_idx < 0 && !s_extra_win_quarantined[i])
+                free_idx = (int)i;
+            continue;
+        }
+
+        uint64_t pci_base = ((uint64_t)cfg_hi << 32) | (uint64_t)(cfg_lo & ~0xfffU);
+        uint64_t cpu_base = ((uint64_t)rmp_hi << 32) | (uint64_t)(rmp_lo & ~0xfffU);
+        if (senc == BCM2712_SIZE_4K && rmp_en &&
+            pci_base == target_pci && cpu_base == target_cpu) {
+            out->slot = (uint8_t)(4U + i);
+            out->valid = true;
+            out->programmed = false;
+            out->pci_addr = target_pci;
+            out->cpu_addr = target_cpu;
+            out->span = BCM2712_WIN_4K_SPAN;
+            log_info("[rp1-irq-window] action=borrow slot=%u pci=0x%lx cpu=0x%lx span=0x%lx readback=ok\n",
+                     (unsigned)out->slot, (unsigned long)target_pci,
+                     (unsigned long)target_cpu, (unsigned long)BCM2712_WIN_4K_SPAN);
+            return 0;
+        }
+        if (senc != 0U && ranges_overlap_u64(pci_base, span, target_pci, BCM2712_WIN_4K_SPAN))
+            return -EEXIST;
+        if (senc == 0U && rmp_en && pci_base == target_pci)
+            return -EEXIST;
+    }
+
+    if (free_idx < 0)
+        return -ENOSPC;
+
+    uint32_t idx = (uint32_t)free_idx;
+    uint32_t off_cfg_lo = BCM2712_BAR4_CFG_BASE + 8U * idx;
+    uint32_t off_cfg_hi = off_cfg_lo + 4U;
+    uint32_t off_rmp_lo = BCM2712_BAR4_REMAP_BASE + 8U * idx;
+    uint32_t off_rmp_hi = off_rmp_lo + 4U;
+
+    uint32_t saved_cfg_lo = 0U, saved_cfg_hi = 0U, saved_rmp_lo = 0U, saved_rmp_hi = 0U;
+    (void)aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, off_cfg_lo, &saved_cfg_lo);
+    (void)aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, off_cfg_hi, &saved_cfg_hi);
+    (void)aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, off_rmp_lo, &saved_rmp_lo);
+    (void)aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, off_rmp_hi, &saved_rmp_hi);
+
+    out->slot = (uint8_t)(4U + idx);
+    out->valid = true;
+    out->programmed = true;
+    out->pci_addr = target_pci;
+    out->cpu_addr = target_cpu;
+    out->span = BCM2712_WIN_4K_SPAN;
+    out->saved_cfg_lo = saved_cfg_lo;
+    out->saved_cfg_hi = saved_cfg_hi;
+    out->saved_remap_lo = saved_rmp_lo;
+    out->saved_remap_hi = saved_rmp_hi;
+
+    uint32_t new_cfg_lo_nosize = (uint32_t)(target_pci & 0xfffff000U);
+    uint32_t new_cfg_hi = (uint32_t)(target_pci >> 32);
+    uint32_t new_rmp_lo = (uint32_t)(target_cpu & 0xfffff000U) | 1U;
+    uint32_t new_rmp_hi = (uint32_t)(target_cpu >> 32);
+    uint32_t new_cfg_lo = new_cfg_lo_nosize | BCM2712_SIZE_4K;
+
+    if (aarch64_rp1_mmio_write32(p, RP1_MMIO_RC, off_cfg_lo, new_cfg_lo_nosize) != 0 ||
+        aarch64_rp1_mmio_write32(p, RP1_MMIO_RC, off_cfg_hi, new_cfg_hi) != 0 ||
+        aarch64_rp1_mmio_write32(p, RP1_MMIO_RC, off_rmp_hi, new_rmp_hi) != 0 ||
+        aarch64_rp1_mmio_write32(p, RP1_MMIO_RC, off_rmp_lo, new_rmp_lo) != 0 ||
+        aarch64_rp1_mmio_write32(p, RP1_MMIO_RC, off_cfg_lo, new_cfg_lo) != 0) {
+        (void)aarch64_rp1_msi_window_restore(p, out);
+        return -EIO;
+    }
+
+    uint32_t rb_cfg_lo = 0U, rb_cfg_hi = 0U, rb_rmp_lo = 0U, rb_rmp_hi = 0U;
+    if (aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, off_cfg_lo, &rb_cfg_lo) != 0 ||
+        aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, off_cfg_hi, &rb_cfg_hi) != 0 ||
+        aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, off_rmp_lo, &rb_rmp_lo) != 0 ||
+        aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, off_rmp_hi, &rb_rmp_hi) != 0 ||
+        rb_cfg_lo != new_cfg_lo || rb_cfg_hi != new_cfg_hi ||
+        rb_rmp_lo != new_rmp_lo || rb_rmp_hi != new_rmp_hi) {
+        (void)aarch64_rp1_msi_window_restore(p, out);
+        return -EIO;
+    }
+
+    log_info("[rp1-irq-window] action=program slot=%u pci=0x%lx cpu=0x%lx span=0x%lx readback=ok\n",
+             (unsigned)out->slot, (unsigned long)target_pci,
+             (unsigned long)target_cpu, (unsigned long)BCM2712_WIN_4K_SPAN);
+    return 0;
+}
+
+int aarch64_rp1_msi_window_restore(const struct aarch64_rp1_irq_platform *p,
+                                   struct aarch64_rp1_msi_window *win)
+{
+    if (!win || !win->valid)
+        return -EINVAL;
+    if (!win->programmed)
+        return 0;
+    if (!p || !p->valid || win->slot < 4U ||
+        win->slot >= 4U + BCM2712_EXTRA_WIN_COUNT)
+        return -EINVAL;
+
+    uint32_t idx = (uint32_t)(win->slot - 4U);
+    uint32_t off_cfg_lo = BCM2712_BAR4_CFG_BASE + 8U * idx;
+    uint32_t off_cfg_hi = off_cfg_lo + 4U;
+    uint32_t off_rmp_lo = BCM2712_BAR4_REMAP_BASE + 8U * idx;
+    uint32_t off_rmp_hi = off_rmp_lo + 4U;
+
+    /* Clear size first, then restore remap & config registers. */
+    (void)aarch64_rp1_mmio_write32(p, RP1_MMIO_RC, off_cfg_lo, win->saved_cfg_lo & ~0x1fU);
+    (void)aarch64_rp1_mmio_write32(p, RP1_MMIO_RC, off_rmp_lo, win->saved_remap_lo);
+    (void)aarch64_rp1_mmio_write32(p, RP1_MMIO_RC, off_rmp_hi, win->saved_remap_hi);
+    (void)aarch64_rp1_mmio_write32(p, RP1_MMIO_RC, off_cfg_hi, win->saved_cfg_hi);
+    (void)aarch64_rp1_mmio_write32(p, RP1_MMIO_RC, off_cfg_lo, win->saved_cfg_lo);
+
+    uint32_t rb_cfg_lo = 0U, rb_cfg_hi = 0U, rb_rmp_lo = 0U, rb_rmp_hi = 0U;
+    if (aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, off_cfg_lo, &rb_cfg_lo) != 0 ||
+        aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, off_cfg_hi, &rb_cfg_hi) != 0 ||
+        aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, off_rmp_lo, &rb_rmp_lo) != 0 ||
+        aarch64_rp1_mmio_read32(p, RP1_MMIO_RC, off_rmp_hi, &rb_rmp_hi) != 0 ||
+        rb_cfg_lo != win->saved_cfg_lo || rb_cfg_hi != win->saved_cfg_hi ||
+        rb_rmp_lo != win->saved_remap_lo || rb_rmp_hi != win->saved_remap_hi) {
+        s_extra_win_quarantined[idx] = true;
+        win->quarantined = true;
+        return -EIO;
+    }
+
+    win->valid = false;
+    win->programmed = false;
     return 0;
 }

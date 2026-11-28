@@ -977,7 +977,7 @@ $(eval $(call host_case_group,test-arch9-host,block pci pci-extended backend ahc
 $(eval $(call host_case_group,test-aarch64-pcie-host,dtb-pcie ecam,rootfs,CASE,,dtb-pcie:test-aarch64-dtb-pcie ecam:test-aarch64-pcie-ecam))
 
 # AArch64 RP1 IRQ host tests (Task 1..5 focused link groups).
-$(eval $(call host_case_group,test-aarch64-rp1-irq-host,handoff topology mip irq console,rootfs,CASE,,mip:test-aarch64-bcm2712-mip irq:test-aarch64-rp1-irq console:test-aarch64-rp1-console))
+$(eval $(call host_case_group,test-aarch64-rp1-irq-host,handoff topology mip irq console,rootfs,CASE,,irq:test-aarch64-rp1-irq console:test-aarch64-rp1-console))
 
 .PHONY: _test-aarch64-rp1-irq-host-run-handoff
 _test-aarch64-rp1-irq-host-run-handoff:
@@ -991,6 +991,12 @@ _test-aarch64-rp1-irq-host-run-topology:
 	@echo "  [test-aarch64-rp1-irq-host] topology"
 	$(call os01_submake,hosttests,test-aarch64-rp1-topology $(OS01_SUBMAKE_ARGS))
 	$(call os01_submake,hosttests,test-aarch64-rp1-xhci $(OS01_SUBMAKE_ARGS))
+
+.PHONY: _test-aarch64-rp1-irq-host-run-mip
+_test-aarch64-rp1-irq-host-run-mip:
+	@echo "  [test-aarch64-rp1-irq-host] mip"
+	$(call os01_submake,hosttests,test-aarch64-bcm2712-mip $(OS01_SUBMAKE_ARGS))
+	$(call os01_submake,hosttests,test_gic_driver $(OS01_SUBMAKE_ARGS))
 
 # ── Resolution Switcher host tests ───────────────────────────
 # RES_CASE accepts uapi, state, writers, bga, ioctl, pty, terminal,
