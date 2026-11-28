@@ -230,7 +230,9 @@ $(PTLS_CHECK_STAMP): $(PTLS_FIXTURES) $(OS01_ROOT)/tools/tests/check_ptls_fixtur
 # PT_INTERP and reaches its entry only through the ld.so handoff.
 INTERP_DIR        := systest/fixtures
 INTERP_ENTRY_OBJ  := $(OBJ_DIR)/systest/fixtures/interp_entry.o
-INTERP_LDSO_OBJ   := $(OBJ_DIR)/systest/fixtures/interp_probe_ldso.o
+# The interpreter ships from user/ldso/ since T2 (the fixture tree
+# keeps only the main-image flavour of interp_probe.c).
+INTERP_LDSO_OBJ   := $(OBJ_DIR)/ldso/ldso.o
 INTERP_MAIN_OBJ   := $(OBJ_DIR)/systest/fixtures/interp_probe_main.o
 INTERP_LDSO_ELF   := $(BUILD_DIR)/ldso.elf
 INTERP_MAIN_ELF   := $(BUILD_DIR)/dyn_exec.elf
@@ -245,9 +247,9 @@ $(INTERP_ENTRY_OBJ): $(INTERP_DIR)/interp_entry.S $(USER_COMPILE_KEY)
 	$(EFFECTIVE_CC) --target=x86_64-unknown-none -ffreestanding \
 		-fno-pic -fno-pie -c $< -o $@
 
-$(INTERP_LDSO_OBJ): $(INTERP_DIR)/interp_probe.c $(USER_COMPILE_KEY)
+$(INTERP_LDSO_OBJ): $(OS01_ROOT)/user/ldso/ldso.c $(OS01_ROOT)/user/ldso/ldso_elf.h $(USER_COMPILE_KEY)
 	@mkdir -p $(dir $@)
-	$(EFFECTIVE_CC) $(INTERP_BASE_CFLAGS) -fPIE -DINTERP_LDSO -c $< -o $@
+	$(EFFECTIVE_CC) $(INTERP_BASE_CFLAGS) -fPIE -c $< -o $@
 
 $(INTERP_MAIN_OBJ): $(INTERP_DIR)/interp_probe.c $(USER_COMPILE_KEY)
 	@mkdir -p $(dir $@)
