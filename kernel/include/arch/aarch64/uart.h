@@ -13,5 +13,7 @@ struct boot_context;
 
 void aarch64_uart_select_from_handoff(const struct boot_context *bootctx);
 void aarch64_geni_uart_putc(volatile uint32_t *base, char c);
+int pl011_rp1_rx_irq_enable(void);
+int pl011_rx_irq_mask(void);
 
 #endif /* OS01_AARCH64_UART_H */

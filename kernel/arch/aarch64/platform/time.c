@@ -136,6 +136,14 @@ static void cntp_tick_handler(uint32_t intid, uint64_t param, struct pt_regs *re
         tick_handler();
 #if !defined(OS01_HOST_TEST) && !defined(OS01_SELFTEST)
         aarch64_console_poll();
+#if defined(AARCH64_RP1_IRQ_DIAGNOSTIC) && AARCH64_RP1_IRQ_DIAGNOSTIC
+        {
+            static uint64_t s_diag_ticks;
+            s_diag_ticks++;
+            if ((s_diag_ticks % TICKS_PER_SECOND) == 0ULL)
+                aarch64_console_diag_tick();
+        }
+#endif
 #endif
 #ifdef AARCH64_SCHED_TICK_TEST
         /* The per-CPU tick observer (selftest build only): the BSP's

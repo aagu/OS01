@@ -54,6 +54,12 @@ $(TEST_BLD)/test_aarch64_pcie_ecam.o: $(TEST_CASES)/test_aarch64_pcie_ecam.c
 $(TEST_BLD)/test_aarch64_pcie_ecam.elf: $(TEST_BLD)/test_aarch64_pcie_ecam.o $(LINK_GROUP_aarch64-pcie-ecam)
 	$(HOST_CC) $(LINK_LDFLAGS_aarch64-pcie-ecam) -o $@ $^
 
+$(TEST_BLD)/test_aarch64_rp1_console.o: $(TEST_CASES)/test_aarch64_rp1_console.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_rp1-console)),$(LINK_CFLAGS_rp1-console),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_aarch64_rp1_console.elf: $(TEST_BLD)/test_aarch64_rp1_console.o $(LINK_GROUP_rp1-console)
+	$(HOST_CC) $(LINK_LDFLAGS_rp1-console) -o $@ $^
+
 $(TEST_BLD)/test_aarch64_rp1_irq.o: $(TEST_CASES)/test_aarch64_rp1_irq.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_rp1-irq)),$(LINK_CFLAGS_rp1-irq),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@

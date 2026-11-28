@@ -13,6 +13,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <errno.h>
 #include <arch/cpu.h>   /* arch_nop for tiny spin waits */
 
 /* Runtime PL011 base comes from dtb_pl011_base() once dtb_init() has run.
@@ -80,12 +81,22 @@ static inline volatile uint32_t *pl011_base(void)
 
 static inline void pl011_w32(uint32_t off, uint32_t v)
 {
+#ifdef OS01_HOST_TEST
+    extern void pl011_host_w32(uint32_t off, uint32_t v);
+    pl011_host_w32(off, v);
+#else
     pl011_base()[off / 4] = v;
+#endif
 }
 
 static inline uint32_t pl011_r32(uint32_t off)
 {
+#ifdef OS01_HOST_TEST
+    extern uint32_t pl011_host_r32(uint32_t off);
+    return pl011_host_r32(off);
+#else
     return pl011_base()[off / 4];
+#endif
 }
 
 static void pl011_calc_divisors(uint32_t clk_hz, uint32_t baud,
@@ -155,6 +166,23 @@ void pl011_irq_rx_enable(void)
     if (!pl011_base() || s_uart_type == AARCH64_UART_QCOM_GENI)
         return;
     pl011_w32(PL011_IMSC, 1U << 4);
+}
+
+int pl011_rp1_rx_irq_enable(void)
+{
+    if (!pl011_base() || s_uart_type == AARCH64_UART_QCOM_GENI)
+        return -ENODEV;
+    pl011_w32(PL011_IMSC, 0x50U); /* RXIM (bit4) | RTIM (bit6) */
+    uint32_t rb = pl011_r32(PL011_IMSC);
+    return (rb & 0x50U) == 0x50U ? 0 : -EIO;
+}
+
+int pl011_rx_irq_mask(void)
+{
+    if (!pl011_base() || s_uart_type == AARCH64_UART_QCOM_GENI)
+        return -ENODEV;
+    pl011_w32(PL011_IMSC, 0U);
+    return pl011_r32(PL011_IMSC) == 0U ? 0 : -EIO;
 }
 
 /* Clear all asserted PL011 interrupts (write-1-to-clear). */

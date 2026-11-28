@@ -250,6 +250,38 @@ LINK_GROUP_rp1-irq := \
 test-aarch64-rp1-irq: $(TEST_BLD)/test_aarch64_rp1_irq.elf
 	$<
 
+# RP1 console IRQ attach (Task 5)
+RP1_CON_HOST_CFLAGS := $(HOST_CFLAGS) -DAARCH64_RP1_IRQ_DIAGNOSTIC=1 \
+                       -I$(TESTS_DIR)/kernel/include $(LIBC_INC)
+
+$(TEST_BLD)/rp1_console_production.o: $(TESTS_DIR)/kernel/arch/aarch64/platform/console.c \
+		$(TESTS_DIR)/kernel/include/arch/console.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/console.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/uart.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/rp1_irq.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/rp1_pcie.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(RP1_CON_HOST_CFLAGS) -c $< -o $@
+
+$(TEST_BLD)/rp1_console_selftest_check.o: $(TESTS_DIR)/kernel/arch/aarch64/platform/console.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(RP1_CON_HOST_CFLAGS) -DOS01_SELFTEST=1 -c $< -o $@
+
+$(TEST_BLD)/rp1_pl011_production.o: $(TESTS_DIR)/kernel/arch/aarch64/platform/pl011.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/uart.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(RP1_CON_HOST_CFLAGS) -c $< -o $@
+
+LINK_CFLAGS_rp1-console = $(RP1_CON_HOST_CFLAGS) $(FRAMEWORK_INC)
+LINK_GROUP_rp1-console := \
+    $(TEST_BLD)/rp1_console_production.o \
+    $(TEST_BLD)/rp1_pl011_production.o \
+    $(LIBC_OBJS)
+
+.PHONY: test-aarch64-rp1-console
+test-aarch64-rp1-console: $(TEST_BLD)/test_aarch64_rp1_console.elf $(TEST_BLD)/rp1_console_selftest_check.o
+	$(TEST_BLD)/test_aarch64_rp1_console.elf
+
 # aarch64 ipi_broadcast
 AARCH64_IPI_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC)
 
