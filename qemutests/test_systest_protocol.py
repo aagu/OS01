@@ -218,6 +218,124 @@ FULL_IDS = ["startup_layout", "putchar", "write", "read"]
 QUICK_IDS = ["putchar", "write"]
 
 
+class LdsoSerialWindowGateTests(unittest.TestCase):
+    """run_test._check_ldso_serial_windows: per-exec marker evidence.
+
+    The gate must attribute ld.so serial output to the EXEC that
+    produced it (windows split at every [LDSO-ENTER]), fail a case
+    whose window is missing or unterminated, and survive CRLF-mangled
+    logs — none of which a whole-window ordered-subsequence check can
+    do (markers borrowed from a later exec pass it, and a CRLF log
+    makes the exact-LF window lookup skip silently).
+    """
+
+    def setUp(self) -> None:
+        self.rt = _import_run_test()
+        self.gate = staticmethod(self.rt._check_ldso_serial_windows).__func__
+
+    # ── transcript builders ──
+
+    @staticmethod
+    def _protocol_scaffold(body_lines):
+        """Protocol lines the gate ignores but parse_v1 requires."""
+        return (["[TEST] START v=1 suite=systest expected=4"]
+                + body_lines
+                + ["[TEST] END passed=4 failed=0 skipped=0"])
+
+    @staticmethod
+    def _ldso_group(markers):
+        """One exec's ld.so output: ENTER first, then the given lines."""
+        return ["[LDSO-ENTER]", "OS01_LDSO"] + markers
+
+    def _dyn_link_output(self, first_group_markers, second_group_markers,
+                         eol="\n"):
+        body = ["[TEST] BEGIN exec_dyn_link"]
+        body += self._ldso_group(first_group_markers)
+        body += self._ldso_group(second_group_markers)
+        body += ["[TEST] PASS exec_dyn_link"]
+        return self._protocol_scaffold(body), eol
+
+    # ── positive control ──
+
+    def test_two_complete_execs_pass(self):
+        out, eol = self._dyn_link_output(
+            ["[LDSO-RELOC]", "[DYN-T2]"], ["[LDSO-RELOC]", "[DYN-T2]"])
+        text = eol.join(out) + eol
+        assert self.gate(text, None) is True
+
+    def test_guest_noise_before_first_enter_is_no_group(self):
+        out, eol = self._dyn_link_output(
+            ["[LDSO-RELOC]", "[DYN-T2]"], ["[LDSO-RELOC]", "[DYN-T2]"])
+        lines = out
+        i = next(k for k, ln in enumerate(lines)
+                 if ln == "[TEST] BEGIN exec_dyn_link")
+        lines.insert(i + 1, "fork: pid=2 returned 197")
+        text = eol.join(lines) + eol
+        assert self.gate(text, None) is True
+
+    # ── the defect: markers borrowed from a later exec ──
+
+    def test_first_exec_missing_reloc_fails(self):
+        out, eol = self._dyn_link_output(
+            ["[DYN-T2]"],                 # group 1: no [LDSO-RELOC]
+            ["[LDSO-RELOC]", "[DYN-T2]"])  # group 2 lends its marker
+        text = eol.join(out) + eol
+        assert self.gate(text, None) is False
+
+    # ── the defect: CRLF log silently skips the windows ──
+
+    def test_crlf_log_with_deleted_reloc_fails(self):
+        out, _ = self._dyn_link_output(
+            ["[DYN-T2]"], ["[DYN-T2]"])    # no LDSO-RELOC anywhere
+        text = "\r\n".join(out) + "\r\n"
+        assert self.gate(text, None) is False
+
+    # ── the defect: BEGIN without a terminal skips silently ──
+
+    def test_unterminated_case_window_fails(self):
+        body = ["[TEST] BEGIN exec_dyn_link"]
+        body += self._ldso_group(["[LDSO-RELOC]", "[DYN-T2]"])
+        out = self._protocol_scaffold(body)
+        text = "\n".join(out) + "\n"
+        assert self.gate(text, None) is False
+
+    # ── per-case rules stay pinned ──
+
+    def test_missing_lib_group_requires_err_open(self):
+        body = ["[TEST] BEGIN exec_dyn_link_missing"]
+        body += self._ldso_group(["[LDSO-ERR-OPEN]"])
+        body += ["[TEST] PASS exec_dyn_link_missing"]
+        text = "\n".join(self._protocol_scaffold(body)) + "\n"
+        assert self.gate(text, None) is True
+        # The wrong diagnostic (a shape rejection, not the open
+        # failure) must fail the gate: rc=98 vs rc=95 share exit-code
+        # space only in the guest — the serial line is the attribution.
+        body = ["[TEST] BEGIN exec_dyn_link_missing"]
+        body += self._ldso_group(["[LDSO-ERR-ELF]"])
+        body += ["[TEST] PASS exec_dyn_link_missing"]
+        text = "\n".join(self._protocol_scaffold(body)) + "\n"
+        assert self.gate(text, None) is False
+
+    def test_gnuabi_window_forbids_ldso_lines(self):
+        body = ["[TEST] BEGIN exec_dyn_link_gnuabi",
+                "[TEST] PASS exec_dyn_link_gnuabi"]
+        text = "\n".join(self._protocol_scaffold(body)) + "\n"
+        assert self.gate(text, None) is True
+        body = ["[TEST] BEGIN exec_dyn_link_gnuabi",
+                "[LDSO-ENTER]",
+                "[TEST] PASS exec_dyn_link_gnuabi"]
+        text = "\n".join(self._protocol_scaffold(body)) + "\n"
+        assert self.gate(text, None) is False
+
+    def test_single_case_mode_checks_only_that_case(self):
+        # requested_case=exec_dyn_link: the other cases' windows are
+        # not gate inputs (they did not run in this invocation).
+        out, eol = self._dyn_link_output(
+            ["[LDSO-RELOC]", "[DYN-T2]"], ["[LDSO-RELOC]", "[DYN-T2]"])
+        text = eol.join(out) + eol
+        assert self.gate(text, "exec_dyn_link") is True
+
+
 class SystestRunnerProtocolTests(unittest.TestCase):
     """run_test.test_systest: v1 is the only success gate."""
 

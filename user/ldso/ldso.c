@@ -121,7 +121,7 @@ static const char ldso_reloc[] = "[LDSO-RELOC]\n";
 /* Freestanding memcpy/memset: clang lowers struct assignment and
  * recognized idioms to these calls even under -fno-builtin, and the
  * -nostdlib link provides no library — define them here. */
-void *memcpy(void *dst, const void *src, uint64_t n)
+void *memcpy(void *dst, const void *src, size_t n)
 {
     uint8_t *d = dst;
     const uint8_t *s = src;
@@ -130,7 +130,7 @@ void *memcpy(void *dst, const void *src, uint64_t n)
     return dst;
 }
 
-void *memset(void *dst, int c, uint64_t n)
+void *memset(void *dst, int c, size_t n)
 {
     uint8_t *d = dst;
     while (n--)
@@ -184,6 +184,55 @@ static bool align_up4k(uint64_t v, uint64_t *out)
     if (add_ovf(v, LDSO_PAGE - 1, &r))
         return true;
     *out = r & ~(LDSO_PAGE - 1);
+    return false;
+}
+
+/* Page window of a PT_LOAD's MEMORY extent (p_memsz).  The vaddr+size
+ * addition is checked BEFORE rounding: a wrapping sum must reject —
+ * aligning a wrapped value yields a small window the map, pre-touch
+ * and mprotect passes would then trust. */
+static bool load_page_window(const elf64_phdr_t *l, uint64_t *lo, uint64_t *hi)
+{
+    uint64_t end;
+    if (add_ovf(l->p_vaddr, l->p_memsz, &end))
+        return false;
+    *lo = align_down4k(l->p_vaddr);
+    return !align_up4k(end, hi);
+}
+
+/* Page window of a PT_LOAD's FILE-BACKED extent (p_filesz): the range
+ * fd_read fills and the pre-touch loop covers. */
+static bool content_page_window(const elf64_phdr_t *l, uint64_t *lo, uint64_t *hi)
+{
+    uint64_t end;
+    if (add_ovf(l->p_vaddr, l->p_filesz, &end))
+        return false;
+    *lo = align_down4k(l->p_vaddr);
+    return !align_up4k(end, hi);
+}
+
+/* P2: PT_DYNAMIC's declared range must (a) fit the file and (b) be
+ * mapped by a readable PT_LOAD whose file mapping of dyn's vaddr is
+ * EXACTLY dyn's p_offset — otherwise the bytes read at p_offset are
+ * not the bytes the dynamic vaddrs point into. */
+static bool dyn_file_range_ok(const elf64_phdr_t *ph, unsigned phnum,
+                              uint64_t file_size, const elf64_phdr_t *dynp)
+{
+    if (dynp->p_offset > file_size ||
+        dynp->p_filesz > file_size - dynp->p_offset)
+        return false;
+    for (unsigned i = 0; i < phnum; i++) {
+        const elf64_phdr_t *l = &ph[i];
+        if (l->p_type != PT_LOAD || !(l->p_flags & PF_R) ||
+            l->p_filesz == 0)
+            continue;
+        if (dynp->p_vaddr < l->p_vaddr)
+            continue;
+        uint64_t off = dynp->p_vaddr - l->p_vaddr;
+        if (off > l->p_filesz || dynp->p_filesz > l->p_filesz - off)
+            continue;
+        return l->p_offset + off == dynp->p_offset;
+    }
     return false;
 }
 
@@ -287,7 +336,11 @@ static bool range_in_readable_load(const elf64_phdr_t *ph, unsigned phnum,
 }
 
 /* The writable non-executable PT_LOAD containing [vaddr, vaddr+8):
- * the only legitimate relocation target region. */
+ * the only legitimate relocation target region.  Targets are checked
+ * against p_MEMSZ — the zero-filled BSS tail is a legitimate target
+ * (the kernel's own target rule uses p_memsz and has already applied
+ * such RELATIVE records for the main image; file-backed metadata
+ * ranges use range_in_readable_load's p_filesz semantics instead). */
 static bool target_in_writable_load(const elf64_phdr_t *ph, unsigned phnum,
                                     uint64_t vaddr)
 {
@@ -302,7 +355,7 @@ static bool target_in_writable_load(const elf64_phdr_t *ph, unsigned phnum,
         if (vaddr < l->p_vaddr)
             continue;
         uint64_t off = vaddr - l->p_vaddr;
-        if (off > l->p_filesz || 8 > l->p_filesz - off)
+        if (off > l->p_memsz || 8 > l->p_memsz - off)
             continue;
         return true;
     }
@@ -657,6 +710,12 @@ static int apply_rela_table(dso_img_t *d, const elf64_phdr_t *ph,
                 return 98;
         }
 
+        /* DT_JMPREL carries JUMP_SLOT records only — checked before
+         * any type-specific branch, otherwise a RELATIVE record
+         * inside .rela.plt would be silently skipped for the main
+         * image and actually WRITTEN for a library. */
+        if (jmprel_mode && rtype != R_X86_64_JUMP_SLOT)
+            return 98;
         if (rtype == R_X86_64_RELATIVE) {
             if (is_main)
                 continue;
@@ -666,8 +725,6 @@ static int apply_rela_table(dso_img_t *d, const elf64_phdr_t *ph,
         }
         if (rtype != R_X86_64_GLOB_DAT && rtype != R_X86_64_JUMP_SLOT)
             return 97;             /* unknown relocation type */
-        if (jmprel_mode && rtype != R_X86_64_JUMP_SLOT)
-            return 98;
         /* psABI table 4.2: GLOB_DAT/JUMP_SLOT write S, no addend. */
         if (rel->r_addend != 0)
             return 98;
@@ -797,8 +854,8 @@ static int validate_lib_shape(long fd, uint64_t file_size,
         uint64_t fend;
         if (add_ovf(l->p_offset, l->p_filesz, &fend) || fend > file_size)
             return 98;
-        uint64_t plo = align_down4k(l->p_vaddr), phi;
-        if (align_up4k(l->p_vaddr + l->p_memsz, &phi))
+        uint64_t plo, phi;
+        if (!load_page_window(l, &plo, &phi))
             return 98;
         if (!first) {
             if (plo < hi && lo < phi)
@@ -813,6 +870,12 @@ static int validate_lib_shape(long fd, uint64_t file_size,
             lo = plo;
     }
     if (nloads == 0 || !dynp)
+        return 98;
+
+    /* Shape and file-mapping checks come BEFORE the fd reads: a
+     * declared range past EOF or mapped from different file bytes
+     * must fail with 98 here, not with an I/O error further down. */
+    if (!dyn_file_range_ok(ph, eh->e_phnum, file_size, dynp))
         return 98;
 
     /* Read + scan the dynamic section from the file. */
@@ -958,8 +1021,8 @@ static int load_lib(const char *path, const elf64_phdr_t **out_ph,
             const elf64_phdr_t *l = (const elf64_phdr_t *)g_phdr_scratch + i;
             if (l->p_type != PT_LOAD || l->p_memsz == 0)
                 continue;
-            uint64_t plo = align_down4k(l->p_vaddr), phi;
-            if (align_up4k(l->p_vaddr + l->p_memsz, &phi)) {
+            uint64_t plo, phi;
+            if (!load_page_window(l, &plo, &phi)) {
                 sysc3(SYS_close, fd, 0, 0);
                 LDSO_ERR("ELF");
                 return 98;
@@ -1002,8 +1065,8 @@ static int load_lib(const char *path, const elf64_phdr_t **out_ph,
         const elf64_phdr_t *l = (const elf64_phdr_t *)g_phdr_scratch + i;
         if (l->p_type != PT_LOAD || l->p_filesz == 0)
             continue;
-        uint64_t tlo = align_down4k(l->p_vaddr), tend;
-        if (align_up4k(l->p_vaddr + l->p_filesz, &tend))
+        uint64_t tlo, tend;
+        if (!content_page_window(l, &tlo, &tend))
             break;
         for (uint64_t va = tlo; va < tend; va += LDSO_PAGE)
             *(volatile uint8_t *)(d->bias + va) = 0;
@@ -1031,8 +1094,8 @@ static int load_lib(const char *path, const elf64_phdr_t **out_ph,
                 return 99;
             }
         }
-        uint64_t wlo = align_down4k(l->p_vaddr), whi;
-        if (align_up4k(l->p_vaddr + l->p_memsz, &whi)) {
+        uint64_t wlo, whi;
+        if (!load_page_window(l, &wlo, &whi)) {
             sysc3(SYS_close, fd, 0, 0);
             LDSO_ERR("ELF");
             return 98;

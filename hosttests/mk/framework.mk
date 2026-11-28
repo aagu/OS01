@@ -4,6 +4,21 @@
 
 
 # Negative-contract binary: framework exit-code integrity
+# ── userland ld.so unit tests (test_ldso_units) ────────────────
+# Self-contained like test_framework_contract: the single case TU
+# includes user/ldso/ldso.c directly (one translation unit, statics
+# reachable) and links against nothing but libc.  -I$(TESTS_DIR) lets
+# the quoted include "user/ldso/ldso.c" resolve from the repo root.
+$(TEST_BLD)/test_ldso_units.o: $(TEST_CASES)/test_ldso_units.c \
+		$(TESTS_DIR)/user/ldso/ldso.c $(TESTS_DIR)/user/ldso/ldso_elf.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) \
+		-I$(TESTS_DIR) -c $< -o $@
+
+$(TEST_BLD)/test_ldso_units.elf: $(TEST_BLD)/test_ldso_units.o
+	$(HOST_CC) -o $@ $^
+
+
 $(TEST_BLD)/test_framework_contract.elf: $(TEST_CASES)/test_framework_contract.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(HOST_CFLAGS) $(FRAMEWORK_INC) $(LIBC_INC) -c $< -o $(TEST_BLD)/test_framework_contract.o

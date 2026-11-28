@@ -669,56 +669,103 @@ def test_systest(tester):
     return True
 
 
+# Per-case serial evidence rules.  Every rule names how many ld.so
+# execs the case drives (groups delimited by [LDSO-ENTER] lines) and
+# what EACH group must contain, in order — markers cannot be borrowed
+# from a later exec, and a missing group is a failure, not a skip.
 T2_SERIAL_CASES = (
-    # (case id, ordered markers, forbidden substring, required substring)
-    ("exec_dyn_link",
-     ["[LDSO-ENTER]", "[LDSO-RELOC]", "[DYN-T2]"], None, None),
-    ("exec_dyn_link_missing", None, None, "[LDSO-ERR-OPEN]"),
-    ("exec_dyn_link_gnuabi", None, "[LDSO-", None),
-    ("exec_dyn_link_baddyn", None, None, "[LDSO-ERR-DYN]"),
+    # (case id, exec count, ordered markers per group, required per group,
+    #  forbidden anywhere in the case window)
+    ("exec_dyn_link", 2,
+     ["[LDSO-RELOC]", "[DYN-T2]"], None, None),
+    ("exec_dyn_link_missing", 1, None, "[LDSO-ERR-OPEN]", None),
+    ("exec_dyn_link_gnuabi", 0, None, None, "[LDSO-"),
+    ("exec_dyn_link_baddyn", 1, None, "[LDSO-ERR-DYN]", None),
 )
 
 
 def _check_ldso_serial_windows(output: str, requested_case) -> bool:
-    """Per-case serial evidence for the T2 dynamic-link cases.  A
-    window spans from the case's BEGIN line to its own terminal;
-    missing markers, wrong marker order, or a marker outside its
-    window (ld.so running where it must not) FAIL the suite."""
-    for cid, ordered, forbidden, required in T2_SERIAL_CASES:
-        begin = f"[TEST] BEGIN {cid}\n"
-        bpos = output.find(begin)
-        if bpos < 0:
+    """Per-case serial evidence for the T2 dynamic-link cases.
+
+    Line-based (splitlines normalizes LF and CRLF), so a CRLF-mangled
+    log cannot make a window lookup silently skip.  Each case window
+    spans from its BEGIN record to the SAME id's PASS/FAIL/SKIP
+    terminal ([TEST] END only appears at suite end); a case that
+    opened without a terminal is a failure, not a skip.  Inside a
+    window, ld.so output is split into per-exec groups at every
+    [LDSO-ENTER] line and every group must satisfy the case's rules —
+    exec_dyn_link drives two execs and each one must show its own
+    [LDSO-RELOC] before [DYN-T2]."""
+    lines = output.splitlines()
+    for cid, exec_count, ordered, required, forbidden in T2_SERIAL_CASES:
+        begin = f"[TEST] BEGIN {cid}"
+        try:
+            bidx = next(i for i, ln in enumerate(lines)
+                        if ln.strip() == begin)
+        except StopIteration:
             # Case did not run in this invocation (SYSTEST_CASE filter
             # or suite drift): nothing to gate here.  A full-table run
             # that lost a case already failed parse_v1 above.
             continue
         if requested_case is not None and requested_case != cid:
             continue
-        m = re.search(
-            rf"\[TEST\] (?:PASS|FAIL|SKIP) {re.escape(cid)}\n",
-            output[bpos:])
-        if not m:
+
+        term_re = re.compile(
+            rf"\[TEST\] (?:PASS|FAIL|SKIP) {re.escape(cid)}(?:\s|$)")
+        tidx = None
+        for i in range(bidx + 1, len(lines)):
+            if term_re.match(lines[i].strip()):
+                tidx = i
+                break
+        if tidx is None:
             print(f"FAIL: serial window {cid}: no terminal record")
             return False
-        window = output[bpos:bpos + m.end()]
+        window = lines[bidx + 1:tidx]
 
-        if forbidden is not None and forbidden in window:
+        if forbidden is not None and any(forbidden in ln for ln in window):
             print(f"FAIL: serial window {cid}: contains {forbidden!r} "
                   f"(the interpreter ran where it must not)")
             return False
-        if required is not None and required not in window:
-            print(f"FAIL: serial window {cid}: missing {required!r} "
-                  f"(failure path not evidenced)")
+
+        # Split the window into per-exec groups at each [LDSO-ENTER].
+        # Guest noise before the first ENTER (fork banners, diagnostics)
+        # belongs to no group.
+        groups: list[list[str]] = []
+        current: list[str] | None = None
+        for ln in window:
+            if ln.strip() == "[LDSO-ENTER]":
+                if current is not None:
+                    groups.append(current)
+                current = [ln]
+            elif current is not None:
+                current.append(ln)
+        if current is not None:
+            groups.append(current)
+
+        if len(groups) != exec_count:
+            print(f"FAIL: serial window {cid}: {len(groups)} ld.so exec "
+                  f"group(s), expected {exec_count}")
+            for gi, group in enumerate(groups):
+                head = " | ".join(ln.strip() for ln in group[:4])
+                print(f"      group #{gi + 1}: {head}")
             return False
-        if ordered:
-            pos = 0
-            for marker in ordered:
-                at = window.find(marker, pos)
-                if at < 0:
-                    print(f"FAIL: serial window {cid}: {marker!r} "
-                          f"missing or out of order")
-                    return False
-                pos = at + len(marker)
+
+        for gi, group in enumerate(groups):
+            if ordered:
+                pos = 0
+                for marker in ordered:
+                    at = next((k for k in range(pos, len(group))
+                               if marker in group[k]), -1)
+                    if at < 0:
+                        print(f"FAIL: serial window {cid} exec #{gi + 1}: "
+                              f"{marker!r} missing or out of order")
+                        return False
+                    pos = at + 1
+            if required is not None and not any(required in ln
+                                                for ln in group):
+                print(f"FAIL: serial window {cid} exec #{gi + 1}: "
+                      f"missing {required!r} (failure path not evidenced)")
+                return False
     return True
 
 

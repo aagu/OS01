@@ -3569,6 +3569,16 @@
       }
     },
     {
+      "id": "test_ldso_units",
+      "layer": "host",
+      "subsystem": "userland-ldso",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [],
+      "source": "hosttests/cases/test_ldso_units.c"
+    },
+    {
       "kind": "host_test",
       "id": "test_libc_alloc",
       "layer": "host",
