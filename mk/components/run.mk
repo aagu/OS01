@@ -84,9 +84,13 @@ endif
 # Capability-gated prerequisites reproduce the original
 # `$(if $(filter rootfs,...),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))` pattern
 # so a clean workspace still gets the disk image + firmware built first.
+ifdef AARCH64_UEFI_DISK
+run: run-aarch64-uefi
+else
 run:        $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	$(RUN_QEMU_BASE) -netdev user,id=net0 -device e1000,netdev=net0 $(RUN_SELECTED_DISK) -no-reboot
+endif
 run-kvm:    $(if $(filter rootfs,$(PROFILE_CAPABILITIES)),$(NORMAL_IMAGE) $(OVMF_FIRMWARE))
 	$(call require_capability,rootfs)
 	$(RUN_QEMU_BASE) -accel kvm -netdev user,id=net0 -device e1000,netdev=net0 $(RUN_SELECTED_DISK) -no-reboot
@@ -119,9 +123,9 @@ $(if $(AARCH64_UEFI_DISK),,$(error ERROR: aarch64-uefi targets require the aarch
 endef
 
 ifdef AARCH64_UEFI_DISK
-ifneq ($(filter run-aarch64-uefi test-aarch64 test-aarch64-boot-logo test-aarch64-pcie test-aarch64-usb-boot,$(MAKECMDGOALS)),)
+ifneq ($(filter run run-aarch64-uefi test-aarch64 test-aarch64-boot-logo test-aarch64-pcie test-aarch64-usb-boot,$(MAKECMDGOALS)),)
 ifneq ($(filter qemu-virt,$(AARCH64_PLATFORM)),qemu-virt)
-$(error ERROR: $(filter run-aarch64-uefi test-aarch64 test-aarch64-boot-logo test-aarch64-pcie test-aarch64-usb-boot,$(MAKECMDGOALS)) is for QEMU virt only; got AARCH64_PLATFORM='$(AARCH64_PLATFORM)')
+$(error ERROR: $(filter run run-aarch64-uefi test-aarch64 test-aarch64-boot-logo test-aarch64-pcie test-aarch64-usb-boot,$(MAKECMDGOALS)) is for QEMU virt only; got AARCH64_PLATFORM='$(AARCH64_PLATFORM)')
 endif
 endif
 endif
@@ -2065,7 +2069,7 @@ HELP_SEC_RUN := \
 HELP_SEC_AARCH64 := \
 	'aarch64-uefi' '(uefi)' 'Build aarch64 disk + firmware' \
 	'aarch64-uefi-kernel' '(uefi)' 'Build aarch64 kernel.elf only' \
-	'run-aarch64-uefi' '(uefi)' 'QEMU virt + cortex-a53 + virtio-blk (default SMP=1 = the single-core product userspace run; explicit SMP=N wins, multi-core boots come up kernel-only; AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to skip auto DTB)'
+	'run / run-aarch64-uefi' '(uefi)' 'QEMU virt + cortex-a53 + virtio-blk + bochs-display (default SMP=1 = the single-core product userspace run; explicit SMP=N wins, multi-core boots come up kernel-only; AARCH64_UEFI_SMP_DIAGNOSTIC_DTB=0 to skip auto DTB)'
 HELP_SEC_VALIDATE := \
 	'validate' '(rootfs)' 'kernel ELF + UEFI COFF + profile info' \
 	'validate-kernel' '(rootfs)' 'kernel ELF sanity (no undef, EM_X86_64, exports)' \
