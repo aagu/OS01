@@ -424,6 +424,7 @@ API_GROUP_HEADERS: dict[str, list[str]] = {
         "strlen",
         "strnlen",
         "strcmp",
+        "strcoll",
         "strncmp",
         "strverscmp",
         "strcpy",
