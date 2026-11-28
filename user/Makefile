@@ -322,22 +322,64 @@ $(T2_MISSING_ELF): $(INTERP_ENTRY_OBJ) $(T2_MAIN_OBJ) $(T2_ABSENT_SO) $(USER_LIN
 		-o $@ $(INTERP_ENTRY_OBJ) $(T2_MAIN_OBJ) $(T2_ABSENT_SO)
 	$(OBJ_CPY) --strip-debug $@
 
+# ── T2 negative fixtures: ABI gate + corrupted dynamic table ──
+T2_GNUABI_OBJ  := $(OBJ_DIR)/systest/fixtures/t2_main_gnuabi.o
+T2_GNUABI_ELF  := $(BUILD_DIR)/dyn_link_gnuabi.elf
+T2_BADRAW_SO   := $(BUILD_DIR)/libbad_dyn_raw.so
+T2_BAD_SO      := $(BUILD_DIR)/libbad_dyn.so
+T2_BADDYN_ELF  := $(BUILD_DIR)/dyn_link_baddyn.elf
+T2_NEG_FIXTURES := $(T2_GNUABI_ELF) $(T2_BAD_SO) $(T2_BADDYN_ELF)
+
+$(T2_GNUABI_OBJ): $(T2_MAIN_SRC) $(USER_COMPILE_KEY)
+	@mkdir -p $(dir $@)
+	$(EFFECTIVE_CC) $(INTERP_BASE_CFLAGS) -fno-builtin -fPIE -DT2_GNUABI -c $< -o $@
+
+$(T2_GNUABI_ELF): $(INTERP_ENTRY_OBJ) $(T2_GNUABI_OBJ) $(T2_LIBSO) $(USER_LINK_KEY)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) -m elf_x86_64 -pie --dynamic-linker /lib/ld.so \
+		--hash-style=sysv -z now -z norelro -z max-page-size=4096 \
+		--pack-dyn-relocs=none \
+		-o $@ $(INTERP_ENTRY_OBJ) $(T2_GNUABI_OBJ) $(T2_LIBSO)
+	$(OBJ_CPY) --strip-debug $@
+
+# The corrupted-dynamic pair: the raw stub is the link-time input the
+# baddyn main records its DT_NEEDED from; the STAGED artifact is the
+# patched copy, rebuilt whenever the raw image or the patcher changes.
+$(T2_BADRAW_SO): $(T2_LIB_OBJ) $(USER_LINK_KEY)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) -m elf_x86_64 -shared -nostdlib --hash-style=sysv \
+		-z norelro -z max-page-size=4096 --pack-dyn-relocs=none \
+		-soname /lib/libbad_dyn.so -o $@ $(T2_LIB_OBJ)
+	$(OBJ_CPY) --strip-debug $@
+$(T2_BAD_SO): $(T2_BADRAW_SO) $(OS01_ROOT)/tools/tests/make_bad_dyn.py
+	python3 $(OS01_ROOT)/tools/tests/make_bad_dyn.py --in $< --out $@
+
+$(T2_BADDYN_ELF): $(INTERP_ENTRY_OBJ) $(T2_MAIN_OBJ) $(T2_BADRAW_SO) $(USER_LINK_KEY)
+	@mkdir -p $(dir $@)
+	$(TARGET_LD) -m elf_x86_64 -pie --dynamic-linker /lib/ld.so \
+		--hash-style=sysv -z now -z norelro -z max-page-size=4096 \
+		--pack-dyn-relocs=none \
+		-o $@ $(INTERP_ENTRY_OBJ) $(T2_MAIN_OBJ) $(T2_BADRAW_SO)
+	$(OBJ_CPY) --strip-debug $@
+
 # Structural gate: the ELF shapes the interpreter contract relies on.
 INTERP_CHECK_STAMP := $(BUILD_DIR)/.interp-fixtures.checked
-$(INTERP_CHECK_STAMP): $(INTERP_FIXTURES) $(T2_FIXTURES) $(OS01_ROOT)/tools/tests/check_interp_fixture.py
+$(INTERP_CHECK_STAMP): $(INTERP_FIXTURES) $(T2_FIXTURES) $(T2_NEG_FIXTURES) $(OS01_ROOT)/tools/tests/check_interp_fixture.py
 	python3 $(OS01_ROOT)/tools/tests/check_interp_fixture.py \
 		--readelf "$(LLVM_READELF)" \
 		--ldso $(INTERP_LDSO_ELF) --dyn $(INTERP_MAIN_ELF) \
 		--dynlink $(T2_MAIN_ELF) --dynmissing $(T2_MISSING_ELF) \
-		--libt2 $(T2_LIBSO)
+		--libt2 $(T2_LIBSO) \
+		--dngnuabi $(T2_GNUABI_ELF) --libbad $(T2_BAD_SO) \
+		--dynbaddyn $(T2_BADDYN_ELF)
 	@touch $@
 endif
 endif
 
 .PHONY: all clean
 all: $(PROGRAMS) $(RUNTIME_PROBE_ELF) $(ASLR_B_EXEC_ELF) $(PTLS_FIXTURES) \
-     $(PTLS_CHECK_STAMP) $(INTERP_FIXTURES) $(T2_FIXTURES) $(INTERP_CHECK_STAMP) \
-     $(DOOM_ARCHIVE)
+     $(PTLS_CHECK_STAMP) $(INTERP_FIXTURES) $(T2_FIXTURES) $(T2_NEG_FIXTURES) \
+     $(INTERP_CHECK_STAMP) $(DOOM_ARCHIVE)
 
 $(OBJ_DIR)/%.o: %.c $(USER_COMPILE_KEY)
 	@mkdir -p $(dir $@)

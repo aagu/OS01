@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import re
+import struct
 import subprocess
 import sys
 
@@ -261,6 +262,84 @@ def check_libt2(readelf_bin: str, path: str) -> None:
                       allowed={"RELATIVE", "GLOB_DAT"})
 
 
+def check_gnu_note_in_pt_note(readelf_bin: str, path: str) -> None:
+    """The ABI-gate fixture must carry its GNU ABI-tag record inside
+    a PT_NOTE segment's FILE BYTES: readelf -n also parses SHT_NOTE
+    sections that no segment covers, so 'a PT_NOTE exists' plus '-n
+    prints Linux' does not prove the kernel (which walks PT_NOTE
+    segments) can see the record.  Parse the note records out of each
+    PT_NOTE's [p_offset, p_offset+p_filesz) instead."""
+    rows = parse_program_headers(readelf(readelf_bin, path, "-l"), path)
+    raw = open(path, "rb").read()
+    found = False
+    for r in rows:
+        if r["type"] != "NOTE":
+            continue
+        off, size = r["offset"], r["filesz"]
+        require(off + size <= len(raw),
+                f"{path}: PT_NOTE range beyond the file")
+        pos = off
+        end = off + size
+        while pos + 12 <= end:
+            namesz, descsz, ntype = struct.unpack_from("<III", raw, pos)
+            if namesz > end - pos or descsz > end - pos:
+                break          # malformed tail: stop, not a match
+            name_off = pos + 12
+            desc_off = name_off + ((namesz + 3) & ~3)
+            next_off = desc_off + ((descsz + 3) & ~3)
+            if next_off > end:
+                break
+            name = raw[name_off:name_off + namesz]
+            if (ntype == 1 and namesz == 4 and desc_off + 4 <= end and
+                    name == b"GNU\x00" and
+                    struct.unpack_from("<I", raw, desc_off)[0] == 0):
+                found = True   # NT_GNU_ABI_TAG, os = ELF_NOTE_OS_LINUX
+            pos = next_off
+    require(found,
+            f"{path}: no GNU ABI-tag note (os=Linux) inside any "
+            f"PT_NOTE segment; elf_detect_abi would never see it")
+
+
+def check_libbad_dyn(path: str) -> None:
+    """The patched copy: the DECLARED dynamic range must contain no
+    DT_NULL while still carrying DT_HASH — proving the patch removed
+    only the terminator (a whole-table overwrite would fail ld.so via
+    the missing-tag path instead, and this fixture would be vacuous)."""
+    raw = open(path, "rb").read()
+    if raw[:4] != b"\x7fELF" or raw[4] != 2 or raw[5] != 1:
+        require(False, f"{path}: not a little-endian ELF64 image")
+    (_t, _m, _v, _entry, phoff, _shoff, _flags, _ehsz, phentsize,
+     phnum, _shentsz, _shnum, _shstrndx) = struct.unpack_from(
+        "<HHIQQQIHHHHHH", raw, 16)
+    # fields: e_type e_machine e_version e_entry e_phoff e_shoff
+    #         e_flags e_ehsize e_phentsize e_phnum — no phantom ident
+    #         fields (unpacking starts at offset 16, past e_ident).
+    dyn = None
+    for i in range(phnum):
+        (p_type, _f, off, _va, _pa, filesz, _memsz,
+         _al) = struct.unpack_from("<IIQQQQQQ", raw, phoff + i * phentsize)
+        if p_type == 2:        # PT_DYNAMIC
+            dyn = (off, filesz)
+    require(dyn is not None, f"{path}: no PT_DYNAMIC")
+    off, filesz = dyn
+    require(off + filesz <= len(raw) and filesz % 16 == 0 and filesz > 0,
+            f"{path}: bad PT_DYNAMIC range")
+    has_hash = False
+    seen_null = False
+    for pos in range(off, off + filesz, 16):
+        tag = struct.unpack_from("<q", raw, pos)[0]
+        if tag == 0:
+            seen_null = True
+        elif tag == 4:         # DT_HASH
+            has_hash = True
+    require(not seen_null,
+            f"{path}: patched dynamic range still contains DT_NULL — "
+            f"the terminator replacement did not apply")
+    require(has_hash,
+            f"{path}: DT_HASH missing from the patched dynamic range — "
+            f"required tags must survive the patch")
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--readelf", default="llvm-readelf")
@@ -269,6 +348,9 @@ def main() -> int:
     ap.add_argument("--dynlink", required=True)
     ap.add_argument("--dynmissing", required=True)
     ap.add_argument("--libt2", required=True)
+    ap.add_argument("--dngnuabi", required=True)
+    ap.add_argument("--libbad", required=True)
+    ap.add_argument("--dynbaddyn", required=True)
     args = ap.parse_args()
 
     try:
@@ -306,6 +388,10 @@ def main() -> int:
         check_t2_dynamic_main(args.readelf, args.dynmissing,
                               "/lib/libabsent.so")
         check_libt2(args.readelf, args.libt2)
+        check_t2_dynamic_main(args.readelf, args.dynbaddyn,
+                              "/lib/libbad_dyn.so")
+        check_gnu_note_in_pt_note(args.readelf, args.dngnuabi)
+        check_libbad_dyn(args.libbad)
     except Fail as e:
         print(f"check_interp_fixture: FAIL: {e}", file=sys.stderr)
         return 1
@@ -315,7 +401,9 @@ def main() -> int:
 
     print("check_interp_fixture: OK "
           f"(ldso={args.ldso} dyn={args.dyn} dynlink={args.dynlink} "
-          f"dynmissing={args.dynmissing} libt2={args.libt2})")
+          f"dynmissing={args.dynmissing} libt2={args.libt2} "
+          f"dngnuabi={args.dngnuabi} libbad={args.libbad} "
+          f"dynbaddyn={args.dynbaddyn})")
     return 0
 
 

@@ -53,6 +53,23 @@ static void exit_raw(long code)
         ;
 }
 
+#ifdef T2_GNUABI
+/* The ABI-gate negative fixture: a GNU ABI tag note (name "GNU",
+ * type NT_GNU_ABI_TAG, desc os=ELF_NOTE_OS_LINUX=0) so
+ * elf_detect_abi() marks the execed task PF_LINUX_ABI and the
+ * exec layer rejects it before the interpreter ever runs.  The
+ * section MUST be @note (SHT_NOTE): with @progbits lld packs it
+ * into a LOAD and no PT_NOTE appears — the kernel then never reads
+ * the record. */
+__asm__(".section .note.gnu.abi-tag,\"a\",@note\n"
+        ".balign 4\n"
+        ".long 4, 16, 1\n"          /* namesz, descsz, NT_GNU_ABI_TAG */
+        ".asciz \"GNU\"\n"
+        ".balign 4\n"
+        ".long 0, 3, 0, 0\n"        /* os=Linux(0), major=3 */
+        ".previous");
+#endif /* T2_GNUABI */
+
 extern long t2_value;              /* GLOB_DAT against libt2.so */
 long t2_add(long a, long b);       /* JUMP_SLOT via .rela.plt */
 
