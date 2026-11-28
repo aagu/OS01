@@ -84,6 +84,10 @@ $(TEST_BLD)/test_bootinfo_abi.o: $(TEST_CASES)/test_bootinfo_abi.c \
 $(TEST_BLD)/test_bootinfo_abi.elf: $(TEST_BLD)/test_bootinfo_abi.o
 	$(HOST_CC) -o $@ $^
 
+.PHONY: test-bootinfo-abi
+test-bootinfo-abi: $(TEST_BLD)/test_bootinfo_abi.elf
+	$<
+
 # Shared core mock archive (Task 10 — opt-in only)
 MOCK_CORE_DIR := $(TEST_BLD)/mock-core
 MOCK_CORE_SRCS := \

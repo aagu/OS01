@@ -1477,6 +1477,19 @@
       "source": "hosttests/cases/test_aarch64_uefi_boot_memory.c"
     },
     {
+      "id": "test_aarch64_uefi_rp1_pci",
+      "layer": "host",
+      "subsystem": "boot",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "boot.uefi.aarch64_rp1_pci"
+      ],
+      "link": "rp1-uefi-pci",
+      "source": "hosttests/cases/test_aarch64_uefi_rp1_pci.c"
+    },
+    {
       "id": "test_aarch64_usb_boot",
       "layer": "harness",
       "subsystem": "drivers",

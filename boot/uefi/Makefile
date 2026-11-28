@@ -43,6 +43,7 @@ SRCS := $(ROOT)/boot/uefi/main.c \
         $(ROOT)/boot/uefi/arch/aarch64/elf.c \
         $(ROOT)/boot/uefi/arch/aarch64/fdt_early.c \
         $(ROOT)/boot/uefi/arch/aarch64/acpi_early.c \
+        $(ROOT)/boot/uefi/arch/aarch64/rp1_pci.c \
         $(ROOT)/kernel/arch/aarch64/platform/acpi_parse.c \
         $(ROOT)/boot/uefi/arch/aarch64/handoff.S
 # LMA Task 2: the boot block base travels into the posix-uefi compile
@@ -54,7 +55,8 @@ UEFI_LAYOUT_HEADERS := $(ROOT)/kernel/include/arch/aarch64/boot_layout.h \
                        $(ROOT)/kernel/include/arch/aarch64/handoff_layout.h \
                        $(ROOT)/kernel/include/arch/aarch64/fdt_address.h \
                        $(ROOT)/kernel/include/arch/aarch64/uefi_memory_map.h \
-                       $(ROOT)/boot/uefi/arch/aarch64/loader.h
+                       $(ROOT)/boot/uefi/arch/aarch64/loader.h \
+                       $(ROOT)/boot/uefi/arch/aarch64/rp1_pci.h
 override UEFI_RUNTIME_CFLAGS += $(AARCH64_LAYOUT_CFLAGS)
 else
 $(error "unsupported ARCH: $(ARCH)")

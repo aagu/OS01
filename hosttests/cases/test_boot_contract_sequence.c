@@ -292,7 +292,7 @@ static struct boot_context make_valid_bootctx(void)
     memset(&ctx, 0, sizeof(ctx));
     ctx.magic = BOOT_CONTEXT_MAGIC;
     ctx.version = BOOT_CONTEXT_VERSION;
-    ctx.size = sizeof(ctx);
+    ctx.size = BOOT_CONTEXT_V3_SIZE;
     return ctx;
 }
 

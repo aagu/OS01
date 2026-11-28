@@ -60,6 +60,12 @@ $(TEST_BLD)/test_aarch64_uefi_boot_memory.o: $(TEST_CASES)/test_aarch64_uefi_boo
 $(TEST_BLD)/test_aarch64_uefi_boot_memory.elf: $(TEST_BLD)/test_aarch64_uefi_boot_memory.o $(LINK_GROUP_aarch64-uefi-boot-memory)
 	$(HOST_CC) $(LINK_LDFLAGS_aarch64-uefi-boot-memory) -o $@ $^
 
+$(TEST_BLD)/test_aarch64_uefi_rp1_pci.o: $(TEST_CASES)/test_aarch64_uefi_rp1_pci.c
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_rp1-uefi-pci)),$(LINK_CFLAGS_rp1-uefi-pci),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@
+$(TEST_BLD)/test_aarch64_uefi_rp1_pci.elf: $(TEST_BLD)/test_aarch64_uefi_rp1_pci.o $(LINK_GROUP_rp1-uefi-pci)
+	$(HOST_CC) $(LINK_LDFLAGS_rp1-uefi-pci) -o $@ $^
+
 $(TEST_BLD)/test_aarch64_user_asid.o: $(TEST_CASES)/test_aarch64_user_asid.c
 	@mkdir -p $(TEST_BLD)
 	$(HOST_CC) $(if $(strip $(LINK_CFLAGS_aarch64-user-asid)),$(LINK_CFLAGS_aarch64-user-asid),$(HOST_CFLAGS)) $(FRAMEWORK_INC) -c $< -o $@

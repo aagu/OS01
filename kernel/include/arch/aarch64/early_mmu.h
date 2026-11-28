@@ -1,8 +1,14 @@
 #ifndef OS01_AARCH64_EARLY_MMU_H
 #define OS01_AARCH64_EARLY_MMU_H
 
+#include <stdbool.h>
 #include <stdint.h>
 #include <arch/aarch64/boot_layout.h>
+
+struct boot_context;
+
+bool aarch64_boot_handoff_span_valid(uint64_t pa, uint32_t wire_size);
+bool aarch64_boot_validate_handoff(const struct boot_context *ctx);
 
 /* device_base/device_end: the early Device window (2 MiB-aligned),
  * from the parked boot_context handoff or the compile-time QEMU

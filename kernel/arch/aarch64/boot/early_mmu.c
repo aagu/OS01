@@ -4,18 +4,32 @@
 #include <arch/aarch64/vmm_backend.h>
 
 __attribute__((section(".boot.text.early_mmu")))
+bool aarch64_boot_handoff_span_valid(uint64_t pa, uint32_t wire_size)
+{
+    uint64_t end;
+
+    if (pa == 0u || (pa & UINT64_C(7)) != 0u || wire_size == 0u)
+        return false;
+    if ((uint64_t)wire_size > (uint64_t)AARCH64_BOOT_MAP_END ||
+        pa > (uint64_t)AARCH64_BOOT_MAP_END - (uint64_t)wire_size)
+        return false;
+    end = pa + (uint64_t)wire_size;
+    if (pa < (uint64_t)AARCH64_BOOT_BLOCK_END &&
+        end > (uint64_t)AARCH64_BOOT_BLOCK_BASE)
+        return false;
+    return true;
+}
+
+__attribute__((section(".boot.text.early_mmu")))
 bool aarch64_boot_validate_handoff(const struct boot_context *ctx)
 {
     uint64_t addr = (uint64_t)(uintptr_t)ctx;
-    uint64_t end;
 
-    if (addr == 0u || (addr & UINT64_C(7)) != 0u)
+    if (!aarch64_boot_handoff_span_valid(addr, BOOT_CONTEXT_V3_SIZE))
         return false;
-    if (addr > (uint64_t)AARCH64_BOOT_MAP_END - sizeof(*ctx))
+    if (!boot_context_valid(ctx))
         return false;
-    end = addr + sizeof(*ctx);
-    if (addr < (uint64_t)AARCH64_BOOT_BLOCK_END &&
-        end > (uint64_t)AARCH64_BOOT_BLOCK_BASE)
+    if (!aarch64_boot_handoff_span_valid(addr, ctx->size))
         return false;
     return aarch64_early_mmio_valid(ctx);
 }

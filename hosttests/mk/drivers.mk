@@ -705,3 +705,18 @@ LINK_GROUP_aarch64-aslr := $(TEST_BLD)/aarch64_aslr.o
 .PHONY: test-aarch64-boot-elf
 test-aarch64-boot-elf: $(TEST_BLD)/test_aarch64_boot_elf.elf
 	$<
+
+# AArch64 UEFI RP1 PCI capture
+$(TEST_BLD)/rp1_uefi_pci.o: \
+		$(TESTS_DIR)/boot/uefi/arch/aarch64/rp1_pci.c \
+		$(TESTS_DIR)/boot/uefi/arch/aarch64/rp1_pci.h \
+		$(TESTS_DIR)/kernel/include/core/bootinfo.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(HOST_CFLAGS) -DOS01_HOST_TEST $(KERNEL_INC) -c $< -o $@
+
+LINK_CFLAGS_rp1-uefi-pci = $(HOST_CFLAGS) -DOS01_HOST_TEST $(FRAMEWORK_INC) $(LIBC_INC) $(KERNEL_INC)
+LINK_GROUP_rp1-uefi-pci := $(TEST_BLD)/rp1_uefi_pci.o
+
+.PHONY: test-aarch64-uefi-rp1-pci
+test-aarch64-uefi-rp1-pci: $(TEST_BLD)/test_aarch64_uefi_rp1_pci.elf
+	$<

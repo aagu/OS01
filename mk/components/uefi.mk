@@ -81,7 +81,7 @@ UEFI_TARGET_EFI   := $(if $(filter x86_64-unknown-none,$(TARGET_TRIPLE)),BOOTX64
 UEFI_CLANG        ?= $(if $(filter x86_64-unknown-none,$(TARGET_TRIPLE)),$(CLANG))
 UEFI_DIGEST_CLANG := $(if $(filter x86_64-unknown-none,$(TARGET_TRIPLE)),$(UEFI_CLANG),clang)
 UEFI_BOOT_SRCS    := boot/uefi/main.c boot/uefi/boot_config.c boot/uefi/boot_device.c boot/uefi/arch/$(UEFI_ARCH_FAMILY)/boot.c \
-                     $(if $(filter aarch64,$(UEFI_ARCH_FAMILY)),boot/uefi/arch/aarch64/boot_memory.c boot/uefi/arch/aarch64/elf.c boot/uefi/arch/aarch64/fdt_early.c boot/uefi/arch/aarch64/handoff.S)
+                     $(if $(filter aarch64,$(UEFI_ARCH_FAMILY)),boot/uefi/arch/aarch64/boot_memory.c boot/uefi/arch/aarch64/elf.c boot/uefi/arch/aarch64/fdt_early.c boot/uefi/arch/aarch64/rp1_pci.c boot/uefi/arch/aarch64/handoff.S)
 
 UEFI_EFI_ARTIFACT := $(BUILD_DIR)/artifacts/uefi/$(UEFI_TARGET_EFI)
 
@@ -100,7 +100,7 @@ UEFI_BOOT_INPUTS := $(UEFI_BOOT_SRCS) boot/uefi/arch/arch.h \
 # through loader.h -> handoff_layout.h -> boot_layout.h, so every link
 # in that chain (plus the configured boot block value itself) re-keys
 # the runtime receipt and the EFI artifact.
-UEFI_BOOT_INPUTS += $(if $(filter aarch64,$(UEFI_ARCH_FAMILY)),kernel/include/arch/aarch64/handoff_layout.h kernel/include/arch/aarch64/boot_layout.h kernel/include/arch/aarch64/fdt_address.h kernel/include/arch/aarch64/uefi_memory_map.h boot/uefi/arch/aarch64/loader.h)
+UEFI_BOOT_INPUTS += $(if $(filter aarch64,$(UEFI_ARCH_FAMILY)),kernel/include/arch/aarch64/handoff_layout.h kernel/include/arch/aarch64/boot_layout.h kernel/include/arch/aarch64/fdt_address.h kernel/include/arch/aarch64/uefi_memory_map.h boot/uefi/arch/aarch64/loader.h boot/uefi/arch/aarch64/rp1_pci.h)
 
 # ── Runtime adapter (FORCE: digest-gated, always checks) ──────────
 # ONE shell line: verify submodule initialized + HEAD == gitlink + worktree

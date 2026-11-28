@@ -9,10 +9,13 @@
 #include <random/random.h>    // random_init
 
 _Static_assert(BOOT_CONTEXT_VERSION == 3u, "boot_context v3");
+_Static_assert(BOOT_CONTEXT_V3_SIZE == 200u, "boot_context v3 wire size");
 _Static_assert(sizeof(struct boot_device_info) == 40, "boot_device_info ABI");
 _Static_assert(__builtin_offsetof(struct boot_context, boot_device) == 136,
                "boot_device offset");
-_Static_assert(sizeof(struct boot_context) == 200, "boot_context v3 ABI");
+_Static_assert(__builtin_offsetof(struct boot_context, rp1_pci) == BOOT_CONTEXT_V3_SIZE,
+               "rp1_pci offset");
+_Static_assert(sizeof(struct boot_context) == 240, "boot_context v4 ABI");
 
 #if OS01_HAS_VFS
 #include <fs/boot.h>          // fs_boot_prepare / _mounts / _probe_devfs

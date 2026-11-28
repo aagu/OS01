@@ -47,6 +47,7 @@ enum BOOT_CONTEXT_FLAGS {
      * window in boot_layout.h. */
     BOOT_CONTEXT_HAS_EARLY_MMIO   = 1u << 7,
     BOOT_CONTEXT_CONSOLE_FIRMWARE_CONFIGURED = 1u << 8,
+    BOOT_CONTEXT_HAS_RP1_PCI      = 1u << 9,
 };
 
 // Memory-map format tags. Values are wire-level: each arch's bootloader
@@ -99,6 +100,20 @@ struct BOOT_EARLY_MMIO
     uint32_t reserved;
 };
 
+struct boot_rp1_pci_info {
+    uint64_t bar0_pci;
+    uint64_t bar0_cpu;
+    uint64_t bar0_size;
+    uint32_t table_offset;
+    uint32_t pba_offset;
+    uint16_t segment;
+    uint16_t entries;
+    uint8_t bus;
+    uint8_t device;
+    uint8_t function;
+    uint8_t msix_cap;
+};
+
 struct boot_context {
     uint32_t magic;
     uint32_t version;
@@ -120,10 +135,14 @@ struct boot_context {
      * handoff region, so flag-clear + zero reads degrade to the arch
      * fallback constants instead of failing validation. */
     struct BOOT_EARLY_MMIO early_mmio; /* valid iff flags & BOOT_CONTEXT_HAS_EARLY_MMIO */
+    /* Appended fields (v4, flag-gated): RP1 C0 BAR0 + MSI-X handoff. */
+    struct boot_rp1_pci_info rp1_pci;  /* valid iff version==4 && (flags & BOOT_CONTEXT_HAS_RP1_PCI) */
 };
 
-#define BOOT_CONTEXT_MAGIC UINT32_C(0x4f533031)
-#define BOOT_CONTEXT_VERSION 3u
+#define BOOT_CONTEXT_MAGIC           UINT32_C(0x4f533031)
+#define BOOT_CONTEXT_VERSION         3u
+#define BOOT_CONTEXT_VERSION_RP1_PCI 4u
+#define BOOT_CONTEXT_V3_SIZE         200u
 
 /* Assembly consumes these fields via boot_offsets.h constants; keep the
  * pinned offsets in lockstep (test_bootinfo_abi.c re-pins them). */
@@ -135,6 +154,12 @@ _Static_assert(offsetof(struct BOOT_EARLY_MMIO, device_base) == 8,
                "early_mmio.device_base offset");
 _Static_assert(offsetof(struct BOOT_EARLY_MMIO, device_blocks) == 16,
                "early_mmio.device_blocks offset");
+_Static_assert(sizeof(struct boot_rp1_pci_info) == 40,
+               "boot_rp1_pci_info size");
+_Static_assert(offsetof(struct boot_context, rp1_pci) == BOOT_CONTEXT_V3_SIZE,
+               "rp1_pci offset");
+_Static_assert(sizeof(struct boot_context) == 240,
+               "boot_context v4 size");
 
 /* Keep construction trivial and freestanding so early arch code need not
  * pull in libc or any generic kernel subsystem. */
@@ -146,15 +171,32 @@ static inline void boot_context_init(struct boot_context *ctx)
         p[i] = 0;
     ctx->magic = BOOT_CONTEXT_MAGIC;
     ctx->version = BOOT_CONTEXT_VERSION;
-    ctx->size = (uint32_t)sizeof(*ctx);
+    ctx->size = BOOT_CONTEXT_V3_SIZE;
 }
 
 static inline bool boot_context_valid(const struct boot_context *ctx)
 {
-    return ctx != (const struct boot_context *)0 &&
-           ctx->magic == BOOT_CONTEXT_MAGIC &&
-           ctx->version == BOOT_CONTEXT_VERSION &&
-           ctx->size == (uint32_t)sizeof(*ctx);
+    if (ctx == (const struct boot_context *)0 ||
+        ctx->magic != BOOT_CONTEXT_MAGIC)
+        return false;
+    if (ctx->version == BOOT_CONTEXT_VERSION) {
+        return ctx->size == BOOT_CONTEXT_V3_SIZE &&
+               (ctx->flags & BOOT_CONTEXT_HAS_RP1_PCI) == 0u;
+    }
+    if (ctx->version == BOOT_CONTEXT_VERSION_RP1_PCI) {
+        return ctx->size == (uint32_t)sizeof(*ctx) &&
+               (ctx->flags & BOOT_CONTEXT_HAS_RP1_PCI) != 0u;
+    }
+    return false;
+}
+
+static inline const struct boot_rp1_pci_info *boot_context_rp1_pci(
+    const struct boot_context *ctx)
+{
+    if (!boot_context_valid(ctx) ||
+        ctx->version != BOOT_CONTEXT_VERSION_RP1_PCI)
+        return (const struct boot_rp1_pci_info *)0;
+    return &ctx->rp1_pci;
 }
 
 #endif

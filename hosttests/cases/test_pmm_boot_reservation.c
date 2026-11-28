@@ -37,7 +37,7 @@ int main(int argc, char **argv)
     PMMngr.start_brk = (uintptr_t)ram + image_offset;
     struct boot_context ctx = {
         .magic = BOOT_CONTEXT_MAGIC, .version = BOOT_CONTEXT_VERSION,
-        .size = sizeof(ctx), .flags = BOOT_CONTEXT_HAS_MEMORY_MAP,
+        .size = BOOT_CONTEXT_V3_SIZE, .flags = BOOT_CONTEXT_HAS_MEMORY_MAP,
     };
     pmm_init(&ctx);
     /* Kernel image/metadata occupies the first RAM frame, including slot 0. */

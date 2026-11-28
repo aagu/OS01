@@ -41,6 +41,7 @@
 #include <arch/aarch64/early_arena.h>
 #include <arch/aarch64/runtime_tree.h>
 #include <arch/aarch64/early_mmu.h>
+#include <arch/aarch64/device_window.h>
 
 /* ── Independent expected literals (relocated layout) ─────────── */
 #define FIX_B_BASE   UINT64_C(0x02000000)
@@ -371,9 +372,62 @@ static void test_bootstrap_table_device_window_argument(void)
               tables[2][0x49]);
 }
 
+static void test_handoff_span_valid_boundaries(void)
+{
+    const uint64_t map_end = UINT64_C(0x80000000);
+    const uint64_t prod_b_base = UINT64_C(0x40000000);
+    const uint64_t prod_b_end = UINT64_C(0x40200000);
+    struct boot_context ctx;
+
+    /* Numerical PA fixtures (never dereferenced). */
+    assert_false(aarch64_boot_handoff_span_valid(0, BOOT_CONTEXT_V3_SIZE));
+    assert_false(aarch64_boot_handoff_span_valid(UINT64_C(0x10004),
+                                                 BOOT_CONTEXT_V3_SIZE));
+    assert_false(aarch64_boot_handoff_span_valid(UINT64_C(0x10000), 0u));
+
+    /* M0 upper bound: v3 fits at map_end - 200, v4 does not. */
+    assert_true(aarch64_boot_handoff_span_valid(map_end - 200u, 200u));
+    assert_false(aarch64_boot_handoff_span_valid(map_end - 200u, 240u));
+    assert_true(aarch64_boot_handoff_span_valid(map_end - 240u, 240u));
+    assert_false(aarch64_boot_handoff_span_valid(map_end - 240u, 241u));
+
+    /* Boot block overlap (early_mmu_production.o uses default 0x40000000). */
+    assert_true(aarch64_boot_handoff_span_valid(prod_b_base - 200u, 200u));
+    assert_false(aarch64_boot_handoff_span_valid(prod_b_base - 200u, 240u));
+    assert_true(aarch64_boot_handoff_span_valid(prod_b_base - 240u, 240u));
+    assert_false(aarch64_boot_handoff_span_valid(prod_b_base, 200u));
+    assert_false(aarch64_boot_handoff_span_valid(prod_b_end - 8u, 200u));
+    assert_true(aarch64_boot_handoff_span_valid(prod_b_end, 240u));
+
+    /* Local C wire object validation for v3 and v4. */
+    boot_context_init(&ctx);
+    ctx.flags |= BOOT_CONTEXT_HAS_EARLY_MMIO;
+    ctx.early_mmio.console_base = UINT64_C(0x09000000);
+    ctx.early_mmio.device_base = UINT64_C(0x08000000);
+    ctx.early_mmio.device_blocks = 9u;
+    assert_true(boot_context_valid(&ctx) && aarch64_early_mmio_valid(&ctx));
+    assert_true(aarch64_boot_handoff_span_valid(UINT64_C(0x100000), ctx.size));
+
+    ctx.flags |= BOOT_CONTEXT_HAS_RP1_PCI;
+    assert_false(boot_context_valid(&ctx));
+
+    ctx.version = BOOT_CONTEXT_VERSION_RP1_PCI;
+    ctx.size = sizeof(ctx);
+    assert_true(boot_context_valid(&ctx) && aarch64_early_mmio_valid(&ctx));
+    assert_true(aarch64_boot_handoff_span_valid(UINT64_C(0x100000), ctx.size));
+
+    ctx.flags &= ~BOOT_CONTEXT_HAS_RP1_PCI;
+    assert_false(boot_context_valid(&ctx));
+
+    ctx.flags |= BOOT_CONTEXT_HAS_RP1_PCI;
+    ctx.size = BOOT_CONTEXT_V3_SIZE;
+    assert_false(boot_context_valid(&ctx));
+}
+
 TEST_LIST_BEGIN
     TEST_ENTRY(test_bootstrap_table_descriptors),
     TEST_ENTRY(test_bootstrap_table_device_window_argument),
+    TEST_ENTRY(test_handoff_span_valid_boundaries),
     TEST_ENTRY(test_ram_normalize_boot_excludes_b),
     TEST_ENTRY(test_arena_plan_starts_after_b),
     TEST_ENTRY(test_tree_build_validate_maps_b_exec),

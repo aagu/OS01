@@ -480,24 +480,28 @@ void arch_early_init(const struct boot_context *bootctx)
     {
         uint64_t observed_entry = aarch64_boot_observed_entry();
         uint64_t observed_context = (uint64_t)(uintptr_t)bootctx;
-        uint64_t ctx_end = observed_context + sizeof(*bootctx);
+        uint32_t wire_size = bootctx->size;
+        uint64_t ctx_end = observed_context + (uint64_t)wire_size;
 
         if (observed_entry != (uint64_t)AARCH64_KERNEL_ENTRY ||
             observed_context == 0 ||
             (observed_context & UINT64_C(7)) != 0 ||
+            wire_size < BOOT_CONTEXT_V3_SIZE ||
             ctx_end < observed_context ||
             ctx_end > (uint64_t)AARCH64_BOOT_MAP_END ||
             (observed_context < (uint64_t)AARCH64_BOOT_BLOCK_END &&
              ctx_end > (uint64_t)AARCH64_BOOT_BLOCK_BASE)) {
-            log_err("UEFI-A64: layout mismatch entry=%lx context=%lx\n",
+            log_err("UEFI-A64: layout mismatch entry=%lx context=%lx size=%u\n",
                     (unsigned long)observed_entry,
-                    (unsigned long)observed_context);
+                    (unsigned long)observed_context,
+                    (unsigned)wire_size);
             for (;;)
                 arch_cpu_halt();
         }
-        log_info("UEFI-A64: layout entry=%lx context=%lx\n",
+        log_info("UEFI-A64: layout entry=%lx context=%lx size=%u\n",
                  (unsigned long)observed_entry,
-                 (unsigned long)observed_context);
+                 (unsigned long)observed_context,
+                 (unsigned)wire_size);
     }
 
     /* Which core are we running on?  Early boot only gates on the MIDR_EL1

@@ -12,6 +12,7 @@
 #include <uefi.h>
 #include "../arch.h"
 #include "loader.h"
+#include "rp1_pci.h"
 
 #define AARCH64_MMAP_SLACK_ENTRIES 32u
 #define AARCH64_MMAP_MIN_PAGES     8u
@@ -783,8 +784,14 @@ efi_status_t arch_fill_firmware(struct boot_context *ctx,
             ? (uint32_t)(UINT64_C(0x2000000000) >> 21)
             : 0u;
     ctx->flags |= BOOT_CONTEXT_HAS_EARLY_MMIO;
-    if (fw_console_pa != 0u)
+    if (fw_console_pa != 0u) {
         ctx->flags |= BOOT_CONTEXT_CONSOLE_FIRMWARE_CONFIGURED;
+        if (uefi_rp1_pci_capture(&ctx->rp1_pci) == 0) {
+            ctx->version = BOOT_CONTEXT_VERSION_RP1_PCI;
+            ctx->size = (uint32_t)sizeof(*ctx);
+            ctx->flags |= BOOT_CONTEXT_HAS_RP1_PCI;
+        }
+    }
 
     status = capture_entropy(ctx);
     return status;
