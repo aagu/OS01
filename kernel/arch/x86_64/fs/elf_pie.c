@@ -679,8 +679,12 @@ int x86_elf_pie_prepare(vfs_node_t *node,
                                            ehdr->e_phnum,
                                            hash_vaddr, symtab_vaddr,
                                            syment_val);
-        if (prc != 0)
+        if (prc != 0) {
+            /* The RELA chunks are already allocated: the caller's
+             * prepare-failure path only frees the phdr array. */
+            x86_elf_pie_dispose(out_pie);
             return prc;
+        }
     }
 
     out_pie->link_phdr_vaddr = ehdr->e_phoff;

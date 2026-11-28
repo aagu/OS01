@@ -2296,8 +2296,15 @@ TEST_FUNC(test_pie_interp_dyn_tables_in_rw_rejected)
     stubs_rng_push(true, 0ULL);
     x86_elf_image_t img;
     memset(&img, 0xAA, sizeof(img));
+    host_mock_kmalloc_count = 0;
+    host_mock_kfree_count = 0;
     assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
     assert_eq(0, elf_load_state.total_rng_calls);
+    /* The position rule fires AFTER the RELA chunks are allocated:
+     * the rejection path must dispose them — every kernel allocation
+     * must be matched by a free (a crafted image leaks ~1.5 MB per
+     * exec loop otherwise). */
+    assert_eq(host_mock_kmalloc_count, host_mock_kfree_count);
     teardown_fixture();
 }
 

@@ -30,6 +30,10 @@ int serial_printk(const char *fmt, ...)
  * sizeof(vma_t) / 1, instead of counting every unrelated kmalloc. */
 int host_mock_kmalloc_fail_size  = 0;
 int host_mock_kmalloc_fail_count = 0;
+/* Heap-activity counters for balance assertions (a kernel leak shows
+ * up as kmalloc > kfree across one test's load). */
+long host_mock_kmalloc_count = 0;
+long host_mock_kfree_count   = 0;
 
 void *kmalloc(size_t size)
 {
@@ -39,9 +43,15 @@ void *kmalloc(size_t size)
         if (--host_mock_kmalloc_fail_count == 0)
             return NULL;
     }
+    host_mock_kmalloc_count++;
     return malloc(size);
 }
-size_t kfree(void *addr) { free(addr); return 1; }
+size_t kfree(void *addr)
+{
+    free(addr);
+    host_mock_kfree_count++;
+    return 1;
+}
 
 void kpanic(const char *msg, ...) {
     va_list args;

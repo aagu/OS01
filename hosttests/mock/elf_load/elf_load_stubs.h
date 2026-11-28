@@ -70,6 +70,8 @@ void *stubs_page_backing(uint64_t vaddr);
 /* Size-targeted kmalloc failure (mock_kernel.c).  count = ordinal of
  * the matching allocation that fails; 0 disables. */
 extern int host_mock_kmalloc_fail_size;
+extern long host_mock_kmalloc_count;
+extern long host_mock_kfree_count;
 extern int host_mock_kmalloc_fail_count;
 
 /* Interp resolution: the node vfs_lookup() hands back for any path
