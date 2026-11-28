@@ -88,6 +88,8 @@ typedef struct {
 /* Dynamic section tags */
 #define DT_NULL      0
 #define DT_NEEDED    1
+#define DT_PLTRELSZ  2
+#define DT_PLTGOT    3
 #define DT_HASH      4
 #define DT_STRTAB    5
 #define DT_SYMTAB    6
@@ -100,6 +102,7 @@ typedef struct {
 #define DT_DEBUG     21
 #define DT_TEXTREL   22
 #define DT_JMPREL    23
+#define DT_PLTREL    20
 #define DT_FLAGS     30
 #define DT_RELR      36
 #define DT_FLAGS_1   0x6ffffffbLL
@@ -110,7 +113,10 @@ typedef struct {
 #define DF_1_NOW     0x00000001U
 #define DF_BIND_NOW  0x08U
 
-#define R_X86_64_RELATIVE  8U
+#define R_X86_64_NONE       0U
+#define R_X86_64_GLOB_DAT   6U
+#define R_X86_64_JUMP_SLOT  7U
+#define R_X86_64_RELATIVE   8U
 #define R_AARCH64_NONE     0U
 #define R_AARCH64_RELATIVE 1027U
 #define ELF64_R_SYM(info)  ((uint32_t)((info) >> 32))

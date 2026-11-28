@@ -752,6 +752,10 @@ static int elf_load_at(vfs_node_t *node, mm_t *mm, x86_elf_image_t *out_image,
             const x86_elf_pie_rela_chunk_t *chk = pie.chunks[c];
             for (uint32_t j = 0; j < chk->count; j++) {
                 const elf64_rela_t *rel = &chk->items[j];
+                /* T2: symbolic relocations belong to ld.so — the
+                 * kernel applies only RELATIVE fixups. */
+                if (ELF64_R_TYPE(rel->r_info) != R_X86_64_RELATIVE)
+                    continue;
                 uint64_t dst_va = bias + rel->r_offset;
                 uint64_t *pte = vmm_pt_walk(pgd, dst_va & PAGE_4K_MASK, 0, 0);
                 /* Every PT_LOAD page is mapped above before patching; a

@@ -260,6 +260,19 @@ int x86_elf_pie_prepare(vfs_node_t *node,
 
     uint64_t rela_vaddr = 0, rela_sz = 0, rela_ent = 0, rela_count_tag = 0;
 
+    /* T2: interp-bearing mains may carry the dynamic-linker tag set
+     * (DT_NEEDED, JMPREL/PLTRELSZ/PLTGOT/PLTREL).  Values are recorded
+     * for the RELATIVE write-guard intervals and the SYMTAB/HASH
+     * position rule; on non-interp (static PIE) images these tags keep
+     * hitting the default rejection. */
+    const bool interp_dyn = (interp_ph != NULL);
+    uint64_t needed_count = 0;
+    uint64_t strtab_vaddr = 0, strsz_val = 0, symtab_vaddr = 0, syment_val = 0;
+    uint64_t hash_vaddr = 0;
+    uint64_t jmprel_vaddr = 0, pltrelsz_val = 0, pltgot_vaddr = 0;
+    bool has_jmprel = false, has_pltrelsz = false, has_pltgot = false;
+    bool has_pltrel = false;
+
     for (uint64_t base = 0; base < n_dyn && !seen_null; base += 8) {
         elf64_dyn_t dyn_chunk[8];
         uint64_t cnt = n_dyn - base;
@@ -319,25 +332,57 @@ int x86_elf_pie_prepare(vfs_node_t *node,
                 has_relacount = true;
                 rela_count_tag = val;
                 break;
+            case DT_NEEDED:
+                /* T2: dependency names for the user loader, at most
+                 * eight per image (ld.so owns their resolution). */
+                if (!interp_dyn || needed_count >= 8)
+                    return -ENOEXEC;
+                needed_count++;
+                break;
+            case DT_PLTRELSZ:
+                if (!interp_dyn || has_pltrelsz) return -ENOEXEC;
+                has_pltrelsz = true;
+                pltrelsz_val = val;
+                break;
+            case DT_PLTGOT:
+                if (!interp_dyn || has_pltgot) return -ENOEXEC;
+                has_pltgot = true;
+                pltgot_vaddr = val;
+                break;
+            case DT_PLTREL:
+                if (!interp_dyn || has_pltrel || val != DT_RELA)
+                    return -ENOEXEC;
+                has_pltrel = true;
+                break;
+            case DT_JMPREL:
+                if (!interp_dyn || has_jmprel) return -ENOEXEC;
+                has_jmprel = true;
+                jmprel_vaddr = val;
+                break;
             case DT_STRTAB:
                 if (has_strtab) return -ENOEXEC;
                 has_strtab = true;
+                strtab_vaddr = val;
                 break;
             case DT_STRSZ:
                 if (has_strsz) return -ENOEXEC;
                 has_strsz = true;
+                strsz_val = val;
                 break;
             case DT_SYMTAB:
                 if (has_symtab) return -ENOEXEC;
                 has_symtab = true;
+                symtab_vaddr = val;
                 break;
             case DT_SYMENT:
                 if (has_syment) return -ENOEXEC;
                 has_syment = true;
+                syment_val = val;
                 break;
             case DT_HASH:
                 if (has_hash) return -ENOEXEC;
                 has_hash = true;
+                hash_vaddr = val;
                 break;
             case DT_GNU_HASH:
                 if (has_gnu_hash) return -ENOEXEC;
@@ -371,13 +416,51 @@ int x86_elf_pie_prepare(vfs_node_t *node,
         n_rela = rela_sz / sizeof(elf64_rela_t);
         if (n_rela > X86_ELF_PIE_MAX_RELA)
             return -ENOEXEC;
-        if (has_relacount && rela_count_tag != n_rela)
-            return -ENOEXEC;
+        if (has_relacount) {
+            if (interp_dyn) {
+                /* Prefix semantics (glibc do-rel.h): the first
+                 * rela_count records must be RELATIVE — enforced
+                 * during the record walk below — and the count can
+                 * never exceed the table. */
+                if (rela_count_tag > n_rela)
+                    return -ENOEXEC;
+            } else if (rela_count_tag != n_rela) {
+                return -ENOEXEC;
+            }
+        }
     }
 
     uint64_t dyn_lo = dyn_ph->p_vaddr;
     uint64_t dyn_hi = dyn_ph->p_vaddr + dyn_ph->p_filesz;
     uint64_t rela_lo = 0, rela_hi = 0;
+
+    /* T2 write-guard: the kernel applies RELATIVE records itself, so
+     * their targets must avoid the metadata the loader still reads.
+     * PT_DYNAMIC + the RELA table are pre-existing; the newly
+     * whitelisted regions join them for interp-bearing mains. */
+    uint64_t guard_lo[3] = { 0 }, guard_hi[3] = { 0 };
+    unsigned n_guard = 0;
+    if (interp_dyn) {
+        if (has_jmprel && has_pltrelsz && pltrelsz_val > 0) {
+            if (add_overflows_u64(jmprel_vaddr, pltrelsz_val,
+                                  &guard_hi[n_guard]))
+                return -ENOEXEC;
+            guard_lo[n_guard++] = jmprel_vaddr;
+        }
+        if (has_strtab && has_strsz && strsz_val > 0) {
+            if (add_overflows_u64(strtab_vaddr, strsz_val,
+                                  &guard_hi[n_guard]))
+                return -ENOEXEC;
+            guard_lo[n_guard++] = strtab_vaddr;
+        }
+        if (has_pltgot) {
+            if (add_overflows_u64(pltgot_vaddr, 24, &guard_hi[n_guard]))
+                return -ENOEXEC;
+            guard_lo[n_guard++] = pltgot_vaddr;
+        }
+    }
+    bool any_symbolic_rela = false;
+    uint64_t rec_idx = 0;
 
     if (n_rela > 0) {
         if ((rela_vaddr & 7ULL) != 0)
@@ -426,12 +509,46 @@ int x86_elf_pie_prepare(vfs_node_t *node,
             /* Validate every relocation record before any page allocation */
             for (uint32_t j = 0; j < cnt; j++) {
                 const elf64_rela_t *rel = &chk->items[j];
-                if (ELF64_R_SYM(rel->r_info) != 0 ||
-                    ELF64_R_TYPE(rel->r_info) != R_X86_64_RELATIVE) {
+                uint32_t rsym = ELF64_R_SYM(rel->r_info);
+                uint32_t rtype = ELF64_R_TYPE(rel->r_info);
+                bool symbolic = (rtype == R_X86_64_GLOB_DAT ||
+                                 rtype == R_X86_64_JUMP_SLOT);
+                if (interp_dyn) {
+                    /* T2: symbolic records are validated here but
+                     * applied by ld.so.  psABI table 4.2 defines
+                     * GLOB_DAT/JUMP_SLOT as S with no addend — a
+                     * nonzero addend would corrupt the GOT/PLT slot. */
+                    if (rtype != R_X86_64_RELATIVE && !symbolic) {
+                        kfree(chk);
+                        x86_elf_pie_dispose(out_pie);
+                        return -ENOEXEC;
+                    }
+                    if (symbolic) {
+                        any_symbolic_rela = true;
+                        if (rel->r_addend != 0 || rsym == 0) {
+                            kfree(chk);
+                            x86_elf_pie_dispose(out_pie);
+                            return -ENOEXEC;
+                        }
+                    } else if (rsym != 0) {
+                        kfree(chk);
+                        x86_elf_pie_dispose(out_pie);
+                        return -ENOEXEC;
+                    }
+                } else if (rsym != 0 || rtype != R_X86_64_RELATIVE) {
                     kfree(chk);
                     x86_elf_pie_dispose(out_pie);
                     return -ENOEXEC;
                 }
+                /* RELACOUNT prefix (interp mains, glibc do-rel.h):
+                 * the first rela_count records are RELATIVE. */
+                if (interp_dyn && has_relacount &&
+                    rec_idx < rela_count_tag && rtype != R_X86_64_RELATIVE) {
+                    kfree(chk);
+                    x86_elf_pie_dispose(out_pie);
+                    return -ENOEXEC;
+                }
+                rec_idx++;
                 if ((rel->r_offset & 7ULL) != 0) {
                     kfree(chk);
                     x86_elf_pie_dispose(out_pie);
@@ -453,6 +570,14 @@ int x86_elf_pie_prepare(vfs_node_t *node,
                     kfree(chk);
                     x86_elf_pie_dispose(out_pie);
                     return -ENOEXEC;
+                }
+                for (unsigned g = 0; g < n_guard; g++) {
+                    if (intervals_intersect_u64(rel->r_offset, target_end,
+                                                guard_lo[g], guard_hi[g])) {
+                        kfree(chk);
+                        x86_elf_pie_dispose(out_pie);
+                        return -ENOEXEC;
+                    }
                 }
 
                 bool target_ok = false;
@@ -480,6 +605,56 @@ int x86_elf_pie_prepare(vfs_node_t *node,
             rem -= cnt;
         }
         out_pie->rela_count = (uint32_t)n_rela;
+    }
+
+    /* T2 SYMTAB/HASH position rule: the kernel applies RELATIVE
+     * records before ld.so runs, so the tables ld.so will read must
+     * live in non-writable LOADs whenever the image actually needs
+     * them — NEEDED, any symbolic RELA record, or a non-empty JMPREL
+     * (which the kernel deliberately does not walk, so symbolic
+     * records can hide there).  Hash extents come from the SYSV hash
+     * header itself. */
+    if (interp_dyn &&
+        (needed_count > 0 || any_symbolic_rela ||
+         (has_jmprel && has_pltrelsz && pltrelsz_val > 0))) {
+        if (!has_hash || hash_vaddr == 0)
+            return -ENOEXEC;
+        if (!has_syment || syment_val != 24)
+            return -ENOEXEC;
+        uint64_t hash_file_off = 0;
+        if (find_covering_load(phdrs, ehdr->e_phnum, hash_vaddr, 16,
+                               NULL, &hash_file_off) != 0)
+            return -ENOEXEC;
+        uint32_t hh[4];
+        int hr = vfs_read(node, hash_file_off, sizeof(hh), hh);
+        if (hr < 0 || (uint64_t)hr != sizeof(hh))
+            return -ENOEXEC;
+        uint64_t nbucket = hh[0], nchain = hh[1];
+        if (nbucket == 0 || nchain == 0 ||
+            nbucket > X86_ELF_PIE_MAX_RELA || nchain > X86_ELF_PIE_MAX_RELA)
+            return -ENOEXEC;
+        uint64_t hash_sz = 0;
+        if (add_overflows_u64(2, nbucket, &hash_sz) ||
+            add_overflows_u64(hash_sz, nchain, &hash_sz) ||
+            hash_sz > UINT64_MAX / 4)
+            return -ENOEXEC;
+        hash_sz *= 4;
+        const elf64_phdr_t *cov = NULL;
+        if (find_covering_load(phdrs, ehdr->e_phnum, hash_vaddr, hash_sz,
+                               &cov, NULL) != 0 || !cov)
+            return -ENOEXEC;
+        if (cov->p_flags & PF_W)
+            return -ENOEXEC;
+        uint64_t symtab_sz = 0;
+        if (add_overflows_u64(nchain * syment_val, 0, &symtab_sz) ||
+            nchain > UINT64_MAX / syment_val)
+            return -ENOEXEC;
+        symtab_sz = nchain * syment_val;
+        if (find_covering_load(phdrs, ehdr->e_phnum, symtab_vaddr, symtab_sz,
+                               &cov, NULL) != 0 || !cov)
+            return -ENOEXEC;
+        if (cov->p_flags & PF_W)
+            return -ENOEXEC;
     }
 
     out_pie->link_phdr_vaddr = ehdr->e_phoff;

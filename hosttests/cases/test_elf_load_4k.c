@@ -1591,18 +1591,78 @@ static vfs_node_t interp_fixture_node;
  * phdr table, inside the first PT_LOAD's file range.  `path_bytes`
  * is written verbatim — callers control NUL-termination to drive
  * the malformed-path rejections.  Returns the file size. */
-static size_t build_pie_interp_image(const void *path_bytes, size_t path_len)
+
+/* ── T2 dynamic-main builder (interp-bearing ET_DYN with caller-
+ * chosen dynamic entries) ─────────────────────────────────────
+ * Generalizes build_pie_interp_image(): caller dyn entries (DT_NULL
+ * is appended here), an optional .rela.dyn written into the RW load
+ * right after the dynamic array, and a two-slot reserved-GOT window
+ * (slot A plain, slot B pre-written GOT_SENTINEL).  With
+ * with_dyn_tables the minimal SYSV hash/symtab/strtab tables the
+ * kernel's SYMTAB/HASH position rule consumes are emitted, with
+ * DT_HASH/DT_SYMTAB/DT_SYMENT/DT_STRTAB/DT_STRSZ appended before
+ * DT_NULL; tables_in_ro places them in a PF_R-only PT_LOAD (the
+ * shape lld emits for --hash-style=sysv links) and clearing it
+ * places them inside the RW load — the negative case for that rule.
+ * Rejection cases fail inside x86_elf_pie_prepare, so the caller
+ * needs no interp node and no RNG pushes for them. */
+typedef struct { int64_t tag; uint64_t val; } dyn_spec_t;
+
+#define GOT_SENTINEL 0xA5A5A5A5A5A5A5A5ULL
+#define T2_SYMENT    24U
+#define T2_NBUCKET   1U
+#define T2_NCHAIN    2U
+#define T2_SYMCOUNT  2U
+#define T2_STRSZ     2U
+/* hash bytes: hdr(8) + buckets(4) + chains(8) = 20; symtab 48; str 2 */
+#define T2_HASH_SZ   20U
+#define T2_SYMTAB_SZ (T2_SYMCOUNT * T2_SYMENT)
+#define T2_TAB_SZ    (T2_HASH_SZ + T2_SYMTAB_SZ + T2_STRSZ)
+
+static size_t build_pie_interp_dyn_image(const void *path_bytes, size_t path_len,
+                                         const dyn_spec_t *dyns, size_t n_dyns,
+                                         const elf64_rela_t *relas, size_t n_relas,
+                                         uint64_t *out_rela_vaddr,
+                                         uint64_t *out_got_vaddr,
+                                         bool with_dyn_tables, bool tables_in_ro)
 {
     memset(elf_buf, 0, ELF_MAX_BYTES);
 
-    const uint16_t phnum = 4;
+    /* PHDRs: 0 RX load @0, 1 RW load @0x1000, 2 PT_DYNAMIC,
+     * 3 PT_INTERP, [4 RO tables load @0x3000]. */
+    const uint16_t phnum = (uint16_t)(4 + (with_dyn_tables ? 1 : 0));
     const uint64_t ph_off = sizeof(elf64_ehdr_t);
-    const uint64_t text_end_off = ph_off + (uint64_t)phnum * sizeof(elf64_phdr_t)
-                                + path_len;
+    const uint64_t ph_table_end =
+        ph_off + (uint64_t)phnum * sizeof(elf64_phdr_t);
+    const uint64_t text_end_off = ph_table_end + path_len;
 
     const uint64_t rw_off = 0x1000;
     const uint64_t dyn_off = rw_off + 0x100;
-    const uint64_t rw_filesz = (dyn_off - rw_off) + sizeof(elf64_dyn_t) * 2;
+    /* RELA table bytes are inert without the DT_RELA triplet: emit it
+     * so the validator actually walks the records. */
+    const size_t n_rela_tags = n_relas > 0 ? 3UL : 0UL;
+    const size_t n_table_tags = (with_dyn_tables ? 5UL : 0UL) + n_rela_tags;
+    const size_t n_dyn_total = n_dyns + n_table_tags + 1;   /* + DT_NULL */
+
+    uint64_t cur = dyn_off + n_dyn_total * sizeof(elf64_dyn_t);
+    cur = (cur + 7ULL) & ~7ULL;
+    const uint64_t rela_off = cur;
+    cur += n_relas * sizeof(elf64_rela_t);
+    cur = (cur + 7ULL) & ~7ULL;
+    const uint64_t got_off = cur;          /* slot A; slot B at +8 */
+    cur += 16;
+    cur = (cur + 7ULL) & ~7ULL;
+    const uint64_t tab_rw_off = cur;
+    const uint64_t rw_filesz =
+        (tab_rw_off + (with_dyn_tables && !tables_in_ro ? T2_TAB_SZ : 0)) - rw_off;
+
+    const uint64_t tab_load_off = 0x3000;
+    const uint64_t tab_file_off =
+        with_dyn_tables ? (tables_in_ro ? tab_load_off : tab_rw_off) : 0;
+    const uint64_t tab_vaddr =
+        with_dyn_tables ? (tables_in_ro ? tab_load_off
+                                        : rw_off + (tab_rw_off - rw_off))
+                        : 0;
 
     elf64_ehdr_t *e = (elf64_ehdr_t *)elf_buf;
     e->e_ident[EI_MAG0] = ELFMAG0;
@@ -1643,25 +1703,86 @@ static size_t build_pie_interp_image(const void *path_bytes, size_t path_len)
     ph[2].p_flags = PF_R | PF_W;
     ph[2].p_offset = dyn_off;
     ph[2].p_vaddr = 0x1000 + (dyn_off - rw_off);
-    ph[2].p_filesz = 2 * sizeof(elf64_dyn_t);
-    ph[2].p_memsz = 2 * sizeof(elf64_dyn_t);
+    ph[2].p_filesz = n_dyn_total * sizeof(elf64_dyn_t);
+    ph[2].p_memsz = n_dyn_total * sizeof(elf64_dyn_t);
     ph[2].p_align = 8;
-    elf64_dyn_t *dyn = (elf64_dyn_t *)(elf_buf + dyn_off);
-    dyn[0].d_tag = DT_FLAGS_1;
-    dyn[0].d_val = DF_1_PIE;
-    dyn[1].d_tag = DT_NULL;
-    dyn[1].d_val = 0;
     /* 3: PT_INTERP */
     ph[3].p_type = PT_INTERP;
     ph[3].p_flags = PF_R;
-    ph[3].p_offset = ph_off + 4ULL * sizeof(elf64_phdr_t);
+    ph[3].p_offset = ph_table_end;
     ph[3].p_vaddr = ph[3].p_offset;
     ph[3].p_filesz = path_len;
     ph[3].p_memsz = path_len;
     ph[3].p_align = 1;
-    memcpy(elf_buf + ph[3].p_offset, path_bytes, path_len);
+    /* 4: RO tables PT_LOAD */
+    if (with_dyn_tables && tables_in_ro) {
+        ph[4].p_type = PT_LOAD;
+        ph[4].p_flags = PF_R;
+        ph[4].p_offset = tab_load_off;
+        ph[4].p_vaddr = tab_load_off;
+        ph[4].p_filesz = T2_TAB_SZ;
+        ph[4].p_memsz = 0x1000;
+        ph[4].p_align = 0x1000;
+    }
 
-    return (size_t)(rw_off + rw_filesz);
+    /* Dynamic array: caller entries, then the table tags, then NULL. */
+    elf64_dyn_t *d = (elf64_dyn_t *)(elf_buf + dyn_off);
+    for (size_t i = 0; i < n_dyns; i++) {
+        d[i].d_tag = dyns[i].tag;
+        d[i].d_val = dyns[i].val;
+    }
+    size_t idx = n_dyns;
+    if (n_relas > 0) {
+        d[idx].d_tag = DT_RELA;   d[idx].d_val = 0xDEAD0001ULL;  idx++;
+        d[idx].d_tag = DT_RELASZ; d[idx].d_val = n_relas * sizeof(elf64_rela_t); idx++;
+        d[idx].d_tag = DT_RELAENT; d[idx].d_val = sizeof(elf64_rela_t); idx++;
+    }
+    if (with_dyn_tables) {
+        d[idx].d_tag = DT_HASH;   d[idx].d_val = tab_vaddr;             idx++;
+        d[idx].d_tag = DT_SYMTAB; d[idx].d_val = tab_vaddr + T2_HASH_SZ; idx++;
+        d[idx].d_tag = DT_SYMENT; d[idx].d_val = T2_SYMENT;             idx++;
+        d[idx].d_tag = DT_STRTAB; d[idx].d_val = tab_vaddr + T2_HASH_SZ
+                                                  + T2_SYMTAB_SZ;       idx++;
+        d[idx].d_tag = DT_STRSZ;  d[idx].d_val = T2_STRSZ;              idx++;
+    }
+    d[idx].d_tag = DT_NULL;
+    d[idx].d_val = 0;
+
+    if (n_relas > 0 && relas)
+        memcpy(elf_buf + rela_off, relas, n_relas * sizeof(elf64_rela_t));
+    /* Patch the DT_RELA placeholder now that the table address is known. */
+    for (size_t i = 0; i < n_dyn_total; i++) {
+        if (d[i].d_tag == DT_RELA && d[i].d_val == 0xDEAD0001ULL)
+            d[i].d_val = 0x1000 + (rela_off - rw_off);
+    }
+    if (out_rela_vaddr)
+        *out_rela_vaddr = 0x1000 + (rela_off - rw_off);
+    *(uint64_t *)(elf_buf + got_off + 8) = GOT_SENTINEL;   /* slot B */
+    if (out_got_vaddr)
+        *out_got_vaddr = 0x1000 + (got_off - rw_off) + 8;
+
+    if (with_dyn_tables) {
+        uint32_t *hash = (uint32_t *)(elf_buf + tab_file_off);
+        hash[0] = T2_NBUCKET;
+        hash[1] = T2_NCHAIN;
+        /* buckets[] and chains[] stay zero: the kernel only reads the
+         * header for the SYMTAB/HASH position rule; ld.so never runs
+         * on synthetic images. */
+    }
+    memcpy(elf_buf + ph_table_end, path_bytes, path_len);
+
+    size_t file_end = (size_t)(rw_off + rw_filesz);
+    if (with_dyn_tables && tables_in_ro)
+        file_end = (size_t)(tab_load_off + T2_TAB_SZ);
+    return file_end;
+}
+
+static size_t build_pie_interp_image(const void *path_bytes, size_t path_len)
+{
+    dyn_spec_t dyns[] = { { DT_FLAGS_1, DF_1_PIE } };
+    return build_pie_interp_dyn_image(path_bytes, path_len,
+                                      dyns, 1, NULL, 0, NULL, NULL,
+                                      false, false);
 }
 
 /* Install arbitrary bytes as the vfs_lookup result for the
@@ -1926,6 +2047,312 @@ TEST_FUNC(test_etexec_interp_rejected)
     assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
     assert_eq(0, elf_load_state.total_rng_calls);
     assert_eq(0, elf_load_state.total_allocs);
+    teardown_fixture();
+}
+
+
+TEST_FUNC(test_pie_interp_accepts_needed_jmprel)
+{
+    /* T2 whitelist: an interp-bearing main may carry NEEDED and the
+     * PLT/GOT tag family on top of the T1 shape. */
+    install_interp_node();
+    dyn_spec_t dyns[] = {
+        { DT_FLAGS_1, DF_1_PIE },
+        { DT_NEEDED, 0 },
+        { DT_JMPREL, 0x400 },
+        { DT_PLTRELSZ, 24 },
+        { DT_PLTGOT, 0x1800 },
+        { DT_PLTREL, DT_RELA },
+    };
+    size_t sz = build_pie_interp_dyn_image("/lib/ld.so", 11,
+                                           dyns, 6, NULL, 0,
+                                           NULL, NULL, true, true);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_lookup_node = &interp_fixture_node;
+
+    stubs_rng_push(true, 0ULL);          /* main bias 0x400000 */
+    stubs_rng_push(true, 0xffffULL);     /* interp bias */
+    x86_elf_image_t img;
+    memset(&img, 0, sizeof(img));
+    assert_eq(0, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_true(img.has_interp);
+    assert_not_null(stubs_find_mapping(0x400000ULL));
+    assert_not_null(stubs_find_mapping(0x103ff000ULL));
+    teardown_fixture();
+}
+
+TEST_FUNC(test_pie_interp_relative_applied_symbolic_skipped)
+{
+    /* RELATIVE stays kernel-owned (applied); GLOB_DAT is validated
+     * but left for ld.so — the sentinel slot must survive untouched. */
+    install_interp_node();
+    dyn_spec_t dyns[] = { { DT_FLAGS_1, DF_1_PIE } };
+    elf64_rela_t relas[2] = {
+        { 0, R_X86_64_RELATIVE, 0x1234 },
+        { 0, (1ULL << 32) | R_X86_64_GLOB_DAT, 0 },
+    };
+    uint64_t rela_va = 0, got = 0;
+    build_pie_interp_dyn_image("/lib/ld.so", 11, dyns, 1, relas, 2,
+                               &rela_va, &got, true, true);
+    relas[0].r_offset = got - 8;         /* slot A: kernel patches it */
+    relas[1].r_offset = got;             /* slot B: symbolic, skipped */
+    size_t sz = build_pie_interp_dyn_image("/lib/ld.so", 11, dyns, 1,
+                                           relas, 2, &rela_va, &got,
+                                           true, true);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_lookup_node = &interp_fixture_node;
+
+    stubs_rng_push(true, 0ULL);
+    stubs_rng_push(true, 0xffffULL);
+    x86_elf_image_t img;
+    memset(&img, 0, sizeof(img));
+    /* Guard the memory reads: a failing load rolls the fixture back
+     * and leaves nothing to dereference. */
+    if (elf_load(&fixture_node, &fixture_mm, &img) == 0) {
+        uint64_t B = 0x400000ULL;
+        elf_load_pte_record_t *pa = stubs_find_mapping(B + got - 8);
+        elf_load_pte_record_t *pb = stubs_find_mapping(B + got);
+        assert_not_null(pa);
+        assert_not_null(pb);
+        uint64_t va_off = (got - 8) & 0xFFFULL;
+        assert_eq(B + 0x1234ULL,
+                  *(uint64_t *)((uintptr_t)pa->phys + va_off));
+        assert_eq(GOT_SENTINEL,
+                  *(uint64_t *)((uintptr_t)pb->phys + (got & 0xFFFULL)));
+    } else {
+        assert_true(false);          /* the load itself must succeed */
+    }
+    teardown_fixture();
+}
+
+TEST_FUNC(test_pie_interp_relacount_prefix_ok)
+{
+    /* RELACOUNT=1 with a RELATIVE first record: the prefix holds. */
+    install_interp_node();
+    dyn_spec_t dyns[] = {
+        { DT_FLAGS_1, DF_1_PIE },
+        { DT_RELACOUNT, 1 },
+    };
+    elf64_rela_t relas[2] = {
+        { 0, R_X86_64_RELATIVE, 0x10 },
+        { 0, (1ULL << 32) | R_X86_64_GLOB_DAT, 0 },
+    };
+    uint64_t got = 0;
+    build_pie_interp_dyn_image("/lib/ld.so", 11, dyns, 2, relas, 2,
+                               NULL, &got, true, true);
+    relas[0].r_offset = got - 8;
+    relas[1].r_offset = got;
+    size_t sz = build_pie_interp_dyn_image("/lib/ld.so", 11, dyns, 2,
+                                           relas, 2, NULL, &got,
+                                           true, true);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_lookup_node = &interp_fixture_node;
+    stubs_rng_push(true, 0ULL);
+    stubs_rng_push(true, 0xffffULL);
+    x86_elf_image_t img;
+    memset(&img, 0, sizeof(img));
+    assert_eq(0, elf_load(&fixture_node, &fixture_mm, &img));
+    teardown_fixture();
+}
+
+TEST_FUNC(test_pie_interp_relacount_prefix_broken)
+{
+    /* Same RELATIVE total, but the first record is symbolic: the
+     * RELACOUNT prefix is violated. */
+    install_interp_node();
+    dyn_spec_t dyns[] = {
+        { DT_FLAGS_1, DF_1_PIE },
+        { DT_RELACOUNT, 1 },
+    };
+    elf64_rela_t relas[2] = {
+        { 0, (1ULL << 32) | R_X86_64_GLOB_DAT, 0 },
+        { 0, R_X86_64_RELATIVE, 0x10 },
+    };
+    uint64_t got = 0;
+    build_pie_interp_dyn_image("/lib/ld.so", 11, dyns, 2, relas, 2,
+                               NULL, &got, true, true);
+    relas[0].r_offset = got;
+    relas[1].r_offset = got - 8;
+    size_t sz = build_pie_interp_dyn_image("/lib/ld.so", 11, dyns, 2,
+                                           relas, 2, NULL, &got,
+                                           true, true);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_lookup_node = &interp_fixture_node;
+    stubs_rng_push(true, 0ULL);
+    x86_elf_image_t img;
+    memset(&img, 0xAA, sizeof(img));
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0, elf_load_state.total_rng_calls);
+    teardown_fixture();
+
+    /* count beyond the table length is rejected too. */
+    dyn_spec_t dyns2[] = {
+        { DT_FLAGS_1, DF_1_PIE },
+        { DT_RELACOUNT, 2 },
+    };
+    elf64_rela_t one[1] = { { 0, R_X86_64_RELATIVE, 0x10 } };
+    build_pie_interp_dyn_image("/lib/ld.so", 11, dyns2, 2, one, 1,
+                               NULL, &got, true, true);
+    one[0].r_offset = got - 8;
+    sz = build_pie_interp_dyn_image("/lib/ld.so", 11, dyns2, 2, one, 1,
+                                    NULL, &got, true, true);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_lookup_node = &interp_fixture_node;
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0, elf_load_state.total_rng_calls);
+    teardown_fixture();
+}
+
+TEST_FUNC(test_pie_interp_symbolic_addend_rejected)
+{
+    /* psABI: GLOB_DAT/JUMP_SLOT write S with no addend.  A nonzero
+     * addend would corrupt the GOT/PLT slot — reject. */
+    install_interp_node();
+    dyn_spec_t dyns[] = { { DT_FLAGS_1, DF_1_PIE } };
+    uint64_t got = 0;
+    x86_elf_image_t img;
+    memset(&img, 0xAA, sizeof(img));
+
+    elf64_rela_t g[1] = {
+        { 0, (1ULL << 32) | R_X86_64_GLOB_DAT, 8 },
+    };
+    build_pie_interp_dyn_image("/lib/ld.so", 11, dyns, 1, g, 1,
+                               NULL, &got, true, true);
+    g[0].r_offset = got;
+    size_t sz = build_pie_interp_dyn_image("/lib/ld.so", 11, dyns, 1,
+                                           g, 1, NULL, &got, true, true);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_lookup_node = &interp_fixture_node;
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0, elf_load_state.total_rng_calls);
+    teardown_fixture();
+
+    elf64_rela_t j[1] = {
+        { 0, (2ULL << 32) | R_X86_64_JUMP_SLOT, 8 },
+    };
+    build_pie_interp_dyn_image("/lib/ld.so", 11, dyns, 1, j, 1,
+                               NULL, &got, true, true);
+    j[0].r_offset = got;
+    sz = build_pie_interp_dyn_image("/lib/ld.so", 11, dyns, 1,
+                                    j, 1, NULL, &got, true, true);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_lookup_node = &interp_fixture_node;
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0, elf_load_state.total_rng_calls);
+    teardown_fixture();
+}
+
+TEST_FUNC(test_pie_interp_relative_forbidden_target)
+{
+    /* The kernel applies RELATIVE records itself: the reserved
+     * GOT[0..2] window behind DT_PLTGOT must never be a target. */
+    install_interp_node();
+    dyn_spec_t dyns[2] = {
+        { DT_FLAGS_1, DF_1_PIE },
+        { DT_PLTGOT, 0 },
+    };
+    elf64_rela_t relas[1] = { { 0, R_X86_64_RELATIVE, 0 } };
+    uint64_t got = 0;
+    build_pie_interp_dyn_image("/lib/ld.so", 11, dyns, 2, relas, 1,
+                               NULL, &got, false, false);
+    dyns[1].val = got - 8;               /* PLTGOT -> slot A */
+    relas[0].r_offset = got;             /* target slot B = PLTGOT+8 */
+    size_t sz = build_pie_interp_dyn_image("/lib/ld.so", 11, dyns, 2,
+                                           relas, 1, NULL, &got,
+                                           false, false);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_lookup_node = &interp_fixture_node;
+    stubs_rng_push(true, 0ULL);
+    x86_elf_image_t img;
+    memset(&img, 0xAA, sizeof(img));
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0, elf_load_state.total_rng_calls);
+    teardown_fixture();
+}
+
+TEST_FUNC(test_pie_interp_dyn_tables_in_rw_rejected)
+{
+    /* NEEDED + a symbolic record trigger the SYMTAB/HASH position
+     * rule; tables inside the RW LOAD are rejected because the
+     * kernel's own RELATIVE writes could clobber them before ld.so
+     * ever validates anything. */
+    install_interp_node();
+    dyn_spec_t dyns[] = {
+        { DT_FLAGS_1, DF_1_PIE },
+        { DT_NEEDED, 0 },
+    };
+    elf64_rela_t relas[1] = {
+        { 0, (1ULL << 32) | R_X86_64_GLOB_DAT, 0 },
+    };
+    uint64_t got = 0;
+    build_pie_interp_dyn_image("/lib/ld.so", 11, dyns, 2, relas, 1,
+                               NULL, &got, true, false);
+    relas[0].r_offset = got;
+    size_t sz = build_pie_interp_dyn_image("/lib/ld.so", 11, dyns, 2,
+                                           relas, 1, NULL, &got,
+                                           true, false);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_lookup_node = &interp_fixture_node;
+    stubs_rng_push(true, 0ULL);
+    x86_elf_image_t img;
+    memset(&img, 0xAA, sizeof(img));
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0, elf_load_state.total_rng_calls);
+    teardown_fixture();
+}
+
+TEST_FUNC(test_pie_interp_jmprel_triggers_position_rule)
+{
+    /* A non-empty JMPREL alone (no NEEDED, empty RELA) must trigger
+     * the SYMTAB/HASH position rule: the kernel never walks JMPREL,
+     * so symbolic records could hide there. */
+    install_interp_node();
+    dyn_spec_t dyns[] = {
+        { DT_FLAGS_1, DF_1_PIE },
+        { DT_JMPREL, 0x400 },
+        { DT_PLTRELSZ, 24 },
+    };
+    uint64_t got = 0;
+    x86_elf_image_t img;
+    memset(&img, 0xAA, sizeof(img));
+
+    size_t sz = build_pie_interp_dyn_image("/lib/ld.so", 11, dyns, 3,
+                                           NULL, 0, NULL, &got,
+                                           true, false);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_lookup_node = &interp_fixture_node;
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0, elf_load_state.total_rng_calls);
+    teardown_fixture();
+
+    /* Control: the same shape with tables in the RO LOAD is accepted. */
+    sz = build_pie_interp_dyn_image("/lib/ld.so", 11, dyns, 3,
+                                    NULL, 0, NULL, &got, true, true);
+    setup_fixture(sz, 0x100000ULL);
+    stubs_lookup_node = &interp_fixture_node;
+    stubs_rng_push(true, 0ULL);
+    stubs_rng_push(true, 0xffffULL);
+    memset(&img, 0, sizeof(img));
+    assert_eq(0, elf_load(&fixture_node, &fixture_mm, &img));
+    teardown_fixture();
+}
+
+TEST_FUNC(test_pie_interp_needed_rejected_without_interp)
+{
+    /* The static-PIE path (no PT_INTERP) keeps its T1 whitelist:
+     * DT_NEEDED is still rejected there. */
+    elf64_dyn_t dyns[] = {
+        { DT_FLAGS_1, DF_1_PIE },
+        { DT_NEEDED, 0 },
+        { DT_NULL, 0 },
+    };
+    setup_fixture(build_pie_image(0x80, 0x100, 0x1000, 0x200, 0x1000,
+                                  dyns, 3, NULL, 0, NULL, NULL),
+                  0x100000ULL);
+    x86_elf_image_t img;
+    memset(&img, 0xAA, sizeof(img));
+    assert_eq(-ENOEXEC, elf_load(&fixture_node, &fixture_mm, &img));
+    assert_eq(0, elf_load_state.total_rng_calls);
     teardown_fixture();
 }
 
@@ -2614,6 +3041,15 @@ TEST_LIST_BEGIN
     TEST_ENTRY(test_pie_interp_rejects_etexec_interpreter),
     TEST_ENTRY(test_pie_interp_rejects_nested_interp),
     TEST_ENTRY(test_pie_interp_rejects_tls_interpreter),
+    TEST_ENTRY(test_pie_interp_accepts_needed_jmprel),
+    TEST_ENTRY(test_pie_interp_relative_applied_symbolic_skipped),
+    TEST_ENTRY(test_pie_interp_relacount_prefix_ok),
+    TEST_ENTRY(test_pie_interp_relacount_prefix_broken),
+    TEST_ENTRY(test_pie_interp_symbolic_addend_rejected),
+    TEST_ENTRY(test_pie_interp_relative_forbidden_target),
+    TEST_ENTRY(test_pie_interp_dyn_tables_in_rw_rejected),
+    TEST_ENTRY(test_pie_interp_jmprel_triggers_position_rule),
+    TEST_ENTRY(test_pie_interp_needed_rejected_without_interp),
     TEST_ENTRY(test_tls_etexec_variant_ii),
     TEST_ENTRY(test_tls_align_zero_and_one),
     TEST_ENTRY(test_tls_pure_tbss_tinygo_shape),
