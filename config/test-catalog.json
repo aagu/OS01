@@ -1385,6 +1385,19 @@
       }
     },
     {
+      "id": "test_aarch64_rp1_irq",
+      "layer": "host",
+      "subsystem": "intr",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "intr.aarch64.rp1_msix"
+      ],
+      "link": "rp1-irq",
+      "source": "hosttests/cases/test_aarch64_rp1_irq.c"
+    },
+    {
       "id": "test_aarch64_rp1_topology",
       "layer": "host",
       "subsystem": "drivers",

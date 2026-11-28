@@ -229,6 +229,27 @@ LINK_GROUP_rp1-mip := \
 test-aarch64-bcm2712-mip: $(TEST_BLD)/test_aarch64_bcm2712_mip.elf
 	$<
 
+# RP1 MSI-X interrupt service (Task 4)
+$(TEST_BLD)/rp1_irq_production.o: $(TESTS_DIR)/kernel/arch/aarch64/intr/rp1_irq.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/rp1_irq.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/bcm2712_mip.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/rp1_pcie.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/gic.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(RP1_MIP_HOST_CFLAGS) -c $< -o $@
+
+LINK_CFLAGS_rp1-irq = $(RP1_MIP_HOST_CFLAGS) $(FRAMEWORK_INC)
+LINK_GROUP_rp1-irq := \
+    $(TEST_BLD)/rp1_irq_production.o \
+    $(TEST_BLD)/rp1_mip_pcie_production.o \
+    $(TEST_BLD)/bcm2712_mip_production.o \
+    $(TEST_BLD)/gic_driver_mmio_trace.o \
+    $(LIBC_OBJS)
+
+.PHONY: test-aarch64-rp1-irq
+test-aarch64-rp1-irq: $(TEST_BLD)/test_aarch64_rp1_irq.elf
+	$<
+
 # aarch64 ipi_broadcast
 AARCH64_IPI_HOST_CFLAGS := $(HOST_CFLAGS) $(KERNEL_INC)
 
