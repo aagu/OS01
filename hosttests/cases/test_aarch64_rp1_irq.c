@@ -445,6 +445,14 @@ static void test_firmware_owner_and_rollbacks(void)
     reset_env();
     g_drop_final_enable_rb = true;
     assert_true(rp1_irq_prepare(25u, RP1_IRQ_LEVEL_HIGH, cb_uart25, NULL, &irq25) < 0);
+
+    /* 8. Table restore failure during abort keeps MIP slot quarantined */
+    reset_env();
+    assert_eq(0, rp1_irq_prepare(25u, RP1_IRQ_LEVEL_HIGH, cb_uart25, NULL, &irq25));
+    uint32_t intid_q = rp1_irq_intid(irq25);
+    g_drop_table_write = true;
+    assert_eq(-EIO, rp1_irq_abort(irq25, true));
+    assert_true(gic_get_handler(intid_q, NULL) != NULL);
 }
 
 TEST_LIST_BEGIN

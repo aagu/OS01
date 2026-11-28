@@ -298,12 +298,10 @@ invalid:
 
 /* ── Independent RP1 / BCM2712 MIP / UART0 IRQ topology parser ────────── */
 struct irq_fdt_frame {
-    uint64_t bus_cpu_base;
     uint32_t reg_off, reg_len;
     uint32_t ranges_off, ranges_len;
     uint32_t intr_off, intr_len;
     uint32_t phandle;
-    uint32_t intr_parent;
     uint32_t eff_intr_parent;
     uint32_t msi_parent;
     uint64_t msi_pci_addr;
@@ -312,7 +310,6 @@ struct irq_fdt_frame {
     uint32_t msi_offset;
     uint64_t rp1_child_base;
     uint64_t rp1_parent_cpu_base;
-    uint64_t rc_reg_base, rc_reg_size;
     uint8_t addr_cells;
     uint8_t size_cells;
     uint16_t flags;
@@ -322,7 +319,6 @@ struct irq_fdt_frame {
 #define IRQ_F_STATUS_OK      (1U << 1)
 #define IRQ_F_HAS_REG        (1U << 2)
 #define IRQ_F_HAS_RANGES     (1U << 3)
-#define IRQ_F_HAS_BUS_OFF    (1U << 4)
 #define IRQ_F_HAS_INTR_PAR   (1U << 5)
 #define IRQ_F_HAS_MSI_PAR    (1U << 6)
 #define IRQ_F_HAS_MSI_ADDR   (1U << 7)
@@ -347,11 +343,50 @@ struct irq_mip_cand {
     uint32_t offset;
 };
 
-static uint64_t irq_translate_bus(const struct irq_fdt_frame *stack, int depth, uint64_t addr)
+static struct {
+    struct irq_fdt_frame stack[MAX_DEPTH];
+    struct irq_mip_cand mips[4];
+} s_irq_parse_scratch;
+
+static bool irq_translate_one_ranges(const uint8_t *b,
+                                     const struct irq_fdt_frame *bus,
+                                     uint32_t pac, uint64_t *addr_io)
 {
-    for (int d = depth - 1; d >= 0; d--) {
-        if ((stack[d].flags & IRQ_F_HAS_BUS_OFF) != 0U)
-            addr += stack[d].bus_cpu_base;
+    if ((bus->flags & IRQ_F_HAS_RANGES) == 0U || bus->ranges_len == 0U)
+        return true;
+    uint32_t cac = bus->addr_cells;
+    uint32_t csc = bus->size_cells;
+    uint32_t stride = (cac + pac + csc) * 4U;
+    if (stride == 0U || (bus->ranges_len % stride) != 0U)
+        return false;
+    const uint8_t *rp = b + bus->ranges_off;
+    uint32_t n = bus->ranges_len / stride;
+    uint64_t addr = *addr_io;
+    for (uint32_t i = 0U; i < n; i++) {
+        const uint8_t *e = rp + i * stride;
+        uint64_t c = 0ULL, p = 0ULL, sz = 0ULL;
+        uint32_t c_skip = (cac == 3U) ? 1U : 0U;
+        if (!rp1_read_cells(e + c_skip * 4U, cac - c_skip, &c) ||
+            !rp1_read_cells(e + cac * 4U, pac, &p) ||
+            !rp1_read_cells(e + (cac + pac) * 4U, csc, &sz))
+            continue;
+        if (sz > 0ULL && addr >= c && addr - c < sz) {
+            *addr_io = p + (addr - c);
+            return true;
+        }
+    }
+    return false;
+}
+
+static uint64_t irq_translate_bus(const uint8_t *b,
+                                  const struct irq_fdt_frame *stack,
+                                  int depth, uint64_t addr)
+{
+    for (int d = depth - 1; d >= 1; d--) {
+        if ((stack[d].flags & IRQ_F_IS_PCIE) != 0U)
+            continue;
+        uint32_t pac = stack[d - 1].addr_cells;
+        (void)irq_translate_one_ranges(b, &stack[d], pac, &addr);
     }
     return addr;
 }
@@ -385,14 +420,12 @@ int aarch64_dtb_parse_rp1_irq(const void *blob, uint32_t size,
         off_strings > totalsize || sz_strings > totalsize - off_strings)
         return -EINVAL;
 
-    struct irq_fdt_frame stack[MAX_DEPTH];
-    memset(stack, 0, sizeof(stack));
+    memset(&s_irq_parse_scratch, 0, sizeof(s_irq_parse_scratch));
+    struct irq_fdt_frame *stack = s_irq_parse_scratch.stack;
+    struct irq_mip_cand *mips = s_irq_parse_scratch.mips;
     int depth = -1;
     bool board_ok = false;
     uint32_t gic_phandle = 0U;
-
-    struct irq_mip_cand mips[4];
-    memset(mips, 0, sizeof(mips));
     uint32_t mip_count = 0U;
 
     bool have_rp1 = false;
@@ -404,7 +437,6 @@ int aarch64_dtb_parse_rp1_irq(const void *blob, uint32_t size,
     uint32_t sel_uart_source = 0U;
     uint64_t sel_uart_offset = 0ULL;
 
-    /* Per-RP1 candidate state (reset when exiting rp1 node). */
     bool cur_rp1_uart_valid = false;
     uint32_t cur_rp1_uart_source = 0U;
     uint64_t cur_rp1_uart_offset = 0ULL;
@@ -435,34 +467,28 @@ int aarch64_dtb_parse_rp1_irq(const void *blob, uint32_t size,
             stack[depth].size_cells = 1U;
             if (depth > 0) {
                 struct irq_fdt_frame *par = &stack[depth - 1];
-                if ((par->flags & IRQ_F_HAS_RANGES) != 0U) {
-                    if ((par->flags & IRQ_F_IS_RP1) != 0U && depth >= 2) {
-                        uint32_t cac = par->addr_cells;
-                        uint32_t pac = stack[depth - 2].addr_cells;
-                        uint32_t csc = par->size_cells;
-                        uint32_t entry_cells = cac + pac + csc;
-                        if (pac == 3U && par->ranges_len >= entry_cells * 4U &&
-                            (par->ranges_len % (entry_cells * 4U)) == 0U) {
-                            const uint8_t *rp = b + par->ranges_off;
-                            uint64_t cbase = 0ULL, pbase = 0ULL;
-                            if (rp1_read_cells(rp, cac, &cbase) &&
-                                rp1_read_cells(rp + (cac + 1U) * 4U, 2U, &pbase)) {
-                                par->rp1_child_base = cbase;
-                                par->rp1_parent_cpu_base = pbase;
+                if ((par->flags & IRQ_F_HAS_RANGES) != 0U &&
+                    (par->flags & IRQ_F_IS_RP1) != 0U && depth >= 2) {
+                    uint32_t cac = par->addr_cells;
+                    uint32_t pac = stack[depth - 2].addr_cells;
+                    uint32_t csc = par->size_cells;
+                    uint32_t entry_cells = cac + pac + csc;
+                    if (pac == 3U && par->ranges_len >= entry_cells * 4U &&
+                        (par->ranges_len % (entry_cells * 4U)) == 0U) {
+                        const uint8_t *rp = b + par->ranges_off;
+                        uint64_t cbase = 0ULL, pbase = 0ULL;
+                        if (rp1_read_cells(rp, cac, &cbase) &&
+                            rp1_read_cells(rp + (cac + 1U) * 4U, 2U, &pbase)) {
+                            par->rp1_child_base = cbase;
+                            /* Translate PCI address through parent PCIe RC ranges if present. */
+                            if (depth >= 3 &&
+                                (stack[depth - 2].flags & IRQ_F_IS_PCIE) != 0U &&
+                                (stack[depth - 2].flags & IRQ_F_HAS_RANGES) != 0U) {
+                                (void)irq_translate_one_ranges(
+                                    b, &stack[depth - 2],
+                                    stack[depth - 3].addr_cells, &pbase);
                             }
-                        }
-                    } else if (depth >= 2 && (par->flags & IRQ_F_IS_PCIE) == 0U) {
-                        uint32_t cac = par->addr_cells;
-                        uint32_t pac = stack[depth - 2].addr_cells;
-                        uint32_t csc = par->size_cells;
-                        if (par->ranges_len >= (cac + pac + csc) * 4U) {
-                            const uint8_t *rp = b + par->ranges_off;
-                            uint64_t c = 0ULL, p = 0ULL;
-                            if (rp1_read_cells(rp, cac, &c) &&
-                                rp1_read_cells(rp + cac * 4U, pac, &p) && p >= c) {
-                                par->bus_cpu_base = p - c;
-                                par->flags |= IRQ_F_HAS_BUS_OFF;
-                            }
+                            par->rp1_parent_cpu_base = pbase;
                         }
                     }
                 }
@@ -491,7 +517,7 @@ int aarch64_dtb_parse_rp1_irq(const void *blob, uint32_t size,
                     rp1_read_cells(b + cur->reg_off, pac, &gbase) &&
                     rp1_read_cells(b + cur->reg_off + pac * 4U, psc, &gsize) &&
                     gsize > 0ULL) {
-                    if (irq_translate_bus(stack, depth, gbase) == selected_gicd)
+                    if (irq_translate_bus(b, stack, depth, gbase) == selected_gicd)
                         gic_phandle = cur->phandle;
                 }
             } else if ((cur->flags & IRQ_F_IS_MIP) != 0U && irq_frame_enabled(cur) &&
@@ -511,7 +537,7 @@ int aarch64_dtb_parse_rp1_irq(const void *blob, uint32_t size,
                         .valid = true,
                         .phandle = cur->phandle,
                         .intr_parent = cur->eff_intr_parent,
-                        .cpu_pa = irq_translate_bus(stack, depth, mbase),
+                        .cpu_pa = irq_translate_bus(b, stack, depth, mbase),
                         .span = msize,
                         .msi_pci_addr = cur->msi_pci_addr,
                         .base_spi = cur->msi_base_spi,
@@ -566,7 +592,7 @@ int aarch64_dtb_parse_rp1_irq(const void *blob, uint32_t size,
                         } else {
                             have_rp1 = true;
                             sel_msi_parent = rc->msi_parent;
-                            sel_rc_base = irq_translate_bus(stack, depth - 1, rbase);
+                            sel_rc_base = irq_translate_bus(b, stack, depth - 1, rbase);
                             sel_rc_size = rsize;
                             sel_rp1_child_base = cur->rp1_child_base;
                             sel_uart_valid = cur_rp1_uart_valid;
@@ -607,7 +633,8 @@ int aarch64_dtb_parse_rp1_irq(const void *blob, uint32_t size,
                     cur->flags |= IRQ_F_IS_MIP;
                 if (rp1_compat_has(pval, plen, "brcm,bcm2712-pcie"))
                     cur->flags |= IRQ_F_IS_PCIE;
-                if (rp1_compat_has(pval, plen, "arm,pl011"))
+                if (rp1_compat_has(pval, plen, "arm,pl011") ||
+                    rp1_compat_has(pval, plen, "arm,pl011-axi"))
                     cur->flags |= IRQ_F_IS_UART;
             } else if (rp1_str_eq(pname, "status") && plen > 0U) {
                 cur->flags |= IRQ_F_STATUS_SEEN;
@@ -618,8 +645,7 @@ int aarch64_dtb_parse_rp1_irq(const void *blob, uint32_t size,
                        plen == 4U) {
                 cur->phandle = aarch64_fdt_be32(pval);
             } else if (rp1_str_eq(pname, "interrupt-parent") && plen == 4U) {
-                cur->intr_parent = aarch64_fdt_be32(pval);
-                cur->eff_intr_parent = cur->intr_parent;
+                cur->eff_intr_parent = aarch64_fdt_be32(pval);
                 cur->flags |= IRQ_F_HAS_INTR_PAR;
             } else if (rp1_str_eq(pname, "msi-parent") && plen == 4U) {
                 cur->msi_parent = aarch64_fdt_be32(pval);

@@ -232,6 +232,12 @@ static void build_rpi5_irq_dtb(struct fdt_buf *f, const struct dtb_opts *o)
     fdt_prop(f, "compatible", "brcm,bcm2712-pcie", 18U);
     fdt_prop(f, "status", "okay", 5U);
     fdt_prop_u32(f, "msi-parent", PH_MIP);
+    const uint32_t pcie_ranges[] = {
+        0x02000000U, 0x00U, 0x00000000U,
+        0x1fU, 0x00000000U,
+        0x00U, 0xfffffffcU,
+    };
+    fdt_prop_u32s(f, "ranges", pcie_ranges, 7U);
     const uint32_t rc_reg[] = { 0x00U, 0x00120000U, 0x00009310U };
     if (o->reorder_props) {
         fdt_prop_u32s(f, "reg", rc_reg, 3U);
@@ -248,8 +254,8 @@ static void build_rpi5_irq_dtb(struct fdt_buf *f, const struct dtb_opts *o)
     if (o->inherit_uart_parent)
         fdt_prop_u32(f, "interrupt-parent", PH_MIP);
     const uint32_t rp1_ranges[] = {
-        0x00U, 0x00000000U,
-        0x02000000U, 0x1fU, 0x00000000U,
+        0xc0U, 0x40000000U,
+        0x02000000U, 0x00U, 0x00000000U,
         0x00U, 0x00400000U,
     };
     if (o->reorder_props) {
@@ -262,16 +268,16 @@ static void build_rpi5_irq_dtb(struct fdt_buf *f, const struct dtb_opts *o)
         fdt_prop_u32s(f, "ranges", rp1_ranges, 7U);
     }
 
-    /* RP1 UART0 @ offset 0x30000, source 25, level-high (4) */
+    /* RP1 UART0 @ offset 0x30000, source 25, level-high (4), real RPi5 compatible */
     fdt_begin(f, "serial@30000");
     const uint32_t uart_intr[] = { 25U, 4U };
-    const uint32_t uart_reg[] = { 0x00U, 0x00030000U, 0x00U, 0x00000100U };
+    const uint32_t uart_reg[] = { 0xc0U, 0x40030000U, 0x00U, 0x00000100U };
     if (o->reorder_props) {
         fdt_prop_u32s(f, "interrupts", uart_intr, 2U);
         fdt_prop_u32s(f, "reg", uart_reg, 4U);
         if (!o->inherit_uart_parent)
             fdt_prop_u32(f, "interrupt-parent", PH_RP1);
-        fdt_prop(f, "compatible", "arm,pl011", 10U);
+        fdt_prop(f, "compatible", "arm,pl011-axi\0arm,primecell", 28U);
         fdt_prop(f, "status", o->disabled_uart ? "disabled" : "okay",
                  o->disabled_uart ? 9U : 5U);
     } else {
@@ -290,7 +296,7 @@ static void build_rpi5_irq_dtb(struct fdt_buf *f, const struct dtb_opts *o)
         fdt_prop(f, "compatible", "snps,dwc3", 10U);
         fdt_prop(f, "status", "okay", 5U);
         fdt_prop(f, "dr_mode", "host", 5U);
-        const uint32_t u0_reg[] = { 0x00U, 0x00200000U, 0x00U, 0x00100000U };
+        const uint32_t u0_reg[] = { 0xc0U, 0x40200000U, 0x00U, 0x00100000U };
         fdt_prop_u32s(f, "reg", u0_reg, 4U);
         fdt_end(f);
     }
@@ -416,13 +422,13 @@ static void init_fake_hw(void)
     g_hw.rc[0x4034U / 4U] = 16U;            /* 2 GiB */
     g_hw.rc[0x40acU / 4U] = 1U;             /* remap enable */
 
-    /* Endpoint 1de4:0001 rev 2, MEM+BME, BAR0=0x00100004, BAR1=0x00400004 */
+    /* Endpoint 1de4:0001 rev 2, MEM+BME, 32-bit BAR0=0x00100000 at 0x10, 32-bit BAR1=0x00400000 at 0x14 */
     g_hw.ep_cfg[0x00U / 4U] = 0x00011de4U;
     g_hw.ep_cfg[0x04U / 4U] = 0x00100006U;
     g_hw.ep_cfg[0x08U / 4U] = 0x02000002U;
-    g_hw.ep_cfg[0x10U / 4U] = 0x00100004U;
-    g_hw.ep_cfg[0x14U / 4U] = 0x00000000U;
-    g_hw.ep_cfg[0x18U / 4U] = 0x00400004U;
+    g_hw.ep_cfg[0x10U / 4U] = 0x00100000U; /* 32-bit BAR0 */
+    g_hw.ep_cfg[0x14U / 4U] = 0x00400000U; /* 32-bit BAR1 */
+    g_hw.ep_cfg[0x18U / 4U] = 0x00800000U; /* BAR2 (must NOT be read as BAR1!) */
     g_hw.ep_cfg[0x1cU / 4U] = 0x00000000U;
     g_hw.ep_cfg[0x34U / 4U] = 0x50U;
     g_hw.ep_cfg[0x50U / 4U] = (60U << 16) | 0x0011U; /* MSI-X, 61 entries */

@@ -81,7 +81,7 @@ static __attribute__((noreturn)) void dtb_fatal(const char *reason)
     for (;;) __asm__ __volatile__("wfi" ::: "memory");
 }
 
-static void acpi_init_platform(const struct boot_context *handoff)
+static __attribute__((noinline)) void acpi_init_platform(const struct boot_context *handoff)
 {
     struct aarch64_acpi_info acpi;
     if (aarch64_acpi_parse(handoff->firmware.acpi_rsdp,

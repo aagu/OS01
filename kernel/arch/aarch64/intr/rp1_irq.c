@@ -220,11 +220,13 @@ static int fn_takeover_begin(const struct aarch64_rp1_irq_platform *p)
 fail_restore_masks:
     for (uint32_t i = 0U; i < p->bar0.entries && i < AARCH64_RP1_NUM_IRQS; i++) {
         if (s_vec_saved[i]) {
-            (void)table_write_checked(p, tbl_off(i, 3U), s_saved_vec_ctrl[i]);
+            if (table_write_checked(p, tbl_off(i, 3U), s_saved_vec_ctrl[i]) != 0)
+                s_fn_state = RP1_FN_QUARANTINED;
             s_vec_saved[i] = false;
         }
     }
-    (void)cfg_write16_checked(p, ctl_off, s_saved_msg_ctrl);
+    if (cfg_write16_checked(p, ctl_off, s_saved_msg_ctrl) != 0)
+        s_fn_state = RP1_FN_QUARANTINED;
     return -EIO;
 }
 
@@ -288,15 +290,16 @@ static int abort_internal(struct rp1_irq *slot, bool device_mask_verified,
             rp1_masked = true;
     }
 
-    if (slot->mip_route.valid && slot->test_issued &&
-        slot->probe_observed && device_mask_verified) {
+    if (slot->mip_route.valid && gic_disabled && rp1_masked && device_mask_verified) {
         bool pba_pend = true;
-        if (p && pba_read_bit(p, src, &pba_pend) == 0 && !pba_pend &&
-            !bcm2712_mip_pending(&slot->mip_route) &&
-            bcm2712_mip_clear_probe(&slot->mip_route) == 0) {
+        if (slot->test_issued && !slot->probe_observed) {
+            quiescent = false;
+        } else if (p && pba_read_bit(p, src, &pba_pend) == 0 && !pba_pend &&
+                   !bcm2712_mip_pending(&slot->mip_route) &&
+                   bcm2712_mip_clear_probe(&slot->mip_route) == 0) {
             quiescent = true;
         }
-    } else if (!slot->test_issued && device_mask_verified) {
+    } else if (!slot->mip_route.valid && !slot->test_issued && device_mask_verified) {
         quiescent = rp1_masked;
     }
 
@@ -305,14 +308,14 @@ static int abort_internal(struct rp1_irq *slot, bool device_mask_verified,
         if (p && slot->apb_written &&
             apb_write_checked(p, src, slot->saved_apb_cfg) != 0)
             ok = false;
-        if (p && slot->table_written) {
+        if (ok && p && slot->table_written) {
             if (table_write_checked(p, tbl_off(src, 0U), slot->saved_tbl_lo) != 0 ||
                 table_write_checked(p, tbl_off(src, 1U), slot->saved_tbl_hi) != 0 ||
                 table_write_checked(p, tbl_off(src, 2U), slot->saved_tbl_data) != 0 ||
                 table_write_checked(p, tbl_off(src, 3U), slot->saved_tbl_ctrl) != 0)
                 ok = false;
         }
-        if (slot->mip_route.valid &&
+        if (ok && slot->mip_route.valid &&
             bcm2712_mip_release(&slot->mip_route, true) != 0)
             ok = false;
 
@@ -399,8 +402,8 @@ int rp1_irq_prepare(uint32_t source, enum rp1_irq_trigger trigger,
 
     if (!s_has_msi_win) {
         if (aarch64_rp1_msi_window_claim(p, &s_msi_win) != 0) {
-            if (s_fn_state == RP1_FN_PREPARING)
-                (void)fn_takeover_restore(p);
+            if (s_fn_state == RP1_FN_PREPARING && fn_takeover_restore(p) != 0)
+                s_fn_state = RP1_FN_QUARANTINED;
             return -EIO;
         }
         s_has_msi_win = true;

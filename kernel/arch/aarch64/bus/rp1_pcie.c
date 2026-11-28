@@ -179,8 +179,10 @@ int aarch64_rp1_pcie_endpoint(const struct aarch64_rp1_irq_desc *desc,
     uint32_t ep_rev = io->rc_read32(io->ctx, BCM2712_EXT_CFG_DATA + 0x08U);
     uint32_t bar0_lo = io->rc_read32(io->ctx, BCM2712_EXT_CFG_DATA + 0x10U);
     uint32_t bar0_hi = io->rc_read32(io->ctx, BCM2712_EXT_CFG_DATA + 0x14U);
-    uint32_t bar1_lo = io->rc_read32(io->ctx, BCM2712_EXT_CFG_DATA + 0x18U);
-    uint32_t bar1_hi = io->rc_read32(io->ctx, BCM2712_EXT_CFG_DATA + 0x1cU);
+    uint32_t b0t = (bar0_lo >> 1) & 0x3U;
+    uint32_t bar1_off = (b0t == 2U) ? 0x18U : 0x14U;
+    uint32_t bar1_lo = io->rc_read32(io->ctx, BCM2712_EXT_CFG_DATA + bar1_off);
+    uint32_t bar1_hi = io->rc_read32(io->ctx, BCM2712_EXT_CFG_DATA + bar1_off + 4U);
     io->cfg_restore(io->ctx, saved_sel);
 
     if ((ep_id & 0xFFFFU) != RP1_VENDOR_ID ||
@@ -194,7 +196,6 @@ int aarch64_rp1_pcie_endpoint(const struct aarch64_rp1_irq_desc *desc,
         return -EINVAL;
 
     uint64_t bar0_pci = 0ULL, bar1_pci = 0ULL;
-    uint32_t b0t = (bar0_lo >> 1) & 0x3U;
     uint32_t b1t = (bar1_lo >> 1) & 0x3U;
     if (b0t == 0U)
         bar0_pci = (uint64_t)(bar0_lo & ~0xFULL);
@@ -356,7 +357,7 @@ int aarch64_rp1_msi_window_claim(const struct aarch64_rp1_irq_platform *p,
 
         uint64_t pci_base = ((uint64_t)cfg_hi << 32) | (uint64_t)(cfg_lo & ~0xfffU);
         uint64_t cpu_base = ((uint64_t)rmp_hi << 32) | (uint64_t)(rmp_lo & ~0xfffU);
-        if (senc == BCM2712_SIZE_4K && rmp_en &&
+        if (!s_extra_win_quarantined[i] && senc == BCM2712_SIZE_4K && rmp_en &&
             pci_base == target_pci && cpu_base == target_cpu) {
             out->slot = (uint8_t)(4U + i);
             out->valid = true;

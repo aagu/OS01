@@ -67,6 +67,7 @@ class SerialSession:
     def __init__(self, fd: int, log_path: Path):
         self.fd = fd
         self.buf = bytearray()
+        self.cursor = 0
         self.log = log_path.open("wb")
 
     def close(self) -> None:
@@ -78,11 +79,17 @@ class SerialSession:
         self.log.flush()
         os.write(self.fd, data)
 
-    def read_until(self, pattern: str, timeout_s: float) -> tuple[str, re.Match]:
+    def read_until(
+        self, pattern: str, timeout_s: float, flags: int = 0
+    ) -> tuple[str, re.Match]:
         deadline = time.monotonic() + timeout_s
-        rx = re.compile(pattern)
-        collected = []
+        rx = re.compile(pattern, flags)
         while time.monotonic() < deadline:
+            text = self.buf[self.cursor:].decode("utf-8", errors="replace")
+            m = rx.search(text)
+            if m:
+                self.cursor += len(text[: m.end()].encode("utf-8", errors="replace"))
+                return text, m
             rem = max(0.05, deadline - time.monotonic())
             r, _, _ = select.select([self.fd], [], [], rem)
             if r:
@@ -91,11 +98,6 @@ class SerialSession:
                     self.log.write(chunk)
                     self.log.flush()
                     self.buf.extend(chunk)
-                    text = self.buf.decode("utf-8", errors="replace")
-                    m = rx.search(text)
-                    if m:
-                        collected.append(text)
-                        return text, m
         raise TimeoutError(f"Timed out waiting for {pattern!r}")
 
 
@@ -118,13 +120,26 @@ def main() -> int:
             sess.read_until(r"\[rp1-rx\] pre-arm", 30.0)
             sess.send(b"Z")
             sess.read_until(r"PL011 console RX armed via RP1", 10.0)
-            sess.read_until(r"\[rp1-rx\] irq=\d+ irq_bytes=\d+ poll_bytes=0 sample_n=[1-8] sample=.*5a", 15.0)
+            sess.read_until(
+                r"\[rp1-rx\] irq=\d+ irq_bytes=\d+ poll_bytes=0 sample_n=[1-8] sample=.*5a",
+                15.0,
+            )
         else:
             sess.read_until(r"using 100 Hz poll fallback", 30.0)
+
+        # Wait for USB root disk marker & BusyBox shell prompt
+        _, m_disk = sess.read_until(r"\[xhci-msc\] disk=(\S+) rp1-usb", 30.0)
+        disk_name = m_disk.group(1)
+        sess.read_until(r"BusyBox", 30.0)
 
         # Clear any residual pre-arm byte at shell prompt
         sess.send(b"\n")
         time.sleep(0.5)
+
+        _, m0 = sess.read_until(
+            r"\[rp1-rx\] irq=(\d+) irq_bytes=(\d+) poll_bytes=(\d+)", 5.0
+        )
+        prev_irq, prev_ib, prev_pb = int(m0.group(1)), int(m0.group(2)), int(m0.group(3))
 
         for seq in [b"A", b"RP1-BURST-1234567890"]:
             cmd = f"/bin/rp1-irq-probe rx {len(seq)}\n".encode()
@@ -135,13 +150,33 @@ def main() -> int:
             if m.group(1) != seq.hex():
                 raise RuntimeError(f"RX mismatch: got {m.group(1)} expected {seq.hex()}")
 
-        # Idle 3s check & snapshot verification
+        _, m1 = sess.read_until(
+            r"\[rp1-rx\] irq=(\d+) irq_bytes=(\d+) poll_bytes=(\d+)", 5.0
+        )
+        cur_irq, cur_ib, cur_pb = int(m1.group(1)), int(m1.group(2)), int(m1.group(3))
+        if args.mode == "irq":
+            if cur_ib <= prev_ib or cur_pb != 0:
+                raise RuntimeError(f"IRQ byte delta failed: {prev_ib}->{cur_ib}, pb={cur_pb}")
+        else:
+            if cur_irq != 0 or cur_pb <= prev_pb:
+                raise RuntimeError(f"Poll delta failed: irq={cur_irq}, {prev_pb}->{cur_pb}")
+
+        # Idle 3s stability check
         time.sleep(3.0)
-        text, _ = sess.read_until(r"\[rp1-rx\] irq=(\d+) irq_bytes=(\d+) poll_bytes=(\d+)", 5.0)
+        _, m2 = sess.read_until(
+            r"\[rp1-rx\] irq=(\d+) irq_bytes=(\d+) poll_bytes=(\d+)", 5.0
+        )
+        if int(m2.group(1)) != cur_irq or int(m2.group(2)) != cur_ib:
+            if args.mode == "irq":
+                raise RuntimeError("Unexpected IRQ/byte growth while idle")
 
         # USB root device read at LBA 1024
-        sess.send(b"/bin/rp1-irq-probe block /dev/usba 1024\n")
-        _, m = sess.read_until(r"\[rp1-irq-usb-read\] disk=usba .*?RP1-PROBE BLOCK ([0-9a-f]{1024})", 10.0)
+        sess.send(f"/bin/rp1-irq-probe block /dev/{disk_name} 1024\n".encode())
+        _, m = sess.read_until(
+            rf"\[rp1-irq-usb-read\] disk={re.escape(disk_name)} .*?RP1-PROBE BLOCK ([0-9a-f]{{1024}})",
+            10.0,
+            flags=re.DOTALL,
+        )
         if m.group(1) != expected_sec.hex():
             raise RuntimeError("LBA 1024 block mismatch")
         print("[host] PASS")

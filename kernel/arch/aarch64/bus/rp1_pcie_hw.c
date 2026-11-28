@@ -94,8 +94,9 @@ void aarch64_rp1_pcie_prepare(const struct boot_context *ctx)
 
     const struct aarch64_rp1_irq_desc *desc = aarch64_rp1_irq_desc_get();
     const struct boot_rp1_pci_info *pci = boot_context_rp1_pci(ctx);
-    if (!desc || !desc->valid || !pci || pci->entries == 0U ||
-        pci->bar0_size == 0ULL)
+    if (!desc || !desc->valid || desc->rc_reg_size < 0x9004ULL ||
+        desc->rc_reg_size > UINT32_MAX || desc->mip_span > UINT32_MAX ||
+        !pci || pci->entries == 0U || pci->bar0_size == 0ULL)
         return;
 
     struct aarch64_boot_mmio_ctx mmio_ctx;
@@ -143,10 +144,13 @@ void aarch64_rp1_pcie_prepare(const struct boot_context *ctx)
 
     uint64_t table_span = (uint64_t)pci->entries * 16ULL;
     uint64_t pba_span = ((uint64_t)(pci->entries + 63U) / 64ULL) * 8ULL;
-    if ((uint64_t)pci->table_offset > pci->bar0_size ||
+    if (pci->bar0_pci > UINT64_MAX - pci->bar0_size ||
+        (uint64_t)pci->table_offset > pci->bar0_size ||
         table_span > pci->bar0_size - pci->table_offset ||
         (uint64_t)pci->pba_offset > pci->bar0_size ||
         pba_span > pci->bar0_size - pci->pba_offset ||
+        ((uint64_t)pci->table_offset + table_span > (uint64_t)pci->pba_offset &&
+         (uint64_t)pci->pba_offset + pba_span > (uint64_t)pci->table_offset) ||
         pci->bar0_pci + pci->bar0_size > ep.outbound_pci_base + ep.outbound_size)
         return;
 
