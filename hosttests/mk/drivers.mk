@@ -626,6 +626,30 @@ LINK_GROUP_rp1-xhci := \
     $(TEST_BLD)/rp1_pcie_production.o \
     $(LIBC_OBJS)
 
+.PHONY: test-aarch64-rp1-xhci
+test-aarch64-rp1-xhci: $(TEST_BLD)/test_aarch64_rp1_xhci.elf
+	$<
+
+$(TEST_BLD)/rp1_pcie_hw_production.o: \
+		$(TESTS_DIR)/kernel/arch/aarch64/bus/rp1_pcie_hw.c \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/rp1_pcie.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/rp1_xhci.h \
+		$(TESTS_DIR)/kernel/include/arch/aarch64/boot_mmio.h \
+		$(TESTS_DIR)/kernel/include/core/bootinfo.h
+	@mkdir -p $(TEST_BLD)
+	$(HOST_CC) $(XHCI_HOST_CFLAGS) -c $< -o $@
+
+LINK_CFLAGS_rp1-topology = $(XHCI_HOST_CFLAGS)
+LINK_GROUP_rp1-topology := \
+    $(TEST_BLD)/dtb_parse_rp1_production.o \
+    $(TEST_BLD)/rp1_pcie_production.o \
+    $(TEST_BLD)/rp1_pcie_hw_production.o \
+    $(LIBC_OBJS)
+
+.PHONY: test-aarch64-rp1-topology
+test-aarch64-rp1-topology: $(TEST_BLD)/test_aarch64_rp1_topology.elf
+	$<
+
 
 
 

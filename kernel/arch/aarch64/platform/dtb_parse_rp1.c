@@ -1,5 +1,6 @@
-/* kernel/arch/aarch64/platform/dtb_parse_rp1.c — Bounded FDT v17 parser for RPi5 RP1 xHCI */
+/* kernel/arch/aarch64/platform/dtb_parse_rp1.c — Bounded FDT v17 parser for RPi5 RP1 xHCI & IRQ */
 #include <arch/aarch64/rp1_xhci.h>
+#include <arch/aarch64/rp1_pcie.h>
 #include <arch/aarch64/fdt_address.h>
 #include <errno.h>
 #include <stddef.h>
@@ -288,6 +289,403 @@ int aarch64_dtb_parse_rp1_xhci(const void *blob, uint32_t size,
     out->controller_count = slot_count;
     for (uint32_t i = 0U; i < slot_count; i++)
         out->controllers[i] = slots[i];
+    return 0;
+
+invalid:
+    memset(out, 0, sizeof(*out));
+    return -EINVAL;
+}
+
+/* ── Independent RP1 / BCM2712 MIP / UART0 IRQ topology parser ────────── */
+struct irq_fdt_frame {
+    uint64_t bus_cpu_base;
+    uint32_t reg_off, reg_len;
+    uint32_t ranges_off, ranges_len;
+    uint32_t intr_off, intr_len;
+    uint32_t phandle;
+    uint32_t intr_parent;
+    uint32_t eff_intr_parent;
+    uint32_t msi_parent;
+    uint64_t msi_pci_addr;
+    uint32_t msi_base_spi;
+    uint32_t msi_num_spis;
+    uint32_t msi_offset;
+    uint64_t rp1_child_base;
+    uint64_t rp1_parent_cpu_base;
+    uint64_t rc_reg_base, rc_reg_size;
+    uint8_t addr_cells;
+    uint8_t size_cells;
+    uint16_t flags;
+};
+
+#define IRQ_F_STATUS_SEEN    (1U << 0)
+#define IRQ_F_STATUS_OK      (1U << 1)
+#define IRQ_F_HAS_REG        (1U << 2)
+#define IRQ_F_HAS_RANGES     (1U << 3)
+#define IRQ_F_HAS_BUS_OFF    (1U << 4)
+#define IRQ_F_HAS_INTR_PAR   (1U << 5)
+#define IRQ_F_HAS_MSI_PAR    (1U << 6)
+#define IRQ_F_HAS_MSI_ADDR   (1U << 7)
+#define IRQ_F_HAS_MSI_BASE   (1U << 8)
+#define IRQ_F_HAS_MSI_COUNT  (1U << 9)
+#define IRQ_F_IS_GIC         (1U << 10)
+#define IRQ_F_IS_MIP         (1U << 11)
+#define IRQ_F_IS_PCIE        (1U << 12)
+#define IRQ_F_IS_RP1         (1U << 13)
+#define IRQ_F_IS_UART        (1U << 14)
+#define IRQ_F_HAS_INTR       (1U << 15)
+
+struct irq_mip_cand {
+    bool valid;
+    uint32_t phandle;
+    uint32_t intr_parent;
+    uint64_t cpu_pa;
+    uint64_t span;
+    uint64_t msi_pci_addr;
+    uint32_t base_spi;
+    uint32_t count;
+    uint32_t offset;
+};
+
+static uint64_t irq_translate_bus(const struct irq_fdt_frame *stack, int depth, uint64_t addr)
+{
+    for (int d = depth - 1; d >= 0; d--) {
+        if ((stack[d].flags & IRQ_F_HAS_BUS_OFF) != 0U)
+            addr += stack[d].bus_cpu_base;
+    }
+    return addr;
+}
+
+static bool irq_frame_enabled(const struct irq_fdt_frame *f)
+{
+    return (f->flags & IRQ_F_STATUS_SEEN) == 0U ||
+           (f->flags & IRQ_F_STATUS_OK) != 0U;
+}
+
+int aarch64_dtb_parse_rp1_irq(const void *blob, uint32_t size,
+                              uint64_t selected_gicd, uint64_t console_pa,
+                              struct aarch64_rp1_irq_desc *out)
+{
+    if (!out)
+        return -EINVAL;
+    memset(out, 0, sizeof(*out));
+    if (!blob || size < 40U || selected_gicd == 0ULL)
+        return -EINVAL;
+
+    const uint8_t *b = (const uint8_t *)blob;
+    if (aarch64_fdt_be32(b + 0U) != FDT_MAGIC)
+        return -EINVAL;
+    uint32_t totalsize = aarch64_fdt_be32(b + 4U);
+    uint32_t off_struct = aarch64_fdt_be32(b + 8U);
+    uint32_t off_strings = aarch64_fdt_be32(b + 12U);
+    uint32_t sz_strings = aarch64_fdt_be32(b + 32U);
+    uint32_t sz_struct = aarch64_fdt_be32(b + 36U);
+    if (totalsize > size || totalsize < 40U ||
+        off_struct > totalsize || sz_struct > totalsize - off_struct ||
+        off_strings > totalsize || sz_strings > totalsize - off_strings)
+        return -EINVAL;
+
+    struct irq_fdt_frame stack[MAX_DEPTH];
+    memset(stack, 0, sizeof(stack));
+    int depth = -1;
+    bool board_ok = false;
+    uint32_t gic_phandle = 0U;
+
+    struct irq_mip_cand mips[4];
+    memset(mips, 0, sizeof(mips));
+    uint32_t mip_count = 0U;
+
+    bool have_rp1 = false;
+    bool ambiguous_rp1 = false;
+    uint32_t sel_msi_parent = 0U;
+    uint64_t sel_rc_base = 0ULL, sel_rc_size = 0ULL;
+    uint64_t sel_rp1_child_base = 0ULL;
+    bool sel_uart_valid = false;
+    uint32_t sel_uart_source = 0U;
+    uint64_t sel_uart_offset = 0ULL;
+
+    /* Per-RP1 candidate state (reset when exiting rp1 node). */
+    bool cur_rp1_uart_valid = false;
+    uint32_t cur_rp1_uart_source = 0U;
+    uint64_t cur_rp1_uart_offset = 0ULL;
+
+    uint32_t pos = off_struct;
+    uint32_t end = off_struct + sz_struct;
+    while (pos + 4U <= end) {
+        uint32_t tok = aarch64_fdt_be32(b + pos);
+        pos += 4U;
+        if (tok == FDT_NOP)
+            continue;
+        if (tok == FDT_END)
+            break;
+        if (tok == FDT_BEGIN_NODE) {
+            const char *name = (const char *)(b + pos);
+            uint32_t nlen = 0U;
+            while (pos + nlen < end && name[nlen] != '\0')
+                nlen++;
+            if (pos + nlen >= end)
+                goto invalid;
+            pos += ((nlen + 1U) + 3U) & ~3U;
+
+            depth++;
+            if (depth >= (int)MAX_DEPTH)
+                goto invalid;
+            memset(&stack[depth], 0, sizeof(stack[depth]));
+            stack[depth].addr_cells = 2U;
+            stack[depth].size_cells = 1U;
+            if (depth > 0) {
+                struct irq_fdt_frame *par = &stack[depth - 1];
+                if ((par->flags & IRQ_F_HAS_RANGES) != 0U) {
+                    if ((par->flags & IRQ_F_IS_RP1) != 0U && depth >= 2) {
+                        uint32_t cac = par->addr_cells;
+                        uint32_t pac = stack[depth - 2].addr_cells;
+                        uint32_t csc = par->size_cells;
+                        uint32_t entry_cells = cac + pac + csc;
+                        if (pac == 3U && par->ranges_len >= entry_cells * 4U &&
+                            (par->ranges_len % (entry_cells * 4U)) == 0U) {
+                            const uint8_t *rp = b + par->ranges_off;
+                            uint64_t cbase = 0ULL, pbase = 0ULL;
+                            if (rp1_read_cells(rp, cac, &cbase) &&
+                                rp1_read_cells(rp + (cac + 1U) * 4U, 2U, &pbase)) {
+                                par->rp1_child_base = cbase;
+                                par->rp1_parent_cpu_base = pbase;
+                            }
+                        }
+                    } else if (depth >= 2 && (par->flags & IRQ_F_IS_PCIE) == 0U) {
+                        uint32_t cac = par->addr_cells;
+                        uint32_t pac = stack[depth - 2].addr_cells;
+                        uint32_t csc = par->size_cells;
+                        if (par->ranges_len >= (cac + pac + csc) * 4U) {
+                            const uint8_t *rp = b + par->ranges_off;
+                            uint64_t c = 0ULL, p = 0ULL;
+                            if (rp1_read_cells(rp, cac, &c) &&
+                                rp1_read_cells(rp + cac * 4U, pac, &p) && p >= c) {
+                                par->bus_cpu_base = p - c;
+                                par->flags |= IRQ_F_HAS_BUS_OFF;
+                            }
+                        }
+                    }
+                }
+                stack[depth].eff_intr_parent = stack[depth - 1].eff_intr_parent;
+                if ((stack[depth - 1].flags & IRQ_F_IS_PCIE) != 0U &&
+                    name[0] == 'r' && name[1] == 'p' && name[2] == '1') {
+                    stack[depth].flags |= IRQ_F_IS_RP1;
+                    cur_rp1_uart_valid = false;
+                    cur_rp1_uart_source = 0U;
+                    cur_rp1_uart_offset = 0ULL;
+                }
+            }
+            continue;
+        }
+        if (tok == FDT_END_NODE) {
+            if (depth < 0)
+                goto invalid;
+            struct irq_fdt_frame *cur = &stack[depth];
+
+            if ((cur->flags & IRQ_F_IS_GIC) != 0U && irq_frame_enabled(cur) &&
+                (cur->flags & IRQ_F_HAS_REG) != 0U && depth > 0 && cur->phandle != 0U) {
+                uint32_t pac = stack[depth - 1].addr_cells;
+                uint32_t psc = stack[depth - 1].size_cells;
+                uint64_t gbase = 0ULL, gsize = 0ULL;
+                if (cur->reg_len >= (pac + psc) * 4U &&
+                    rp1_read_cells(b + cur->reg_off, pac, &gbase) &&
+                    rp1_read_cells(b + cur->reg_off + pac * 4U, psc, &gsize) &&
+                    gsize > 0ULL) {
+                    if (irq_translate_bus(stack, depth, gbase) == selected_gicd)
+                        gic_phandle = cur->phandle;
+                }
+            } else if ((cur->flags & IRQ_F_IS_MIP) != 0U && irq_frame_enabled(cur) &&
+                       (cur->flags & IRQ_F_HAS_REG) != 0U && depth > 0 &&
+                       cur->phandle != 0U &&
+                       (cur->flags & IRQ_F_HAS_MSI_ADDR) != 0U &&
+                       (cur->flags & IRQ_F_HAS_MSI_BASE) != 0U &&
+                       (cur->flags & IRQ_F_HAS_MSI_COUNT) != 0U) {
+                uint32_t pac = stack[depth - 1].addr_cells;
+                uint32_t psc = stack[depth - 1].size_cells;
+                uint64_t mbase = 0ULL, msize = 0ULL;
+                if (cur->reg_len >= (pac + psc) * 4U &&
+                    rp1_read_cells(b + cur->reg_off, pac, &mbase) &&
+                    rp1_read_cells(b + cur->reg_off + pac * 4U, psc, &msize) &&
+                    msize >= 0xc0ULL && mip_count < 4U) {
+                    mips[mip_count++] = (struct irq_mip_cand){
+                        .valid = true,
+                        .phandle = cur->phandle,
+                        .intr_parent = cur->eff_intr_parent,
+                        .cpu_pa = irq_translate_bus(stack, depth, mbase),
+                        .span = msize,
+                        .msi_pci_addr = cur->msi_pci_addr,
+                        .base_spi = cur->msi_base_spi,
+                        .count = cur->msi_num_spis,
+                        .offset = cur->msi_offset,
+                    };
+                }
+            } else if ((cur->flags & IRQ_F_IS_UART) != 0U && depth > 0 &&
+                       (stack[depth - 1].flags & IRQ_F_IS_RP1) != 0U) {
+                const struct irq_fdt_frame *rp1 = &stack[depth - 1];
+                if ((cur->flags & IRQ_F_HAS_REG) != 0U &&
+                    (cur->flags & IRQ_F_HAS_INTR) != 0U &&
+                    (rp1->flags & IRQ_F_HAS_RANGES) != 0U &&
+                    rp1->phandle != 0U &&
+                    cur->eff_intr_parent == rp1->phandle &&
+                    cur->intr_len == 8U) {
+                    uint32_t pac = rp1->addr_cells;
+                    uint32_t psc = rp1->size_cells;
+                    uint64_t ubase = 0ULL, usize = 0ULL;
+                    if (cur->reg_len >= (pac + psc) * 4U &&
+                        rp1_read_cells(b + cur->reg_off, pac, &ubase) &&
+                        rp1_read_cells(b + cur->reg_off + pac * 4U, psc, &usize) &&
+                        usize > 0ULL && ubase >= rp1->rp1_child_base) {
+                        uint64_t uoff = ubase - rp1->rp1_child_base;
+                        uint64_t cpu_pa = rp1->rp1_parent_cpu_base + uoff;
+                        uint32_t src = aarch64_fdt_be32(b + cur->intr_off);
+                        uint32_t typ = aarch64_fdt_be32(b + cur->intr_off + 4U);
+                        if (typ == 4U && src < AARCH64_RP1_NUM_IRQS &&
+                            console_pa != 0ULL && cpu_pa == console_pa) {
+                            cur_rp1_uart_valid = true;
+                            cur_rp1_uart_source = src;
+                            cur_rp1_uart_offset = uoff;
+                        }
+                    }
+                }
+            } else if ((cur->flags & IRQ_F_IS_RP1) != 0U && irq_frame_enabled(cur) &&
+                       depth >= 2 && (stack[depth - 1].flags & IRQ_F_IS_PCIE) != 0U &&
+                       irq_frame_enabled(&stack[depth - 1])) {
+                const struct irq_fdt_frame *rc = &stack[depth - 1];
+                if ((cur->flags & IRQ_F_HAS_RANGES) != 0U &&
+                    (rc->flags & IRQ_F_HAS_REG) != 0U &&
+                    (rc->flags & IRQ_F_HAS_MSI_PAR) != 0U) {
+                    uint32_t pac = stack[depth - 2].addr_cells;
+                    uint32_t psc = stack[depth - 2].size_cells;
+                    uint64_t rbase = 0ULL, rsize = 0ULL;
+                    if (rc->reg_len >= (pac + psc) * 4U &&
+                        rp1_read_cells(b + rc->reg_off, pac, &rbase) &&
+                        rp1_read_cells(b + rc->reg_off + pac * 4U, psc, &rsize) &&
+                        rsize > 0ULL) {
+                        if (have_rp1) {
+                            ambiguous_rp1 = true;
+                        } else {
+                            have_rp1 = true;
+                            sel_msi_parent = rc->msi_parent;
+                            sel_rc_base = irq_translate_bus(stack, depth - 1, rbase);
+                            sel_rc_size = rsize;
+                            sel_rp1_child_base = cur->rp1_child_base;
+                            sel_uart_valid = cur_rp1_uart_valid;
+                            sel_uart_source = cur_rp1_uart_source;
+                            sel_uart_offset = cur_rp1_uart_offset;
+                        }
+                    }
+                }
+            }
+            depth--;
+            continue;
+        }
+        if (tok == FDT_PROP) {
+            if (pos + 8U > end || depth < 0)
+                goto invalid;
+            uint32_t plen = aarch64_fdt_be32(b + pos);
+            uint32_t soff = aarch64_fdt_be32(b + pos + 4U);
+            pos += 8U;
+            if (soff >= sz_strings || pos + plen > end)
+                goto invalid;
+            const char *pname = (const char *)(b + off_strings + soff);
+            const uint8_t *pval = b + pos;
+            pos += (plen + 3U) & ~3U;
+
+            struct irq_fdt_frame *cur = &stack[depth];
+            if (rp1_str_eq(pname, "#address-cells") && plen == 4U) {
+                cur->addr_cells = (uint8_t)aarch64_fdt_be32(pval);
+            } else if (rp1_str_eq(pname, "#size-cells") && plen == 4U) {
+                cur->size_cells = (uint8_t)aarch64_fdt_be32(pval);
+            } else if (rp1_str_eq(pname, "compatible")) {
+                if (depth == 0 && rp1_compat_has(pval, plen, "raspberrypi,5-model-b"))
+                    board_ok = true;
+                if (rp1_compat_has(pval, plen, "arm,gic-400") ||
+                    rp1_compat_has(pval, plen, "arm,cortex-a15-gic") ||
+                    rp1_compat_has(pval, plen, "arm,gic-v2"))
+                    cur->flags |= IRQ_F_IS_GIC;
+                if (rp1_compat_has(pval, plen, "brcm,bcm2712-mip-intc"))
+                    cur->flags |= IRQ_F_IS_MIP;
+                if (rp1_compat_has(pval, plen, "brcm,bcm2712-pcie"))
+                    cur->flags |= IRQ_F_IS_PCIE;
+                if (rp1_compat_has(pval, plen, "arm,pl011"))
+                    cur->flags |= IRQ_F_IS_UART;
+            } else if (rp1_str_eq(pname, "status") && plen > 0U) {
+                cur->flags |= IRQ_F_STATUS_SEEN;
+                if (rp1_str_eq((const char *)pval, "okay") ||
+                    rp1_str_eq((const char *)pval, "ok"))
+                    cur->flags |= IRQ_F_STATUS_OK;
+            } else if ((rp1_str_eq(pname, "phandle") || rp1_str_eq(pname, "linux,phandle")) &&
+                       plen == 4U) {
+                cur->phandle = aarch64_fdt_be32(pval);
+            } else if (rp1_str_eq(pname, "interrupt-parent") && plen == 4U) {
+                cur->intr_parent = aarch64_fdt_be32(pval);
+                cur->eff_intr_parent = cur->intr_parent;
+                cur->flags |= IRQ_F_HAS_INTR_PAR;
+            } else if (rp1_str_eq(pname, "msi-parent") && plen == 4U) {
+                cur->msi_parent = aarch64_fdt_be32(pval);
+                cur->flags |= IRQ_F_HAS_MSI_PAR;
+            } else if (rp1_str_eq(pname, "reg")) {
+                cur->reg_off = (uint32_t)(pval - b);
+                cur->reg_len = plen;
+                cur->flags |= IRQ_F_HAS_REG;
+            } else if (rp1_str_eq(pname, "interrupts")) {
+                cur->intr_off = (uint32_t)(pval - b);
+                cur->intr_len = plen;
+                cur->flags |= IRQ_F_HAS_INTR;
+            } else if (rp1_str_eq(pname, "brcm,msi-pci-addr") && plen == 8U) {
+                cur->msi_pci_addr = ((uint64_t)aarch64_fdt_be32(pval) << 32) |
+                                    (uint64_t)aarch64_fdt_be32(pval + 4U);
+                cur->flags |= IRQ_F_HAS_MSI_ADDR;
+            } else if (rp1_str_eq(pname, "brcm,msi-base-spi") && plen == 4U) {
+                cur->msi_base_spi = aarch64_fdt_be32(pval);
+                cur->flags |= IRQ_F_HAS_MSI_BASE;
+            } else if (rp1_str_eq(pname, "brcm,msi-num-spis") && plen == 4U) {
+                cur->msi_num_spis = aarch64_fdt_be32(pval);
+                cur->flags |= IRQ_F_HAS_MSI_COUNT;
+            } else if (rp1_str_eq(pname, "brcm,msi-offset") && plen == 4U) {
+                cur->msi_offset = aarch64_fdt_be32(pval);
+            } else if (rp1_str_eq(pname, "ranges")) {
+                cur->ranges_off = (uint32_t)(pval - b);
+                cur->ranges_len = plen;
+                cur->flags |= IRQ_F_HAS_RANGES;
+            }
+            continue;
+        }
+        goto invalid;
+    }
+
+    if (!board_ok || !have_rp1 || ambiguous_rp1 || gic_phandle == 0U)
+        return -ENODEV;
+
+    const struct irq_mip_cand *matched_mip = NULL;
+    for (uint32_t i = 0U; i < mip_count; i++) {
+        if (mips[i].valid && mips[i].phandle == sel_msi_parent) {
+            if (matched_mip != NULL)
+                return -EINVAL;
+            matched_mip = &mips[i];
+        }
+    }
+    if (!matched_mip || matched_mip->intr_parent != gic_phandle)
+        return -ENODEV;
+    if (matched_mip->count == 0U || matched_mip->offset >= 64U ||
+        matched_mip->count > 64U - matched_mip->offset)
+        return -EINVAL;
+    if ((uint64_t)matched_mip->base_spi + matched_mip->offset + matched_mip->count > 1020ULL - 32ULL)
+        return -EINVAL;
+
+    out->rc_reg_base = sel_rc_base;
+    out->rc_reg_size = sel_rc_size;
+    out->rp1_child_base = sel_rp1_child_base;
+    out->mip_cpu_pa = matched_mip->cpu_pa;
+    out->mip_span = matched_mip->span;
+    out->msi_pci_addr = matched_mip->msi_pci_addr;
+    out->base_spi = matched_mip->base_spi;
+    out->count = matched_mip->count;
+    out->offset = matched_mip->offset;
+    out->uart_valid = sel_uart_valid;
+    out->uart_source = sel_uart_source;
+    out->uart_offset = sel_uart_offset;
+    out->valid = true;
     return 0;
 
 invalid:

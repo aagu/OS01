@@ -9,6 +9,7 @@
 #include <arch/aarch64/virtio_mmio.h>  // aarch64_virtio_mmio_prepare
 #include <arch/aarch64/pcie.h>         // aarch64_pcie_prepare
 #include <arch/aarch64/rp1_xhci.h>     // aarch64_rp1_xhci_prepare
+#include <arch/aarch64/rp1_pcie.h>     // aarch64_rp1_pcie_prepare
 #include <arch/aarch64/page_table_selftest.h>
 #include <core/bootinfo.h>
 #include <log/log.h>      /* for log_err/log_info macros */
@@ -691,6 +692,7 @@ void arch_boot_controllers(const struct boot_context *bootctx)
         }
     }
     (void)aarch64_pcie_prepare(bootctx);
+    aarch64_rp1_pcie_prepare(bootctx);
     (void)aarch64_rp1_xhci_prepare(bootctx);
     if ((bootctx->flags & BOOT_CONTEXT_HAS_EARLY_MMIO) != 0u &&
         bootctx->early_mmio.reserved != 0u) {

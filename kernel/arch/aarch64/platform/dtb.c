@@ -3,6 +3,7 @@
 #include <arch/aarch64/dtb.h>
 #include <arch/aarch64/pcie.h>
 #include <arch/aarch64/rp1_xhci.h>
+#include <arch/aarch64/rp1_pcie.h>
 #include <arch/aarch64/device_window.h>
 #include <arch/aarch64/handoff_layout.h>
 #include <arch/cpu.h>
@@ -18,6 +19,7 @@ _Static_assert(AARCH64_BOOT_MAX_CPUS == NR_CPUS, "DTB/CPU capacity mismatch");
 static struct aarch64_platform_info platform;
 static struct aarch64_pcie_topology s_pcie_topology;
 static struct aarch64_rp1_xhci_desc s_rp1_xhci_desc;
+static struct aarch64_rp1_irq_desc s_rp1_irq_desc;
 
 const struct aarch64_pcie_topology *aarch64_pcie_topology_get(void)
 {
@@ -27,6 +29,11 @@ const struct aarch64_pcie_topology *aarch64_pcie_topology_get(void)
 const struct aarch64_rp1_xhci_desc *aarch64_rp1_xhci_desc_get(void)
 {
     return &s_rp1_xhci_desc;
+}
+
+const struct aarch64_rp1_irq_desc *aarch64_rp1_irq_desc_get(void)
+{
+    return &s_rp1_irq_desc;
 }
 
 const struct aarch64_topology *dtb_topology(void) { return &platform.topology; }
@@ -183,6 +190,12 @@ void dtb_init(const struct boot_context *handoff)
     if (aarch64_dtb_parse_rp1_xhci(b, size, &s_rp1_xhci_desc) < 0) {
         for (uint32_t i = 0; i < sizeof(s_rp1_xhci_desc); ++i)
             ((volatile uint8_t *)&s_rp1_xhci_desc)[i] = 0;
+    }
+    if (aarch64_dtb_parse_rp1_irq(b, size, platform.gicd_base,
+                                  aarch64_boot_early_console_pa(),
+                                  &s_rp1_irq_desc) < 0) {
+        for (uint32_t i = 0; i < sizeof(s_rp1_irq_desc); ++i)
+            ((volatile uint8_t *)&s_rp1_irq_desc)[i] = 0;
     }
     kputs("[dtb] /cpus: ");
     kputu(platform.topology.cpu_count);

@@ -1372,6 +1372,19 @@
       }
     },
     {
+      "id": "test_aarch64_rp1_topology",
+      "layer": "host",
+      "subsystem": "drivers",
+      "timing": "strict",
+      "tier": "nightly",
+      "isolation": "none",
+      "scenarios": [
+        "drivers.irq.aarch64.rp1_topology"
+      ],
+      "link": "rp1-topology",
+      "source": "hosttests/cases/test_aarch64_rp1_topology.c"
+    },
+    {
       "id": "test_aarch64_rp1_xhci",
       "layer": "host",
       "subsystem": "drivers",
