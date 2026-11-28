@@ -70,7 +70,7 @@
 | 项 | 内容 | 状态 |
 |----|------|------|
 | 4 核 SMP / AP 启动实测 | RPi5 4 核 PSCI SMP 与 `SHOOTDOWN-PROBE: OK`（经 `config.txt` `platform rpi5` 传递 `0x2000000000` 探测 PA）已于 2026-11-28 在真机实测通过：`requested=4 online=4 status=PASS`、`spinlock`、`clocksource`、`cntp`、`IRQ` 均通过 | ✅ **RPi5 4 核 SMP 已实测通过** |
-| RPi5 显示分辨率与串口 RX | 真机 UEFI GOP 仅由 TF 卡 VideoCore `config.txt` 控制（实测 `[logo] boot logo drawn (aarch64, 1920x1080)`）；DTB 中 PL011 `spi=0`，控制台 RX IRQ 未武装（`PL011 console RX IRQ not armed (intid=0)`） | ⚠️ **已知边界**（分辨率需改 TF 卡 VideoCore `config.txt`；串口交互需轮询或后续接入 RP1/PL011 中断） |
+| RPi5 显示分辨率与串口 RX | 真机 UEFI GOP 仅由 TF 卡 VideoCore `config.txt` 控制（实测 `[logo] boot logo drawn (aarch64, 1920x1080)`）；RP1 MSI-X + BCM2712 MIP 控制台 RX 中断通路已落地并通过宿主/QEMU 回归（`docs/testing/aarch64-rp1-irq.md`），真机板测待执行 | ⚠️ **已知边界 / 真机待测**（分辨率需改 TF 卡 VideoCore `config.txt`；RP1 串口 RX 中断待上板跑 `tools/tests/aarch64_rp1_irq_board.py` 实测） |
 
 **平台能力上限（非阻断，选型需知）**：PA 上限 40-bit/1 TiB（`kernel/arch/aarch64/head.S:252-268` TCR IPS=0b010、`kernel/arch/aarch64/memory/page_table.c:51`，未实现 `ID_AA64MMFR0_EL1.PARange` 动态探测）；早期 identity map 默认 [0x0, 0x80000000)，`AARCH64_BOOT_BLOCK_BASE >= 0x80000000` 时扩展为 [0x0, 0xC0000000)。
 
@@ -145,6 +145,11 @@
 ## Parked（未闭环 follow-on，随时可拾起）
 
 当前仍挂起项（均不阻塞主线）：
+
+- **aarch64 RP1 MSI-X / 控制台 RX 中断评审 deferred minors（2026-11-28）**：
+  - `kernel/arch/x86_64/mm/kasan_boot.c`：x86_64 既有文件（本分支未改动）。
+  - `aarch64` 既有函数栈帧超 512 B：`aarch64_pcie_prepare`（896 B）与 `aarch64_uart_select_from_handoff`（608 B）在 `aarch64-clang` `kernel.elf` 上超出 `qemutests/stack_frame_audit.py` 512 B 上限（源自 `master` 既有实现，未纳入 `BASELINE_EXCEPTIONS`，本分支未引入；`dtb_init` 已压回 `720 B <= 768 B` 基线）。
+  - RPi5 真机板测（`待测`）：需基于最新提交重编 `/tmp/os01-rp1-irq-board` 与 `/tmp/os01-rp1-poll-board` 诊断镜像，并在树莓派 5 实机执行 `tools/tests/aarch64_rp1_irq_board.py` 采集实机证据（详见 `docs/testing/aarch64-rp1-irq.md`）。
 
 - **中断/异常 dispatch 第一期遗留（2026-10-24）**：
   - **host 测试补强（非阻断）**：decoder 表行名用于失败诊断；增加 x86 CPL0 + U/S=1 仍判 KERNEL、ARM OTHER EC 的无效 FAR 断言；ARM backend 有效 FAR 用例补齐地址/有效位；dispatcher 的 x86 host 现场假设与 `memcmp(pt_regs_t)` 布局假设显式化，注明 longjmp 用例无法观察跳转后的清理；x86 backend 删除 reset 后才断言零计数的空检查；ARM backend RED 证据可补有意破坏断言的 mutation。
