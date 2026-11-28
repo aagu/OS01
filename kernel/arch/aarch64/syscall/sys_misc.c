@@ -50,14 +50,31 @@ int64_t sys_misc_dispatch(syscall_ctx_t *ctx)
         if (len > RANDOM_MAX_LEN)
             len = RANDOM_MAX_LEN;                             // truncate, not error
 
-        int rc = uaccess_user_write_begin(addr, (size_t)len);
+        int rc = syscall_prepare_user_write(addr, (size_t)len);
         if (rc < 0) {                                         // -EFAULT
             syscall_result = rc;
             break;
         }
-        get_random_bytes((void *)(uintptr_t)addr, len);
-        uaccess_user_write_end();
-        syscall_result = (int64_t)len;
+        /* Fill a kernel bounce buffer and copy via copy_to_user_ft() (STTRB)
+         * so ARMv8.1-PAN (PSTATE.PAN=1) never faults on direct EL1 stores. */
+        uint8_t kbuf[256];
+        uint64_t off = 0;
+        while (off < len) {
+            size_t chunk = (size_t)(len - off);
+            if (chunk > sizeof(kbuf))
+                chunk = sizeof(kbuf);
+            get_random_bytes(kbuf, chunk);
+            ssize_t wr = copy_to_user_ft((void *)(uintptr_t)(addr + off),
+                                         kbuf, chunk);
+            if (wr < 0) {
+                syscall_result = wr;
+                break;
+            }
+            off += chunk;
+        }
+        memset(kbuf, 0, sizeof(kbuf));
+        if (off == len)
+            syscall_result = (int64_t)len;
         break;
     }
     case SYS_sync: {
